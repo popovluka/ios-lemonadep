@@ -1,0 +1,149 @@
+name: lemonadep
+
+# OnePlus 9 Pro (SM8350) port: kernel = sweet patch series + lemonadep overlay
+# (lemonadep/xnu/patches, applied after 0081), shim = shim/ with BOARD=lemonadep.
+# Mirrors xnu.yml; the sweet workflow is unchanged.
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_kernel:
+        description: Build XNU (macOS runner, ~1 h)
+        type: boolean
+        default: false
+      macos_version:
+        description: macOS release whose xnu to build (13.5 = xnu-8796, iOS 16 era)
+        default: "13.5"
+      kernel_config:
+        description: RELEASE / DEVELOPMENT / DEBUG
+        default: DEVELOPMENT
+      keep_going:
+        description: make -k (collect all compile errors in one run)
+        default: "true"
+      os_version:
+        description: boot.img os_version copied from the stock lemonadep boot.img (empty = Image only)
+        default: ""
+      os_patch_level:
+        description: boot.img os_patch_level (YYYY-MM) from the stock boot.img
+        default: ""
+  push:
+    branches: [main, lemonadep]
+    paths:
+      - "shim/**"
+      - "tools/mkadt.py"
+      - "tools/adt.py"
+      - "lemonadep/**"
+      - ".github/workflows/lemonadep.yml"
+
+concurrency:
+  group: lemonadep-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DXB_REPO: https://github.com/blacktop/darwin-xnu-build
+  DXB_SHA: 663906528d1cd5ea8fde7de6f16de73db9511549
+  # AOSP system/tools/mkbootimg, tag android-14.0.0_r1
+  MKBOOTIMG_REPO: https://android.googlesource.com/platform/system/tools/mkbootimg
+  MKBOOTIMG_SHA: 028bdc06ce87ab1ee23204feb5cd5ee406484618
+  MACOS_VERSION: ${{ inputs.macos_version || '13.5' }}
+  KERNEL_CONFIG: ${{ inputs.kernel_config || 'DEVELOPMENT' }}
+  MACHINE_CONFIG: SWEET
+
+jobs:
+  shim:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu device-tree-compiler cpio
+          git init -q "$RUNNER_TEMP/mkbootimg"
+          git -C "$RUNNER_TEMP/mkbootimg" fetch -q --depth 1 "$MKBOOTIMG_REPO" "$MKBOOTIMG_SHA"
+          git -C "$RUNNER_TEMP/mkbootimg" checkout -q FETCH_HEAD
+
+      - name: Host tests (payload scan, FDT walk, ADT patch)
+        run: bash shim/host_tests.sh
+
+      - name: Build lemonadep shim
+        env:
+          BOARD: lemonadep
+          MKBOOTIMG: python3 ${{ runner.temp }}/mkbootimg/mkbootimg.py
+          OS_VERSION: ${{ inputs.os_version }}
+          OS_PATCH_LEVEL: ${{ inputs.os_patch_level }}
+        run: |
+          if [ -z "$OS_VERSION" ] || [ -z "$OS_PATCH_LEVEL" ]; then export PACK=0; fi
+          bash shim/build.sh
+          if [ -f shim/out/lemonadep/shim-boot-lemonadep.img ]; then
+            python3 "$RUNNER_TEMP/mkbootimg/unpack_bootimg.py" \
+              --boot_img shim/out/lemonadep/shim-boot-lemonadep.img --out "$RUNNER_TEMP/unpacked"
+          fi
+
+      - name: Build sweet shim objects (regression; no stock DTB in CI, so no boot.img)
+        env:
+          PACK: "0"
+        run: bash shim/build.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shim-lemonadep
+          path: |
+            shim/out/lemonadep/Image
+            shim/out/lemonadep/shim.elf
+            shim/out/lemonadep/shim-boot-lemonadep.img
+          if-no-files-found: warn
+
+  kernel:
+    if: github.event_name == 'workflow_dispatch' && inputs.build_kernel
+    # macos-14 still ships Xcode 15.x: its iig matches the xnu-8796 IORPC ABI
+    runs-on: macos-14
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch build script
+        run: |
+          git init -q dxb
+          git -C dxb fetch -q --depth 1 "$DXB_REPO" "$DXB_SHA"
+          git -C dxb checkout -q FETCH_HEAD
+          cp xnu/patches/*.patch xnu/patches/*.sh dxb/patches/
+          # lemonadep overlay: numbered after the sweet series so it applies last
+          shopt -s nullglob
+          overlay=(lemonadep/xnu/patches/*.patch)
+          echo "lemonadep overlay patches: ${#overlay[@]}"
+          for p in "${overlay[@]}"; do cp "$p" dxb/patches/; done
+          sed -i '' 's/ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"/ARCHS="x86_64 arm64e arm64" VALID_ARCHS="x86_64 arm64e arm64"/' dxb/build.sh
+          grep -c 'VALID_ARCHS="x86_64 arm64e arm64"' dxb/build.sh
+          ls dxb/patches
+
+      - name: Deps
+        run: |
+          brew install jq gum bash cmake ninja
+          printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/xcodes >/dev/null
+          sudo chmod +x /usr/local/bin/xcodes
+          XC=$(ls -d /Applications/Xcode_*.app | sort -V | head -1)
+          echo "DEVELOPER_DIR=$XC/Contents/Developer" >> "$GITHUB_ENV"
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
+
+      - name: Build
+        working-directory: dxb
+        env:
+          MAKEFLAGS: ${{ inputs.keep_going == 'false' && '' || '-k' }}
+        run: bash build.sh
+
+      - name: Collect
+        if: always()
+        run: |
+          mkdir -p out
+          cp -R dxb/fakeroot/System/Library/Kernels/. out/ 2>/dev/null || true
+          ls -la out
+          (cd out && shasum -a 256 kernel.* > SHA256SUMS) || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: xnu-kernel-lemonadep
+          path: out/
+          if-no-files-found: warn
