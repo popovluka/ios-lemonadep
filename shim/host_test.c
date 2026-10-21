@@ -2,11 +2,14 @@
 #include <stdio.h>
 #include "console.h"
 
-static uint32_t host_fb[FB_H * FB_STRIDE / 4];
+#define HOST_W 1080
+#define HOST_H 2400
+
+static uint32_t host_fb[HOST_W * HOST_H];
 
 int main(void)
 {
-	con_fb = host_fb;
+	con_setup((uintptr_t)host_fb, HOST_W, HOST_H, HOST_W * 4, 4);
 	con_clear(RED);
 	con_str("SHIM", "sweet milestone 2");
 	con_hex("MMFR0", 0x0000000000101122ULL);
@@ -17,7 +20,7 @@ int main(void)
 	con_hex("ESR", 0x96000010);
 	FILE *f = fopen("out/host.ppm", "wb");
 	fprintf(f, "P6 %d %d 255\n", FB_W, FB_H);
-	for (int i = 0; i < FB_W * FB_H; i++) {
+	for (int i = 0; i < HOST_W * HOST_H; i++) {
 		unsigned char px[3] = { host_fb[i] >> 16, host_fb[i] >> 8, host_fb[i] };
 		fwrite(px, 1, 3, f);
 	}

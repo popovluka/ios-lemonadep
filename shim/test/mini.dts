@@ -1,0 +1,44 @@
+/*
+ * Host test tree for shim/fdt.c (shim/host_tests.sh). Shapes follow the
+ * lemonadep vendor DT (ABL-filled memory, reserved-memory children with and
+ * without unit addresses); the numbers are test values, not hardware facts.
+ */
+/dts-v1/;
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+	chosen {
+		bootargs = "console=null msm_drm.dsi_display0=qcom,mdss_dsi_test_panel:config0 androidboot.x=1";
+		linux,initrd-start = <0x0 0x90000000>;
+		linux,initrd-end = <0x0 0x90100000>;
+	};
+
+	memory {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x0 0x40000000>, <0x1 0x00000000 0x1 0x00000000>;
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		hyp_region@80000000 {
+			no-map;
+			reg = <0x0 0x80000000 0x0 0x600000>;
+		};
+		splash_region {
+			reg = <0x0 0xe4d00000 0x0 0x2300000>;
+			label = "cont_splash_region";
+		};
+		top_region@1f0000000 {
+			no-map;
+			reg = <0x1 0xf0000000 0x0 0x100000>;
+		};
+	};
+
+	memory-extra@0 {
+		marker = <1>;
+	};
+};

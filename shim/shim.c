@@ -7,18 +7,14 @@
  * Any unexpected exception paints a blue panic screen.
  */
 #include <stdint.h>
+#include "board.h"
 #include "console.h"
+#include "display.h"
+#include "fdt.h"
 #include "mmu.h"
 #include "loader.h"
 #include "ufs.h"
 
-#define IMEM_RESTART_REASON	0x146aa65cUL	/* qcom,msm-imem restart_reason@65c */
-#define RESTART_BOOTLOADER	0x77665500U
-#define PSHOLD			0x0c264000UL
-
-#define GICD_BASE		0x17a00000UL
-#define GICR_BASE		0x17a60000UL
-#define GICR_SIZE		0x100000UL
 #define GICR_PE_SIZE		0x20000UL
 #define GICR_TYPER		0x08
 #define GICR_WAKER		0x14
@@ -30,8 +26,6 @@
 #define GICR_ISPENDR0		(GICR_SGI + 0x200)
 #define GICR_ISACTIVER0		(GICR_SGI + 0x300)
 #define GICR_ICFGR1		(GICR_SGI + 0xc04)
-#define VTIMER_INTID		19	/* DT: <GIC_PPI 3 ...>, not the usual 27 */
-#define PTIMER_INTID		18	/* DT: <GIC_PPI 2 ...> */
 #define SGI_INTID		1
 
 #define PSCI_VERSION		0x84000000UL
@@ -109,7 +103,8 @@ static void __attribute__((noreturn)) reset(unsigned after_s)
 	wr32(IMEM_RESTART_REASON, RESTART_BOOTLOADER);
 	__asm__ volatile("dsb sy" ::: "memory");
 	smc(PSCI_SYSTEM_RESET, 0, 0, 0);
-	wr32(PSHOLD, 0);
+	if (PSHOLD)
+		wr32(PSHOLD, 0);
 	for (;;)
 		__asm__ volatile("wfe");
 }
@@ -370,18 +365,118 @@ static uint32_t to_us(uint64_t ticks)
 	return ticks * 10 / 192;	/* 19.2 MHz */
 }
 
+#if BOARD_HAS_MDSS
+extern char _head[];
+
+/* Value of "key" (up to a space) in /chosen/bootargs, truncated to fit a screen line. */
+static void bootarg(uintptr_t dtb, const char *key, char *out, int max)
+{
+	uintptr_t node, v;
+	uint32_t len;
+	out[0] = 0;
+	if (!fdt_node(dtb, "/chosen", &node) || !fdt_prop(dtb, node, "bootargs", &v, &len))
+		return;
+	const char *s = (const char *)v;
+	for (uint32_t i = 0; i < len; i++) {
+		int k = 0;
+		while (key[k] && i + k < len && s[i + k] == key[k])
+			k++;
+		if (key[k] || (i && s[i - 1] != ' '))
+			continue;
+		int n = 0;
+		for (uint32_t j = i + k; j < len && s[j] && s[j] != ' ' && n < max - 1; j++)
+			out[n++] = s[j];
+		out[n] = 0;
+		return;
+	}
+}
+
+static void hold(unsigned s)
+{
+	con_skip();
+	con_hex2("NEXT", "page in s=", s, 0, 0);
+	delay_ms(s * 1000);
+}
+
+/*
+ * lemonadep milestone 1: adopt ABL's splash plane (display.c), then put
+ * every fact the port still needs from the device on screen (GAPS.md).
+ */
+static void board_early(uintptr_t dtb)
+{
+	uint64_t lo = FB_BASE, size = FB_SIZE;
+	uintptr_t node;
+	int live = fdt_node(dtb, "/reserved-memory/splash_region", &node) &&
+		   fdt_reg(dtb, node, 2, 2, 0, &lo, &size);
+	struct disp_info d;
+
+	if (display_discover(lo, lo + size, &d)) {
+		con_setup(d.addr, d.w, d.h, d.stride, d.bpp);
+		con_kick = d.kick;
+	} else {
+		/* No plane found: paint the whole region white (any format) as a sign of life. */
+		for (uint64_t a = lo; a < lo + size; a += 8)
+			*(volatile uint64_t *)a = ~0ULL;
+		con_setup(lo, 0, 0, 0, 4);
+	}
+	con_clear(BLACK);
+	con_str("SHIM", "lemonadep milestone 1");
+	con_hex2("EL", "cur=", rsr("CurrentEL") >> 2, "img=", (uintptr_t)_head);
+	con_hex2("DTB", "at=", dtb, "magic=", dtb ? __builtin_bswap32(rd32(dtb)) : 0);
+	con_hex2("SPLASH", live ? "dt=" : "def=", (uint32_t)lo, "size=", (uint32_t)size);
+	con_hex2("DISP", "ctl=", d.ctl, "pipe=", d.pipe);
+	con_hex2(" ctl", "intf=", d.intf_active, "fetch=", d.fetch_active);
+	con_hex2(" pipe", "addr=", d.addr, "n=", d.npipes);
+	con_hex2(" pipe", "size=", d.src_size, "xy=", d.src_xy);
+	con_hex2(" pipe", "ystr=", d.ystride0, "fmt=", d.format);
+	con_hex2(" pipe", "unpk=", d.unpack, 0, 0);
+	con_hex2("GEOM", "w=", d.w, "h=", d.h);
+	con_hex2("GEOM", "str=", d.stride, "bpp=", d.bpp);
+	con_hex2("DISP TE", "en=", d.tear_check, "kick=", (uint32_t)d.kick);
+	con_hex2("DISP AR", "was=", d.autorefresh_before, "now=", d.autorefresh_after);
+	if (fdt_node(dtb, "/memory", &node)) {
+		uint64_t a, s;
+		for (int i = 0; i < 4 && fdt_reg(dtb, node, 2, 2, i, &a, &s); i++) {
+			con_hex2("MEM", "base=", (uint32_t)(a >> 32), "lo=", (uint32_t)a);
+			con_hex2("MEM", "size=", (uint32_t)(s >> 32), "lo=", (uint32_t)s);
+		}
+	} else {
+		con_str("MEM", "no /memory");
+	}
+	char panel[40];
+	bootarg(dtb, "msm_drm.dsi_display0=", panel, sizeof(panel));
+	con_str("PANEL", panel[0] ? panel : "(none)");
+	con_hex2("PSCI", "ver=", smc(PSCI_VERSION, 0, 0, 0), "smccc=", smc(SMCCC_VERSION, 0, 0, 0));
+	con_skip();
+}
+#endif
+
 void shim_main(uint64_t dtb)
 {
 	struct mmu_info mi;
 
 	/* An xnu payload in the ramdisk means: boot it (MMU stays off). */
 	stage = "loader";
+#if BOARD_HAS_MDSS
+	board_early(dtb);
+#else
 	con_clear(RED);
 	con_str("SHIM", "sweet milestone 4: xnu loader");
 	con_skip();
+#endif
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);
 	con_skip();
+#if BOARD_HAS_MDSS
+	/* No payload: the board facts above stay readable for a while, then GIC/SMP. */
+	hold(30);
+	con_clear(BLACK);
+	test_gic();
+	con_skip();
+	test_smp();
+	hold(30);
+	con_clear(BLACK);
+#endif
 
 	/* No payload: probe the internal UFS while the MMU is still off. */
 	stage = "ufs";
