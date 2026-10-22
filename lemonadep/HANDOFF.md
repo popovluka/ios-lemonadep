@@ -97,3 +97,37 @@ backups already verified (23 partitions, backup/partitions/, done 2026-10-22 ear
 Then boot kernel with ufsrw=1 rootrw=1 (lemonadep/m1b-build.sh CPUS arg reusable, just
 add rootrw to BOOTARGS), pull log via adb-root on Android (Magisk still present at this
 point) before/after, per GAPS.md D10 caveat about recovery access once Android's gone.
+
+## M3 MILESTONE REACHED (2026-10-22 ~14:17) — LOCK SCREEN ON REAL HARDWARE
+
+After fixing the boot-args (unentitled_ios_sim_launch=1 + ignition_level=1, see commit
+above), booted shim/out/lemonadep/m2-boot.img (SHA256 c85599b9397cb0724b199074a12ebb29ba294b4e0bd10b4f870d46c9ff572359)
+with the real iOS root now flashed to userdata. Result: full boot through to the
+**iOS 16 lock screen rendering on the OnePlus 9 Pro display** -- time display, status
+bar, slide-to-unlock bar, home indicator, all visible and correctly positioned. Took
+roughly 4 minutes on the Apple logo (matches sweet's own documented boot time) plus
+some minutes of daemon crash-loop noise (bluetoothd/fairplayd.H2 -- expected, no BT/SEP
+hardware, same known gap sweet has and still reaches home screen through) before
+SpringBoard settled and the lock screen appeared.
+
+This reaches M3 directly from M1 (skipped needing overlay 1003 panel-geometry fix --
+the native FHD 1080x2412 mode rendered correctly as-is, no centering/scaling needed).
+
+Current boot-args (shim/out/lemonadep/m2-boot.img):
+debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0
+ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin
+launchd_unsecure_cache=1 wdt=-1 sweettouch=0 sweetkeys=0 sweetusb=0
+
+touch and buttons are both still disabled (sweettouch=0 sweetkeys=0), so the lock
+screen cannot be interacted with yet -- that needs overlay 1004 (keys: PMK8350 PON +
+PM8350 GPIO6, mapped in HWMAP_lemonadep.md) and 1005 (touch: Synaptics S3908 on
+GENI SE4, also mapped) per OVERLAY_PATCHES.md. Neither has been written yet.
+
+NEXT: M4 (touch) / M5 (home screen + keys) -- write overlay 1004/1005, or just try
+cpus=8 first to confirm multi-core boot still works now that userland is live (higher
+risk of exposing a race condition overlay 1002 didn't need to handle with cpus=1).
+
+Related projects noted (2026-10-22, not yet investigated): github.com/UniXNU/UniXNU
+(UEFI-based iOS/macOS on non-Apple ARM64, different approach) and
+github.com/oosexgang (hackios-xnu-kernel, hackios-xnu-userland -- new org, similar
+bring-up effort, possibly worth cross-referencing for lemonadep-specific techniques).
