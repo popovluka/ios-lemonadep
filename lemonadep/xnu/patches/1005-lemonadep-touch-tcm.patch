@@ -595,3 +595,27 @@
  		return EINVAL;
  	}
  	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -271,7 +271,20 @@
+ 	}
+ 	if (st.lmn) {
+ 		for (unsigned i = 0; i < 5; ++i) {
+-			if (!touch_wait_clear(st.gcc, st.gcc_halt[i], 1u << 31)) {
++			bool ok = touch_wait_clear(st.gcc, st.gcc_halt[i], 1u << 31);
++			/* Confirmed on-device 2026-10-22: at cpus=1 every branch came up
++			 * first try; at cpus=4 S_AHB alone stayed halted even though our
++			 * vote bit read back set. The shared vote register (0x52008) is
++			 * a plain read-modify-write with no lock -- a concurrent voter
++			 * on another core can race it and clobber our bit right after
++			 * we confirm it, which only becomes possible with real SMP.
++			 * Re-assert and retry a few times rather than give up on one
++			 * lost race. */
++			for (unsigned retry = 0; !ok && retry < 3; ++retry) {
++				touch_wr(st.gcc, vote_reg, touch_rd(st.gcc, vote_reg) | vote_mask);
++				ok = touch_wait_clear(st.gcc, st.gcc_halt[i], 1u << 31);
++			}
++			if (!ok) {
+ 				printf("SWEET TOUCH: GCC branch %#x halted (%#x)\n", st.gcc_halt[i],
+ 				    touch_rd(st.gcc, st.gcc_halt[i]));
+ 				return false;
