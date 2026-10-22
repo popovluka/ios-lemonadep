@@ -54,6 +54,7 @@ BOARDS = {
         ufs=UFS, fb=FB, fb_size=FB_SIZE, fb_geometry=(FB_W, FB_H, FB_STRIDE),
         dram=None,  # chosen by --highmem / the low-bank default
         # (cpu-compatible, clock-frequency) per core; MPIDR = core << 8
+        gic_props=[],
         cpus=[('qcom,kryo470', 1804800000)] * 6 + [('qcom,kryo470', 2304000000)] * 2,
         bus_frequency=100000000, memory_frequency=1866000000,
     ),
@@ -69,6 +70,9 @@ BOARDS = {
         ufs=0x01d84000,                      # ufshc@1d84000 ufs_mem (vendor + mainline)
         fb=0xe4d00000, fb_size=0x2300000,    # lemonade_common.dtsi &splash_memory
         fb_geometry=None,                    # TODO(lemonadep): measured by the shim (MDSS SSPP)
+        # Measured (M1a run 3): EL1 CNTP_* writes are undefined under the
+        # SM8350 hypervisor; xnu overlay 1002 skips them when this is set.
+        gic_props=[('no-el1-physical-timer', b'')],
         # Live FDT on an LE2123 (8 GB): /memory = <0x80000000 0x39700000>,
         # <0xc0000000 0x1c0000000>; no reserved-memory node above 0xeaf00000
         # and /proc/iomem shows it all as System RAM. Same size as sweet's
@@ -225,7 +229,7 @@ def build(seed=None, qemu=False, highmem=False, board='sweet', dram=None, fb_geo
         ('interrupt-controller', b''),
         ('virtual-timer-intid', u32(QEMU_VTIMER_INTID if qemu else b['vtimer_intid'])),
         ('reg', u64(gicd - SOC_BASE, GICD_SIZE, gicr - SOC_BASE, GICR_SIZE)),
-    ])
+    ] + ([] if qemu else b['gic_props']))
     arm_io = node('arm-io', [
         ph(),
         ('device_type', cstr('sweet-io')),

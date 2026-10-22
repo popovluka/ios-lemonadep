@@ -376,6 +376,32 @@ static void test_gic(void)
 			pb |= 1u << w;
 	con_hex2("PRIO B", "fault=", pb, "clr=", cf);	/* after Linux's disable + deactivate */
 	con_hex2("PRIO", "w0=", rd32(r + GICR_IPRIORITYR), "w6=", rd32(r + GICR_IPRIORITYR + 24));
+	/*
+	 * Run 4: priority writes right after IGROUPR0/ICENABLER0 faulted, the
+	 * same writes a few ms later did not. Does polling GICR_CTLR.RWP (as
+	 * Linux's gic_redist_wait_for_rwp does) make them safe? E = no wait
+	 * (control), C = RWP wait after ICENABLER0, D = after IGROUPR0.
+	 */
+	uint32_t me = 0, mc = 0, md = 0, nc = 0, nd = 0;
+	(void)try_wr32(r + GICR_ICENABLER0, 0xffffffff);
+	for (int w = 0; w < 8; w++)
+		me |= try_wr32(r + GICR_IPRIORITYR + 4 * w, 0xa0a0a0a0U) << w;
+	delay_ms(5);
+	(void)try_wr32(r + GICR_ICENABLER0, 0xffffffff);
+	while ((rd32(r + 0x0) & 8) && nc < 10000000)
+		nc++;
+	for (int w = 0; w < 8; w++)
+		mc |= try_wr32(r + GICR_IPRIORITYR + 4 * w, 0xa0a0a0a0U) << w;
+	delay_ms(5);
+	(void)try_wr32(r + GICR_IGROUPR0, 0xffffffff);
+	while ((rd32(r + 0x0) & 8) && nd < 10000000)
+		nd++;
+	for (int w = 0; w < 8; w++)
+		md |= try_wr32(r + GICR_IPRIORITYR + 4 * w, 0xa0a0a0a0U) << w;
+	delay_ms(5);
+	con_hex2("RWP E", "fault=", me, 0, 0);
+	con_hex2("RWP C", "fault=", mc, "spins=", nc);
+	con_hex2("RWP D", "fault=", md, "spins=", nd);
 	uint32_t en_before = rd32(r + GICR_ISENABLER0);
 	uint32_t ef = try_wr32(r + GICR_ISENABLER0, (1U << VTIMER_INTID) | (1U << PTIMER_INTID) | (1U << SGI_INTID));
 	con_hex2("ENABLE", "was=", en_before, "now=", rd32(r + GICR_ISENABLER0) | (ef ? 0x80000000u : 0));

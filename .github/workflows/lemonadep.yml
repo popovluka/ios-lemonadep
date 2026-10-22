@@ -148,10 +148,12 @@ jobs:
           T=dxb/xnu
           grep -q 'BA_VIDEO_BASE' "$T/osfmk/arm64/genassym.c"
           grep -q 'sweet_early_setup(args)' "$T/osfmk/arm/arm_init.c"
+          grep -q 'SWEET_GICR_WAIT_RWP' "$T/pexpert/arm/pe_fiq.c"
+          grep -q 'sweet_el1_ptimer' "$T/osfmk/arm64/machine_routines.c"
           if grep -n '0x9c000000' "$T/osfmk/arm64/start.s" "$T/osfmk/arm64/arm_vm_init.c" "$T/osfmk/arm64/sweet_early.c"; then
             echo "sweet framebuffer address still present: 1001 not applied" >&2; exit 1
           fi
-          echo "1001 applied"
+          echo "1001 + 1002 applied"
 
       - name: Collect
         if: always()
