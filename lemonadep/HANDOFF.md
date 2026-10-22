@@ -181,6 +181,50 @@ MMIO window physical addresses/sizes (GMU core, RSCC, PDC, GPU register
 window, CX misc). This is the next real derivation, same rigor as the
 hwinit table, not a copy.
 
+## GPU, Phase 2 continued: A660's real GMU/RSC control flow traced (2026-10-23)
+
+Read `a6xx_gmu_fw_start()` and `a6xx_gmu_rpmh_init()` in the pinned
+`a6xx_gmu.c` directly, branch by branch, rather than porting `ShengGmu.c`'s
+A7XX-targeted sequence with substituted addresses. Two real divergences
+found this way, both confirmed against the actual conditionals (not
+assumed):
+
+1. **TCM retention is NOT a `CX_MISC` write on A660.** `ShengGmu.c` writes
+   `CX_MISC_TCM_RET_CNTL=1` (an A7XX-only register -- `a6xx.xml` tags it
+   `variants="A7XX-"`, no A6XX entry at all). The real code:
+   `if (adreno_is_a7xx(...)) CX_MISC_TCM_RET_CNTL=1; else if
+   (!adreno_is_a8xx(...)) GMU_GENERAL_7=1` (`a6xx_gmu.c:949-952`). A660 is
+   neither -- it writes `GMU_GENERAL_7=1` in the GMU core window instead.
+   The earlier FAL10-veto step (`FALNEXT_INTF`/`FAL_INTF=1`) *is* shared with
+   A660: `adreno_is_a650_family()` (`family == ADRENO_6XX_GEN3 ||
+   ADRENO_6XX_GEN4`) includes A660's `ADRENO_6XX_GEN4`, confirmed at
+   `adreno_gpu.h:521-528`.
+2. **A660's RSC/PDC handshake takes the "PDC configured in AOP" path**,
+   same as A7XX (`a6xx_gmu.c:688-695`: `pdc_in_aop = true` whenever
+   `adreno_is_a650_family() || adreno_is_a7xx()`). This skips the entire
+   PDC sequencer-microcode and TCS1/TCS3 command block
+   (`a6xx_gmu.c:735-772`) via a `goto setup_pdc`; only the RSC side still
+   programs: `RSC_STATUS0_DRV0 |= BIT(24)` (disable SDE clock gating),
+   `PDC_SLAVE_ID_DRV0=1`, the `HIDDEN_TCS_CMD0` zero/zero/0x80000000 triplet
+   (`0x80000000`, not A740's `0x80000021` -- `adreno_is_a740_family()` is
+   `ADRENO_7XX_GEN2 || ADRENO_7XX_GEN3`, A660 is neither, confirmed at
+   `adreno_gpu.h:565-570`), `OVERRIDE_START_ADDR=0`,
+   `PDC_SEQ_START_ADDR=0x4520`, `PDC_MATCH_VALUE_LO=0x4510`,
+   `PDC_MATCH_VALUE_HI=0x4514`, the RSC sequencer microcode (A660 uses the
+   a650/a7xx values `{0xeaaae5a0, 0xe1a1ebab, 0xa2e0a581, 0xecac82e2,
+   0x0020edad}` at `RSCC_SEQ_MEM_0_DRV0[0..4]`, not the plain-a6xx values),
+   then jumps straight to `PDC_GPU_SEQ_START_ADDR=0`,
+   `PDC_GPU_ENABLE_PDC=0x80000001`.
+
+This is why `ShengGmu.c` can't be ported with substituted register values
+alone -- the control flow itself branches per generation in at least these
+two places, and probably more in the parts not yet read (HFI queue setup,
+the rest of `fw_start`, `a6xx_hfi.c`). Still to do: resolve the numeric
+offsets for every register named above (same `resolve()` method as
+`derive-a660-hwinit.py`, extended to the RSC/PDC/core windows and
+`a6xx_gmu.xml`), finish reading the remaining GMU/HFI functions for more
+such branches, then write `LemonadepGmuSource.h` and the actual kernel code.
+
 Branch `lemonadep`, pushed to `fork` = github.com/popovluka/ios-sweet. Phone: LE2123 8 GB, Evolution X 16 + Magisk, slot b,
 `fastboot boot` of our v3 shim works. Backups in `backup/partitions` (23, SHA-256 verified). Tools: `C:\platform-tools`,
 WSL distro `LemonadepLab` (aarch64 gcc, dtc, qemu-user, AOSP mkbootimg at `/opt/aosp-mkbootimg`).
