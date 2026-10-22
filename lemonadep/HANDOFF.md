@@ -41,6 +41,48 @@ Kernel run: https://github.com/popovluka/ios-lemonadep/actions/runs/39858965799
 together). Remaining open items: GPU acceleration, USB, WiFi/BT, cellular —
 see `GAPS.md`.
 
+## GPU, Phase 0: metal2vulkan reads and compiles real iOS 16.7 AIR (2026-10-23)
+
+Host-only investigation, no phone risk, no CI cost. The plan (and gating
+question) is `ios-flame`'s `METAL-NEXT.md`: "Does metal2vulkan read iOS 16.7
+AIR (QuartzCore MTLB v2.7)?" Answer: **yes, confirmed directly, not inferred.**
+
+- **GPU firmware pulled from this phone's own `/vendor`** (dynamic partition,
+  mounted read-only from TWRP): `a660_gmu.bin`, `a660_sqe.fw`,
+  `a660_zap.{mdt,b00,b01,b02,elf}` -- the literal Adreno 660 firmware set
+  (same names `blahajcoding/op9pro-mainline-poc`'s dts node and
+  `oosexgang/hackios-xnu-kernel`'s README both document for this GPU family).
+  Saved to `lemonadep/fw-gpu/` (git-ignored; proprietary, never committed),
+  reproducible with `lemonadep/fw-gpu/pull.sh`.
+- **Mesa has dedicated Turnip support for Adreno 660**, not an approximation
+  of a neighboring chip: `freedreno/turnip: add support for a660`
+  (gitlab.freedesktop.org/mesa/mesa/-/merge_requests/10892); the Linux msm
+  driver groups it as its own family, `ADRENO_6XX_GEN4 /* a660 family */`.
+- **A real `.metallib` extracted from our own built iOS root**
+  (`lemonadep/m2-artifacts/ios16-root.simg`, HFSX -- `simg2img` then `7z l/e`,
+  which has a native HFS/HFSX codec; `hpmount`/hfsutils could not open this
+  image, 7z could): `System/Library/PrivateFrameworks/RenderBox.framework/
+  default.metallib`, real `MTLB` header, 46 real functions (`plane__vertex`,
+  `uber_fragment`, `stroke_lines_vertex`, ...).
+- **`metal2vulkan` (steelbrain/metal2vulkan, commit a2c440b -- the same
+  commit `ios-flame`'s own investigation pinned) built clean** with Rust
+  1.98 (its stated minimum) in WSL -- no Apple toolchain needed for the
+  translator itself, unlike the kernel or the eventual iOS-side bridge.
+- **Compiled a real pipeline to SPIR-V**: `plane__vertex` + `plane_color_fragment`
+  against a floor Vulkan 1.2 profile (`vk12-floor.json`, bundled in the repo;
+  not yet an Adreno-660-specific profile) -- `out.vert.spv` (3336 bytes),
+  `out.frag.spv` (4776 bytes). **Independently validated with Khronos's own
+  `spirv-val`** (apt `spirv-tools`, a separate tool from metal2vulkan's own
+  check): clean exit 0, no errors, both stages.
+
+This directly answers the one open question that would have sunk the whole
+GPU plan before it started. What is still unconfirmed: a real Adreno-660
+Vulkan device profile (needs Turnip actually running, e.g. via Linux
+drm-shim, to get real `vulkaninfo --json` limits), the darwin-KMD Mesa patch
+building against our kernel ABI, and everything kernel-side (new GPU user
+client, BO alloc/submit/fence) -- all of which need the Apple cross-toolchain
+and real CI time, which is why this stayed host-only for now.
+
 
 Branch `lemonadep`, pushed to `fork` = github.com/popovluka/ios-sweet. Phone: LE2123 8 GB, Evolution X 16 + Magisk, slot b,
 `fastboot boot` of our v3 shim works. Backups in `backup/partitions` (23, SHA-256 verified). Tools: `C:\platform-tools`,

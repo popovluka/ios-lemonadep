@@ -10,3 +10,6 @@ xnu/out-*/
 __pycache__/
 # built iOS root image (multi-GB; rebuild with lemonadep/m2-build-macbook.sh)
 lemonadep/m2-artifacts/
+# vendor firmware pulled from this phone's own /vendor (proprietary Qualcomm/OnePlus
+# binaries; never redistributed -- re-pull with lemonadep/fw-gpu/pull.sh from your own device)
+lemonadep/fw-gpu/
