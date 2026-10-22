@@ -20,6 +20,25 @@ Sources are the same as in `HWMAP_lemonadep.md`. **LOS-C** = `LineageOS/android_
 | Fastboot key combo | Volume Up + Volume Down + Power (device off) | LineageOS wiki, lemonadep install page (2026-10-21) | M |
 | LineageOS install method | flashes `dtbo`, `vbmeta`, `vendor_boot`, then **`fastboot flash boot boot.img`**. The wiki never uses `fastboot boot` | same wiki page | M |
 
+## Measured on the target phone (`fastboot getvar all`, 2026-10-22)
+
+The full output is in `backup/getvar-all.txt` (git-ignored: it contains the serial).
+
+| Variable | Value | Meaning |
+| --- | --- | --- |
+| `product` / `variant` | `lahaina` / `SM_ UFS` | SM8350, UFS storage |
+| `unlocked` / `secure` | `yes` / `yes` | bootloader unlocked: `fastboot boot` of unsigned images should be allowed (D1 still to test) |
+| `is-userspace` | `no` | this is ABL's fastboot, not fastbootd |
+| `current-slot` | `b` | both slots `successful:yes`, `unbootable:no` |
+| `partition-size:boot_a/_b`, `vendor_boot_a/_b` | `0xC000000` (192 MiB) | matches LOS-C `BOARD_BOOTIMAGE_PARTITION_SIZE` |
+| `partition-size:dtbo_a/_b` | `0x1800000` (24 MiB) | matches LOS-C |
+| `partition-type:userdata` / size | `f2fs` / `0x1986FB3000` (102.1 GiB) | the 16 GiB iOS root image fits; the log ring sits at the end |
+| `logical-block-size` / `erase-block-size` | `0x1000` | 4 KiB UFS blocks, as the UFS driver assumes |
+| `max-download-size` | `0x30000000` (768 MiB) | `fastboot -S 512M` for the root image stays below it |
+| `kernel` | `uefi` | ABL is the UEFI-based Qualcomm bootloader |
+| `version-bootloader`, `version-baseband` | empty | not reported by this ABL |
+| calibration partitions present | `modemst1`, `modemst2`, `fsg`, `fsc`, `persist_bkp`, `oplusreserve1-5` | back these up (checklist 0.5) |
+
 ## Header v3 layout vs what `shim/build.sh` makes today
 
 sweet makes a v2 image:
