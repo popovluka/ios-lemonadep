@@ -35,7 +35,7 @@ verified on a host (WSL `LemonadepLab`, Ubuntu 24.04), not on the phone.
 | --- | --- |
 | Kernel overlay patches | 1001 written, host-checked, and compiled in the macOS kernel job (run 39698732689); not booted. 1002-1006 plans (`OVERLAY_PATCHES.md`) |
 | Early kernel framebuffer (0010/0012) | fixed by 1001: geometry from `boot_args->Video` (builds; boot untested) |
-| Touch (Synaptics S3908) | no driver; `sweettouch=0` |
+| Touch (Synaptics S3908) | overlay 1005: TCM over bit-banged I2C (gpio20/21; SE4 is GSI-only); on-device result pending |
 | Buttons (PMK8350 PON / PM8350 GPIO6) | no driver; `sweetkeys=0` |
 | USB networking | off; `sweetusb=0` (sweet default is ON) |
 | Battery | static 100 % (sweet default) |
@@ -90,7 +90,7 @@ verified on a host (WSL `LemonadepLab`, Ubuntu 24.04), not on the phone.
 | M1 | ~~**Boot + framebuffer**~~ **DONE 2026-10-22**: shim text visible, XNU kernel console visible, boots to BSD root-mount retry loop | shim done; overlay 1001+1002 done, kernel boots | `fastboot boot` only, no |
 | M2 | ~~**UFS mounts the iOS root**~~ **DONE 2026-10-22**: iOS root built (lemonadep/m2-build-macbook.sh), flashed to `userdata` | sweet UFS/HFS patches, unchanged, worked as-is | flash iOS root to `userdata`: **done, erased Android data** |
 | M3 | ~~**Lock screen**~~ **DONE 2026-10-22**: boots through to the rendered lock screen (time, status bar, slide bar, home indicator) | fixed boot-args (`unentitled_ios_sim_launch=1 ignition_level=1`); overlay 1003 turned out **not needed**, native FHD geometry rendered correctly as-is | no |
-| M4 | **Touch** | overlay 1005 (S3908 TCM on SE4) written and passes `check-overlay.sh`; keys CI build pending; **not yet booted on-device** | no |
+| M4 | **Touch** | overlay 1005: S3908 TCM over bit-banged I2C. SE4's FIFO is disabled (GSI-only), and its SE-DMA crashed the SoC. Passes `check-overlay.sh`, including the end-to-end bus simulator. Keys confirmed working on-device. **Bit-bang touch not yet booted** | no |
 | M5 | **Home screen** (unlock, swipe, keys) | overlay 1004 (keys, PMK8350 PON + PM8350 GPIO6) written and passes `check-overlay.sh`; CI kernel build in progress; **not yet booted on-device** | no |
 
 ## 4. On-device checklist

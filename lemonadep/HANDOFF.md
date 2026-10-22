@@ -222,3 +222,56 @@ and the boot image: `shim/out/lemonadep/m2-boot.img`, SHA256
 same boot-args (`sweettouch=1 sweetkeys=1 sweetusb=0`). **This is the
 image to actually test on-device** -- the earlier one (SHA256
 `89f68b78...`) would have failed touch bring-up at the RPMh vote step.
+
+## Touch: SE4 is GSI-only, so the bus is now bit-banged (2026-10-22 evening)
+
+Observed on-device (persistent log via TWRP, `tools/sweet-log.py`), cpus=4:
+
+- **Buttons work**: power blanks the screen, volume works. The vol keys were swapped;
+  fixed in 1004 from the retail dtsi (RESIN = KEY_VOLUMEUP, PM8350 GPIO6 =
+  KEY_VOLUMEDOWN) via ADT `swap-volume-keys`.
+- **GCC**: `S_AHB` read `0x80000002` (CLK_OFF|HWCG). m_ahb/s_ahb are HW-clock-
+  gated, so the halt check is skipped for them, as in Linux
+  `clk_branch_in_hwcg_mode`. This was not a vote race: a retry made no difference.
+- **SE4 reads FIFO_IF_DISABLE (0x64 bit0) = 1** and keeps that value after
+  clearing 0xe18, so FIFO transfers time out. The vendor dtsi gives it
+  `dmas = <&gpi_dma0 ...>`, which makes it a GSI-mode engine.
+- **Driving SE4's SE-DMA engine crashed the SoC** into an XBL ramdump screen
+  (commit 1f036eb). Don't try that again.
+- **Retraction**: an earlier note that "touch works at cpus=1" was never backed by a
+  log. The nav pill moving was most likely iOS's own hint animation.
+
+Fix (commit b9cb8c6): **bit-bang I2C on TLMM gpio20 (SDA) / gpio21 (SCL)**.
+It is ported from zoe-vb/ios-sargo `xnu/patches/0087`; that patch is the same
+wall on the Pixel 3a, whose touch SE is also GSI-only. Lemonadep never touches
+SE4 now, and sweet's FIFO path is unchanged. BB_HALF_NS = 2500 (~200 kHz).
+
+TCM protocol bugs fixed in the same commit, against the vendor
+`Syna_tcm_oncell` driver:
+
+- Commands are `[cmd, len_lo, len_hi, payload]`. Before this fix, no length bytes were sent.
+- `ENABLE_REPORT` takes a 1-byte payload (the report type, 0x11).
+- After reset, bring-up waits for the unsolicited `REPORT_IDENTIFY` (0x10) and
+  falls back to `CMD_IDENTIFY`. A non-application mode gets `RUN_APP_FIRMWARE`.
+
+New test `lemonadep/xnu/test/test_touch_bb.c` (+ `gen_touch_bb.py`). The real
+`sweet_touch.c` drives a simulated open-drain bus with a mock S3908 at
+0x4B. The test checks:
+
+- bring-up
+- the exact report-config bytes the IC receives
+- the enable payload
+- a two-finger report followed by a lift, mapped to HID down/up events
+
+It runs in `check-overlay.sh` on host ASan/UBSan and on aarch64 qemu, and passes.
+The simulator can't prove the real IC's timing, pull-up strength, or the
+exact `REPORT_TOUCH` format for an all-lifted frame. On-device log lines to
+look for:
+
+- `I2C bit-banged on gpio20/21`
+- `TCM after reset: ... code=0x10 ... mode=0x1`
+- `TCM bring-up ok`
+- `report err=` (only if polls fail)
+
+Kernel run: https://github.com/popovluka/ios-lemonadep/actions/runs/39853877374
+(cpus=4 boot image built from it by `m2-boot-build.sh ... 4`).
