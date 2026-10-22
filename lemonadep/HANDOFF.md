@@ -219,11 +219,27 @@ assumed):
 This is why `ShengGmu.c` can't be ported with substituted register values
 alone -- the control flow itself branches per generation in at least these
 two places, and probably more in the parts not yet read (HFI queue setup,
-the rest of `fw_start`, `a6xx_hfi.c`). Still to do: resolve the numeric
-offsets for every register named above (same `resolve()` method as
-`derive-a660-hwinit.py`, extended to the RSC/PDC/core windows and
-`a6xx_gmu.xml`), finish reading the remaining GMU/HFI functions for more
-such branches, then write `LemonadepGmuSource.h` and the actual kernel code.
+`a6xx_hfi.c`).
+
+**Done**: all the register offsets above, plus the rest of `fw_start()`
+(HFI table pointer, fence range, CM3 config, chip ID/log registration,
+GBIF QoS), are now resolved and committed in
+`lemonadep/xnu/gpu/LemonadepA660HwInit.h` (`derive-a660-hwinit.py`, same
+sha256-verified pinned source). Tracing the rest of `fw_start()` caught a
+second real bug before it happened: ShengGmu.c's A740 fence-range value
+(`0x32<<18|0x8a0`) and chip-ID/log registers (`GMU_GENERAL_10`/`_8`) are
+genuinely wrong for A660, not just differently addressed -- the real
+plain-a6xx branch (confirmed against the actual conditionals) uses fence
+range `0xa<<18|0xa0` and writes chip ID/log to `GMU_HFI_SFR_ADDR` /
+`GPU_GMU_CX_GMU_PWR_COL_CP_MSG` instead. One piece that *does* carry over
+unchanged: the GBIF QoS writes (`a640_gbif`, confirmed shared by A660 in
+the catalog) are the same four `0x71620` writes ShengGmu.c already does --
+the tracing finds what's genuinely shared, not just what diverges.
+
+Still to do: read `a6xx_hfi.c` for the HFI queue setup and message
+protocol (likely more such branches), then write `LemonadepGmuSource.h`
+(the board-specific pieces: real firmware hash, MMIO window physical
+addresses, RPMh/cmd-db GPU power-level votes) and the actual kernel code.
 
 Branch `lemonadep`, pushed to `fork` = github.com/popovluka/ios-sweet. Phone: LE2123 8 GB, Evolution X 16 + Magisk, slot b,
 `fastboot boot` of our v3 shim works. Backups in `backup/partitions` (23, SHA-256 verified). Tools: `C:\platform-tools`,
