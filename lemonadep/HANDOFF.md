@@ -75,3 +75,25 @@ Per GAPS.md checklist M2:
 NOT STARTED: no IPSW downloaded, no root image built yet. This is a much bigger undertaking
 than M1 (large download, apfs-fuse/hfsprogs tooling in WSL, sweet-root-tweaks.py changes to
 review for lemonadep applicability).
+
+## M2 root image BUILT (2026-10-22 ~08:16)
+
+Built on a real Linux box (luka-macbookpro, EndeavourOS/Arch) via SSH, not WSL2 (whose
+kernel has zero HFS+ support -- confirmed dead end, do not retry there). Script:
+lemonadep/m2-build-macbook.sh (pushed, includes two fixes found along the way:
+CMAKE_POLICY_VERSION_MINIMUM=3.5 for apfs-fuse's old CMakeLists.txt against CMake 4.x,
+and -include cstdint to fix 48 files relying on a transitive include GCC 16 dropped).
+
+Result: /mnt/m2work/build/ios16-root.simg on the external DataTraveler USB drive
+(formatted ext4, mounted at /mnt/m2work on the Mac), 12,145,230,136 bytes (~11.3 GiB),
+SHA256 46a7ad2676f44be5aa4cd6323fc92f3904a0cf932da0c57ff6e4f39bfa07dc35.
+Built from iPhone X 16.7.16 (20H392), OS+SystemOS+AppOS dmgs (checksums in the script),
+real D22AP device tree extracted (research/ipsw-x/d22ap.adt, gitignored).
+
+NEXT: get ios16-root.simg onto the Windows machine (USB drive physically, or scp --
+check which is faster/already done), then checklist M2 step 3: DESTRUCTIVE
+`fastboot -S 512M flash userdata ios16-root.simg` -- NEEDS EXPLICIT USER CONFIRMATION,
+backups already verified (23 partitions, backup/partitions/, done 2026-10-22 early).
+Then boot kernel with ufsrw=1 rootrw=1 (lemonadep/m1b-build.sh CPUS arg reusable, just
+add rootrw to BOOTARGS), pull log via adb-root on Android (Magisk still present at this
+point) before/after, per GAPS.md D10 caveat about recovery access once Android's gone.
