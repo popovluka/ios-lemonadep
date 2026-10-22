@@ -241,6 +241,56 @@ protocol (likely more such branches), then write `LemonadepGmuSource.h`
 (the board-specific pieces: real firmware hash, MMIO window physical
 addresses, RPMh/cmd-db GPU power-level votes) and the actual kernel code.
 
+## GPU, Phase 2 done: all sourcing complete, ready to write the driver (2026-10-23)
+
+Read `a6xx_hfi.c` (1102 lines) fully. Findings:
+
+- **HFI queue table layout is generic** (`a6xx_hfi_queue_init`/`a6xx_hfi_init`,
+  `a6xx_hfi.h`'s `struct a6xx_hfi_queue_table_header`/`a6xx_hfi_queue_header`):
+  one table header + 3 fixed queues at 4K offsets within the HFI memory
+  region, no chip-generation branch at all.
+- **A660's real BW table is already hand-written per-chip in Linux**
+  (`a660_build_bw_table()`) -- transcribed verbatim into
+  `LemonadepA660HwInit.h`, not derived; confirmed it's the one actually
+  dispatched (`adreno_is_a660()` is an exact `chip_id==660` match, and our
+  catalog entry has no `.bcms` override that would select a generated
+  table instead).
+- **ACD and IFPC are both real no-ops for a first bring-up**: gated by
+  `acd_table->enable_by_level` and `idle_level != GMU_IDLE_STATE_IFPC`,
+  both unset unless explicitly requested. Deliberately skipping both for
+  v1, the same "simplest correct path first" choice already used for
+  touch/buttons -- not a corner cut, a documented, justified scope cut.
+- **Firmware loading is a real divergence from `ShengGmu.c` too**: A660
+  takes the non-legacy, self-describing block-header format
+  (`struct block_header{addr,size,type,value}`, `a6xx_gmu.c:843-917`), not
+  `ShengGmu.c`'s fixed 3-region `AdrenoFirmwarePlanGmu` assumption (a
+  different, A740-specific format). Parsed the real `a660_gmu.bin` already
+  pulled from this phone with the actual algorithm
+  (`lemonadep/xnu/gpu/verify-gmu-firmware.py`): 4 real payload blocks (ITCM,
+  icache, 2x DTCM), header+payload bytes sum to exactly the file size --
+  confirms the real on-phone firmware genuinely follows this format.
+
+Wrote `lemonadep/xnu/gpu/LemonadepGmuSource.h`: the five real MMIO window
+addresses (`qcom,adreno-660.1` node, mainline `sm8350.dtsi`; confirmed
+`cx_mem`, not `cx_dbgc`, is the real `CX_MISC` window by reading
+`a6xx_gpu.c`'s `msm_ioremap(pdev, "cx_mem")` call), GPUCC/SMMU addresses,
+the `pil_gpu_mem` zap region (cross-checked against the existing
+`HWMAP_lemonadep.md` entry), GIC SPIs, and the firmware segment table.
+**Caught a real mistake before it shipped**: hand-typed the firmware
+segment table's file offsets from memory instead of the verified parse
+output -- wrong. Fixed, and `verify-gmu-firmware.py` now automatically
+cross-checks the header against a live firmware parse every run, so this
+can't silently drift again.
+
+**All the real data needed for a correct GMU cold-start is now sourced,
+verified and committed**: `LemonadepA660HwInit.h` (register table + RSC/PDC
+sequence + fw_start sequence + BW table), `LemonadepGmuSource.h` (MMIO
+windows + firmware), `NativeAdrenoABI.h` (the kernel user-client ABI to
+implement). Next: write the actual kernel driver (new IOKit user client
+published as `IOAcceleratorES`, the GMU cold-start state machine, CP ring,
+submit/fence), then the Apple cross-toolchain build of Turnip + the
+frontend bridge -- both need real CI time.
+
 Branch `lemonadep`, pushed to `fork` = github.com/popovluka/ios-sweet. Phone: LE2123 8 GB, Evolution X 16 + Magisk, slot b,
 `fastboot boot` of our v3 shim works. Backups in `backup/partitions` (23, SHA-256 verified). Tools: `C:\platform-tools`,
 WSL distro `LemonadepLab` (aarch64 gcc, dtc, qemu-user, AOSP mkbootimg at `/opt/aosp-mkbootimg`).
