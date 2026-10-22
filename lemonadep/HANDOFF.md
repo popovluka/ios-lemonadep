@@ -39,3 +39,39 @@ then XNU kernel console text (white on screen, keepsyms=1), likely ending in a p
 root device (userdata still Android f2fs) -- that is a PASS for M1b. User photographs the
 final screen. If it hangs at "XNU jumping" with no kernel text, photo the bottom edge (1001
 stage bands). Any crash before that point needs the ESR/ELR/FAR lines.
+
+
+## M1 MILESTONE REACHED (2026-10-22 ~05:40) — kernel boots on real hardware
+
+M1b ran on the phone (`fastboot boot shim/out/lemonadep/m1b-boot.img`, SHA256 2312f619...,
+kernel SHA256 0b52714352..., cpus=1, read-only). Full XNU boot sequence succeeded:
+
+- shim -> kernel handoff OK
+- SWEET GIC init with overlay 1002 (priority writes skipped, CNTP skipped): **no abort**
+- SWEET CPU: cpu=0 came alive, SGI1 OK
+- SWEET FB: AppleCLCD 1080x2412 stride 4320 at 0xe4d00000, matches shim-measured geometry exactly
+- MAC Framework initialized; zone/VM bootstrap completed (85 maps, 165 entries)
+- Reached BSD root mount: `ufsroot0` recognized, UFS reads happening, correctly fails to mount
+  because userdata still has Android's filesystem (`hfs_ValidateHFSPlusVolumeHeader: unknown
+  Volume Signature : 749c`) -> infinite retry loop (mount(14) through mount(21)+), not a crash/panic.
+  User power-cycled back to fastboot to break the loop (kernel has no PSCI reset in this path).
+
+**This confirms the GIC/timer hypervisor workarounds in overlay 1002 are correct and the full
+shim+kernel boot chain works on actual lemonadep (OnePlus 9 Pro) hardware**, through CPU/GIC/timer/
+display/VM/BSD init, down to attempting (and correctly failing) root mount.
+
+## Next: M2 (destructive — build iOS root image, flash to userdata)
+
+Per GAPS.md checklist M2:
+1. Build iOS root image per README.md Sec 2 (iPhone X 16.7.16/20H392, mkiosroot.sh) — needs the
+   IPSW, not yet downloaded.
+2. **DESTRUCTIVE: erases all Android user data.** Needs explicit user confirmation + step 0.5
+   backups already done (23 partitions, backup/partitions/, SHA256 verified).
+3. `fastboot -S 512M flash userdata ios16-root.simg`
+4. Reboot kernel with `ufsrw=1 rootrw=1` (now safe to add since real root exists).
+5. Pull persistent log via adb-root (Android still has Magisk root at this point, works fine;
+   log pull method for later once Android is gone needs sorting per GAPS.md D10).
+
+NOT STARTED: no IPSW downloaded, no root image built yet. This is a much bigger undertaking
+than M1 (large download, apfs-fuse/hfsprogs tooling in WSL, sweet-root-tweaks.py changes to
+review for lemonadep applicability).

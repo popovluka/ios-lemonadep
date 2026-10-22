@@ -87,7 +87,7 @@ verified on a host (WSL `LemonadepLab`, Ubuntu 24.04), not on the phone.
 
 | # | Milestone | Needs (code) | Needs (device, destructive?) |
 | --- | --- | --- | --- |
-| M1 | **Boot + framebuffer**: shim text visible, then XNU kernel console visible | shim (done); overlay 1001 for the kernel half | `fastboot boot` only, no |
+| M1 | ~~**Boot + framebuffer**~~ **DONE 2026-10-22**: shim text visible, XNU kernel console visible, boots to BSD root-mount retry loop | shim done; overlay 1001+1002 done, kernel boots | `fastboot boot` only, no |
 | M2 | **UFS mounts the iOS root** | sweet UFS/HFS patches (as-is) | flash iOS root to `userdata`: **yes, erases Android data** |
 | M3 | **Lock screen** | overlay 1003 (panel geometry); 1002 if autorefresh failed | no |
 | M4 | **Touch** | overlay 1005 (S3908), TLMM offsets, RPMh `ldoc3` | no |
