@@ -83,6 +83,48 @@ building against our kernel ABI, and everything kernel-side (new GPU user
 client, BO alloc/submit/fence) -- all of which need the Apple cross-toolchain
 and real CI time, which is why this stayed host-only for now.
 
+## GPU, Phase 1: the real source chain is public (2026-10-23)
+
+`ios-flame`'s own METAL-NEXT.md names its reference as "UniXNU (sheng, Adreno
+740)" via a local clone it never redistributes. The actual UniXNU project
+(github.com/UniXNU, device repos for many Qualcomm SoCs) is public, and the
+pieces we need are tracked files, not something to reconstruct secondhand:
+
+- **`NativeAdrenoABI.h`** (UniXNU/NativeAdreno): the exact, versioned,
+  `static_assert`-pinned kernel/user-client wire ABI (Query, BoAlloc, BoMap,
+  BoImport, Submit, WaitFence, GetDeviceInfo, CpuMap/Unmap, queues). This is
+  what our kernel driver implements; Turnip's darwin backend assumes it
+  byte-for-byte.
+- **`patches/mesa/turnip-darwin-kmd.patch`** (UniXNU/UniXNU, 1437 lines): the
+  real `tu_knl_darwin.cc` plus the `tu_knl.cc`/`tu_device.cc`/
+  `wsi_common_metal_layer.m` hookup. Confirms the IOKit discovery path:
+  `IOServiceGetMatchingService` for `$TU_DARWIN_SERVICE` (default
+  `"IOAcceleratorES"` -- **the same class name sweet's own
+  `SweetAccelerator.cpp` already uses**), open type `$TU_DARWIN_OPEN_TYPE`
+  (default `0x4147`); `"NativeAdrenoGpuPublished"` as the service name selects
+  the unsandboxed direct form (external-method selector == ABI method
+  number), the simpler path for us since sweet's own sandbox MAC policy is
+  already permissive.
+- **`scripts/data/adreno-compiler-inputs.json`** (UniXNU/UniXNU): the exact
+  pinned Mesa commit (`85fda3b36405bcaea8bffc64aa4f2651dc90770d`) and the full
+  ordered patch list (9 patches: `turnip-darwin-kmd`, `ir3-darwin-build-id`,
+  `ir3-portable-asm-roundtrip`, `turnip-empty-scissor`,
+  `turnip-builtin-shader-pack`, `turnip-graphics-cache-feedback`,
+  `turnip-host-import-images`, `offline-adreno-compiler-probe`,
+  `freedreno-tools-nir`), plus a sparse-checkout list that avoids cloning all
+  of Mesa.
+- **Ruled out, not assumed**: checked our own `xnu-1005` tree for an existing
+  `sweet_a6xx.c` (the file `ios-flame`'s notes analyze) -- **we don't have
+  one**. It is `ios-flame`'s own addition for their fork, not something
+  upstream `ios-sweet` ships. The kernel-side GPU driver is genuinely new
+  work here, informed by this real source, not extended from anything
+  already in the tree.
+
+Not yet done: the actual kernel driver (GMU/CP bring-up for Adreno 660
+specifically -- UniXNU's own hwinit derivation, `NativeAdrenoA740HwInit.h`,
+is for the 740 and chip-generation-specific, so 660's sequence needs its own
+sourcing from the real Linux `msm` driver, not reuse), and the Apple
+cross-toolchain build of Turnip + the frontend bridge.
 
 Branch `lemonadep`, pushed to `fork` = github.com/popovluka/ios-sweet. Phone: LE2123 8 GB, Evolution X 16 + Magisk, slot b,
 `fastboot boot` of our v3 shim works. Backups in `backup/partitions` (23, SHA-256 verified). Tools: `C:\platform-tools`,
