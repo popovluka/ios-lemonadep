@@ -125,8 +125,10 @@ static void irq_handler(void)
 		irq_other++;
 	if (id == VTIMER_INTID)
 		wsr("cntv_tval_el0", rsr("cntfrq_el0") / 100);	/* 10 ms */
+#if BOARD_EL1_PTIMER
 	else if (id == PTIMER_INTID)
 		wsr("cntp_tval_el0", rsr("cntfrq_el0") / 100);
+#endif
 	wsr("icc_eoir1_el1", iar);
 	isb();
 }
@@ -163,7 +165,12 @@ void exc_handler(uint64_t slot, uint64_t *regs)
 		wsr("elr_el1", rsr("elr_el1") + 4);	/* skip the faulting access */
 		return;
 	}
+#if BOARD_HAS_MDSS
+	/* Keep the page on screen: its last lines are what led here. */
+	con_skip();
+#else
 	con_clear(BLUE);
+#endif
 	switch (slot & 3) {
 	case 0: con_str("PANIC", "SYNC"); break;
 	case 1: con_str("PANIC", "IRQ"); break;
@@ -260,10 +267,13 @@ static void irq_window(const char *label, uintptr_t r, int src)
 	if (src == VTIMER_INTID) {
 		wsr("cntv_tval_el0", f / 100);
 		wsr("cntv_ctl_el0", 1);
-	} else if (src == PTIMER_INTID) {
+	}
+#if BOARD_EL1_PTIMER
+	else if (src == PTIMER_INTID) {
 		wsr("cntp_tval_el0", f / 100);
 		wsr("cntp_ctl_el0", 1);
 	}
+#endif
 	isb();
 	/* sample state with IRQs still masked, after the first period */
 	uint64_t t = now() + f / 50;
@@ -272,7 +282,11 @@ static void irq_window(const char *label, uintptr_t r, int src)
 	if (src == SGI_INTID)
 		wsr("icc_sgi1r_el1", sgi_self(SGI_INTID));
 	isb();
+#if BOARD_EL1_PTIMER
 	ist = src == PTIMER_INTID ? rsr("cntp_ctl_el0") : rsr("cntv_ctl_el0");
+#else
+	ist = rsr("cntv_ctl_el0");
+#endif
 	pend = rd32(r + GICR_ISPENDR0);
 	act = rd32(r + GICR_ISACTIVER0);
 	isr = rsr("isr_el1");
@@ -291,7 +305,9 @@ static void irq_window(const char *label, uintptr_t r, int src)
 		}
 	__asm__ volatile("msr daifset, #2" ::: "memory");
 	wsr("cntv_ctl_el0", 0);
+#if BOARD_EL1_PTIMER
 	wsr("cntp_ctl_el0", 0);
+#endif
 	isb();
 
 	con_hex2(label, "irqs=", irq_count, "other=", irq_other);

@@ -23,6 +23,12 @@
 /* arch_timer: <GIC_PPI 13>, <14>, <11>, ... -> phys INTID 30, virt INTID 27 */
 #define VTIMER_INTID		27
 #define PTIMER_INTID		30
+/*
+ * EL1 physical timer: CNTP_* writes are undefined at EL1 (the Qualcomm
+ * hypervisor keeps CNTHCTL_EL2.EL1PCEN clear); measured, M1a run 3:
+ * "msr cntp_ctl_el0" took EC 0x00. The virtual timer and CNTPCT work.
+ */
+#define BOARD_EL1_PTIMER	0
 /* qcom,msm-imem@146bf000 restart_reason@65c */
 #define IMEM_RESTART_REASON	0x146bf65cUL
 /* TODO(lemonadep): no PS_HOLD node in lahaina.dtsi or sm8350.dtsi; PSCI reset only */
@@ -50,6 +56,7 @@
 #define VTIMER_INTID		19	/* DT: <GIC_PPI 3 ...>, not the usual 27 */
 #define PTIMER_INTID		18	/* DT: <GIC_PPI 2 ...> */
 #define IMEM_RESTART_REASON	0x146aa65cUL	/* qcom,msm-imem restart_reason@65c */
+#define BOARD_EL1_PTIMER	1
 #define PSHOLD			0x0c264000UL
 #define UFS_BASE		0x01d84000UL	/* ufshc@1d84000, sweet live FDT */
 #define BOARD_HAS_MDSS		0
