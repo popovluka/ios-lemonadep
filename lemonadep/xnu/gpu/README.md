@@ -12,8 +12,21 @@ The A660 equivalent of `github.com/UniXNU/UniXNU`'s own
 adapted because **A660 is plain a6xx gen4, not an A7XX variant** like UniXNU's
 own sheng (SM8550/Adreno 740) target -- the variant selection, and which
 registers even exist, differ (see the comments in `derive-a660-hwinit.py` for
-the three registers dropped because they are genuinely A7XX-only, checked
+the four registers dropped because they are genuinely A7XX-only, checked
 against the real `a6xx_gpu.c` `hw_init()`, not assumed).
+
+It also covers the **GMU cold-start / RSC-PDC handshake** registers and real
+write sequence (`a6xx_gmu_fw_start()`, `a6xx_rpmh_start()`,
+`a6xx_gmu_rpmh_init()` in the same pinned source), traced branch by branch
+for A660 specifically -- this is *not* a port of `UniXNU-sheng`'s own
+`ShengGmu.c` with substituted addresses, because the control flow itself
+diverges per generation in at least two places (full citations in
+`lemonadep/HANDOFF.md`, "GPU, Phase 2 continued"):
+
+1. TCM retention is `GMU_GENERAL_7=1` on A660, not `CX_MISC_TCM_RET_CNTL`
+   (an A7XX-only register `ShengGmu.c` uses for the A740).
+2. A660 takes the "PDC configured in AOP" path (shared with A7XX), skipping
+   the PDC sequencer-microcode/TCS1/TCS3 block entirely.
 
 Pinned source: `ianchb/sm8550-mainline` @ `42f3b40c702abbc37c3a04c95af008cd283aeaf3`
 -- the exact commit `github.com/UniXNU/UniXNU`'s own

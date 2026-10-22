@@ -72,12 +72,31 @@ GPU = ['GBIF_HALT', 'RBBM_GBIF_HALT', 'RBBM_SECVID_TSB_CNTL', 'RBBM_SECVID_TSB_T
 # checked, not assumed. A660 doesn't touch this register.
 GMU = ['GPU_GMU_AO_GMU_CGC_MODE_CNTL', 'GPU_GMU_AO_GMU_CGC_DELAY_CNTL', 'GPU_GMU_AO_GMU_CGC_HYST_CNTL']
 
+# GMU cold-start / RSC-PDC handshake registers (a6xx_gmu_fw_start(), a6xx_rpmh_start(),
+# a6xx_gmu_rpmh_init() in the pinned a6xx_gmu.c) for A660's real control-flow path -- traced
+# branch by branch (not ShengGmu.c's A7XX path with substituted addresses): A660 is
+# adreno_is_a650_family() (family==GEN3||GEN4) so it takes the FAL10-veto and "PDC configured
+# in AOP" branches, but is NOT adreno_is_a7xx() so TCM retention is GMU_GENERAL_7 (not
+# CX_MISC_TCM_RET_CNTL, which doesn't exist pre-A7XX) and it is NOT adreno_is_a740_family()
+# (GEN2||GEN3 of the 7XX line) so the HIDDEN_TCS_CMD0_DATA+4 value is 0x80000000, not 0x80000021.
+GMU_CORE_RSC = ['GMU_RSCC_CONTROL_REQ', 'GMU_RSCC_CONTROL_ACK', 'GMU_GENERAL_7']
+RSCC = ['GPU_RSCC_RSC_STATUS0_DRV0', 'RSCC_PDC_SLAVE_ID_DRV0', 'RSCC_HIDDEN_TCS_CMD0_DATA',
+        'RSCC_HIDDEN_TCS_CMD0_ADDR', 'RSCC_OVERRIDE_START_ADDR', 'RSCC_PDC_SEQ_START_ADDR',
+        'RSCC_PDC_MATCH_VALUE_LO', 'RSCC_PDC_MATCH_VALUE_HI', 'RSCC_SEQ_MEM_0_DRV0',
+        'RSCC_SEQ_BUSY_DRV0']
+# A6XX_PDC domain (a6xx.xml): the register's own name has no "PDC_" prefix -- the C side gets
+# REG_A6XX_PDC_GPU_ENABLE_PDC etc. by concatenating the domain name with the register name.
+PDC = ['GPU_ENABLE_PDC', 'GPU_SEQ_START_ADDR']
+
 
 def main():
     catalog = CATALOG.read_text()
     defines = [(n, resolve(n, ['a6xx.xml', 'adreno_common.xml'])) for n in GPU]
     defines += [(n, resolve(n, ['a6xx_gmu.xml'])) for n in GMU]
     defines.append(('CP_PROTECT', resolve('CP_PROTECT', ['a6xx.xml'], 'array')))
+    gmu_core_rsc = [(n, resolve(n, ['a6xx_gmu.xml'])) for n in GMU_CORE_RSC]
+    rscc = [(n, resolve(n, ['a6xx_gmu.xml'])) for n in RSCC]
+    pdc = [(n, resolve(n, ['a6xx.xml'])) for n in PDC]
 
     block = re.search(r'a660_hwcg\[\]\s*=\s*\{(.*?)\{\},\s*\};', catalog, re.S).group(1)
     hwcg = []
@@ -123,16 +142,50 @@ def main():
     lines += ['    {%2d,0x%08x},' % w for w in writes]
     lines.append('};')
     lines.append('#define LEMONADEP_A660_PROTECT_COUNT %d' % len(writes))
+
+    lines.append('')
+    lines.append('/* GMU cold-start / RSC-PDC handshake (a6xx_gmu_fw_start, a6xx_rpmh_start,')
+    lines.append(' * a6xx_gmu_rpmh_init in the pinned a6xx_gmu.c), A660\'s real traced path --')
+    lines.append(' * see lemonadep/HANDOFF.md "GPU, Phase 2 continued" for the branch-by-branch')
+    lines.append(' * citations. Byte offsets (register offset << 2), not dword, to match the')
+    lines.append(' * ShengGmuIo read32/write32(window, byte_offset, ...) contract. */')
+    for n, o in gmu_core_rsc:
+        lines.append('#define A660_%s 0x%06x' % (n, o * 4))
+    for n, o in rscc:
+        lines.append('#define A660_%s 0x%06x' % (n, o * 4))
+    for n, o in pdc:
+        lines.append('#define A660_PDC_%s 0x%06x' % (n, o * 4))
+    lines.append('/* HIDDEN_TCS_CMD0 DATA/ADDR pairs step by +2 dwords per slot (0,2,4); A660')
+    lines.append(' * writes slot 4\'s DATA as 0x80000000 (not A740\'s 0x80000021 -- A660 is not')
+    lines.append(' * adreno_is_a740_family()). RSC sequencer microcode: A660 takes the')
+    lines.append(' * a650_family/a7xx branch (not the plain-a6xx values). PDC is in the')
+    lines.append(' * "configured in AOP" mode (pdc_in_aop=true for a650_family), so only the')
+    lines.append(' * two PDC_GPU_* writes at the end happen -- the PDC sequencer uCode and')
+    lines.append(' * TCS1/TCS3 command block (plain-a6xx/non-AOP path only) do not apply here. */')
+    lines.append('/* Values this sequence writes INTO the registers above, as distinct from the')
+    lines.append(' * A660_* MMIO offsets above (A660_RSCC_PDC_SEQ_START_ADDR is where to write;')
+    lines.append(' * RSCC_VAL_PDC_SEQ_START_ADDR, which happens to equal A660_PDC_GPU_SEQ_START_ADDR')
+    lines.append(' * numerically, is what to write there -- do not confuse the two). */')
+    lines.append('#define LEMONADEP_A660_HIDDEN_TCS_CMD0_SLOT4_DATA 0x80000000u')
+    lines.append('static const uint32_t LemonadepA660RscSeqMicrocode[5]={')
+    lines.append('    0xeaaae5a0u,0xe1a1ebabu,0xa2e0a581u,0xecac82e2u,0x0020edadu,')
+    lines.append('};')
+    lines.append('#define LEMONADEP_A660_RSCC_VAL_PDC_SEQ_START_ADDR 0x4520u')
+    lines.append('#define LEMONADEP_A660_RSCC_VAL_PDC_MATCH_VALUE_LO 0x4510u')
+    lines.append('#define LEMONADEP_A660_RSCC_VAL_PDC_MATCH_VALUE_HI 0x4514u')
+    lines.append('#define LEMONADEP_A660_PDC_VAL_GPU_ENABLE_PDC 0x80000001u')
     lines.append('#endif')
     text = '\n'.join(lines) + '\n'
+    gmu_seq_count = len(gmu_core_rsc) + len(rscc) + len(pdc)
     if '--check' in sys.argv[3:]:
         if OUT.read_text() != text:
             raise SystemExit('LemonadepA660HwInit.h is stale')
-        print('PASS: %d registers, %d hwcg entries, %d protect writes (matches committed header)' %
-              (len(defines), len(hwcg), len(writes)))
+        print('PASS: %d registers, %d hwcg entries, %d protect writes, %d GMU/RSC/PDC registers '
+              '(matches committed header)' % (len(defines), len(hwcg), len(writes), gmu_seq_count))
         return
     OUT.write_text(text)
-    print('PASS: %d registers, %d hwcg entries, %d protect writes' % (len(defines), len(hwcg), len(writes)))
+    print('PASS: %d registers, %d hwcg entries, %d protect writes, %d GMU/RSC/PDC registers' %
+          (len(defines), len(hwcg), len(writes), gmu_seq_count))
 
 
 main()

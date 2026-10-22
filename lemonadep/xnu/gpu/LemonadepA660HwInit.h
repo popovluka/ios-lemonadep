@@ -155,4 +155,44 @@ static const uint32_t LemonadepA660Protect[][2]={
     {47,0x8001f8c0},
 };
 #define LEMONADEP_A660_PROTECT_COUNT 41
+
+/* GMU cold-start / RSC-PDC handshake (a6xx_gmu_fw_start, a6xx_rpmh_start,
+ * a6xx_gmu_rpmh_init in the pinned a6xx_gmu.c), A660's real traced path --
+ * see lemonadep/HANDOFF.md "GPU, Phase 2 continued" for the branch-by-branch
+ * citations. Byte offsets (register offset << 2), not dword, to match the
+ * ShengGmuIo read32/write32(window, byte_offset, ...) contract. */
+#define A660_GMU_RSCC_CONTROL_REQ 0x08ec1c
+#define A660_GMU_RSCC_CONTROL_ACK 0x08ec20
+#define A660_GMU_GENERAL_7 0x07e730
+#define A660_GPU_RSCC_RSC_STATUS0_DRV0 0x000010
+#define A660_RSCC_PDC_SLAVE_ID_DRV0 0x00002c
+#define A660_RSCC_HIDDEN_TCS_CMD0_DATA 0x000038
+#define A660_RSCC_HIDDEN_TCS_CMD0_ADDR 0x000034
+#define A660_RSCC_OVERRIDE_START_ADDR 0x000400
+#define A660_RSCC_PDC_SEQ_START_ADDR 0x000020
+#define A660_RSCC_PDC_MATCH_VALUE_LO 0x000024
+#define A660_RSCC_PDC_MATCH_VALUE_HI 0x000028
+#define A660_RSCC_SEQ_MEM_0_DRV0 0x000600
+#define A660_RSCC_SEQ_BUSY_DRV0 0x000404
+#define A660_PDC_GPU_ENABLE_PDC 0x004500
+#define A660_PDC_GPU_SEQ_START_ADDR 0x004520
+/* HIDDEN_TCS_CMD0 DATA/ADDR pairs step by +2 dwords per slot (0,2,4); A660
+ * writes slot 4's DATA as 0x80000000 (not A740's 0x80000021 -- A660 is not
+ * adreno_is_a740_family()). RSC sequencer microcode: A660 takes the
+ * a650_family/a7xx branch (not the plain-a6xx values). PDC is in the
+ * "configured in AOP" mode (pdc_in_aop=true for a650_family), so only the
+ * two PDC_GPU_* writes at the end happen -- the PDC sequencer uCode and
+ * TCS1/TCS3 command block (plain-a6xx/non-AOP path only) do not apply here. */
+/* Values this sequence writes INTO the registers above, as distinct from the
+ * A660_* MMIO offsets above (A660_RSCC_PDC_SEQ_START_ADDR is where to write;
+ * RSCC_VAL_PDC_SEQ_START_ADDR, which happens to equal A660_PDC_GPU_SEQ_START_ADDR
+ * numerically, is what to write there -- do not confuse the two). */
+#define LEMONADEP_A660_HIDDEN_TCS_CMD0_SLOT4_DATA 0x80000000u
+static const uint32_t LemonadepA660RscSeqMicrocode[5]={
+    0xeaaae5a0u,0xe1a1ebabu,0xa2e0a581u,0xecac82e2u,0x0020edadu,
+};
+#define LEMONADEP_A660_RSCC_VAL_PDC_SEQ_START_ADDR 0x4520u
+#define LEMONADEP_A660_RSCC_VAL_PDC_MATCH_VALUE_LO 0x4510u
+#define LEMONADEP_A660_RSCC_VAL_PDC_MATCH_VALUE_HI 0x4514u
+#define LEMONADEP_A660_PDC_VAL_GPU_ENABLE_PDC 0x80000001u
 #endif
