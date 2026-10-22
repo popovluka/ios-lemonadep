@@ -14,6 +14,8 @@ never guessed.
 | **LOS-D** | `LineageOS/android_device_oneplus_lemonadep` @ `07728a7` (lineage-23.2) | |
 | LOS-K | `LineageOS/android_kernel_oneplus_sm8350` @ `187d13c` (lineage-23.2) | Same vendor DT tree under `arch/arm64/boot/dts/vendor/`; not cited separately |
 | OP-K | `OnePlusOSS/android_kernel_oneplus_sm8350` @ `9e38a9f` | No DT in this repo |
+| **ML-GPU** | `torvalds/linux`, default branch, fetched 2026-10-23 (not pinned to the `ML` tag's `v6.17` -- `drivers/gpu/drm/msm/adreno/` moves fast; re-fetch and diff before relying on an exact line number) | `a6xx_catalog.c`, `a6xx_gpu.c` |
+| **UniXNU** | `github.com/UniXNU/{UniXNU,NativeAdreno,NativeMetal}`, default branch, cloned 2026-10-23 | `NativeAdrenoABI.h`, `patches/mesa/turnip-darwin-kmd.patch`, `scripts/data/adreno-compiler-inputs.json` |
 
 **How the DT is put together.** ABL merges a base DTB with the dtbo overlay for this board:
 - base = `devicetree/oplus/lemonadev/lahaina{,-v2,-v2.1}.dts` → `devicetree/qcom/lahaina.dtsi`
@@ -184,7 +186,27 @@ The kernel driver adopts the host ABL left running, so the base address is the o
 | apps_rsc | drv-0 `0x18200000`, drv-1 `0x18210000`, **drv-2 `0x18220000`** (each `0x10000`); `qcom,tcs-offset = 0xd00`, `drv-id = 2`; TCS ACTIVE 2 / SLEEP 3 / WAKE 3 / CONTROL 0 | OP `qcom/lahaina.dtsi:592-607`; ML `sm8350.dtsi:3615-3628` | H (**the same values sweet's patch 0062 hard-codes**) |
 | cmd-db | reserved memory `0x80860000` + `0x20000` (direct; sweet read it through an AOP msgram pointer `0x0c3f000c`) | OP `lahaina.dtsi:317`; ML `:432-434` | H |
 
-## 8. USB (deferred; recorded for later)
+## 8. GPU (Adreno 660)
+
+Scoping pass (2026-10-23) for the Metal-on-Adreno bring-up; see
+`HANDOFF.md`'s "GPU, Phase 0/1" sections for the toolchain side (metal2vulkan,
+Turnip, the UniXNU reference) and the real firmware already pulled from this
+phone (`lemonadep/fw-gpu/`).
+
+| Component | Value | Source | Conf |
+| --- | --- | --- | --- |
+| Chip ID (exact entry for `revn=660`, not a neighboring a6xx chip) | `0x06060001`, `ADRENO_6XX_GEN4` | `linux` (mainline) `drivers/gpu/drm/msm/adreno/a6xx_catalog.c:1020-1038` | H |
+| GMEM | `SZ_1M + SZ_512K` = **1.5 MiB** (not the 1 MiB some other a6xx chips use -- do not reuse a 640/740 example value) | same, `:1027` | H |
+| Quirks | `ADRENO_QUIRK_HAS_CACHED_COHERENT \| ADRENO_QUIRK_HAS_HW_APRIV` | same, `:1030-1031` | H |
+| Firmware names (match the files already pulled from this phone byte for byte) | SQE `a660_sqe.fw`, GMU `a660_gmu.bin`, zap `a660_zap.mdt` | same, `:1024-1026,1033`; confirmed present at `/vendor/firmware/` on-device, 2026-10-23 | H |
+| Clock-gating (`a660_hwcg`) and protected-register (`a660_protect`, 48 entries) tables | full reglist, not yet transcribed here (long; pull from source when writing the driver) | same, `:400-586` (hwcg), `:587-631` (protect) | H |
+| GBIF CX config | shared with a640 (`a640_gbif`), not a660-unique | same, `:1036` | H |
+| `gmu_cgc_mode` / `prim_fifo_threshold` | `0x00020000` / `0x00300200` | same, `:1036-1037` | H |
+| Kernel ABI the Turnip darwin backend expects | `NativeAdrenoABI.h` (UniXNU/NativeAdreno) -- versioned, `static_assert`-pinned wire structs for Query/BoAlloc/BoMap/BoImport/Submit/WaitFence/GetDeviceInfo/queues | github.com/UniXNU/NativeAdreno, 2026-10-23 | H |
+| IOKit discovery the darwin KMD patch uses | `IOServiceGetMatchingService` for `$TU_DARWIN_SERVICE` (default `"IOAcceleratorES"` -- **the class name sweet's own `SweetAccelerator.cpp` already publishes**), open type `$TU_DARWIN_OPEN_TYPE` (default `0x4147`); service name `"NativeAdrenoGpuPublished"` selects the unsandboxed direct form | `patches/mesa/turnip-darwin-kmd.patch` (UniXNU/UniXNU), 2026-10-23 | H |
+| GMU/CP bring-up sequence for A660 specifically | **not yet sourced**: UniXNU's own `NativeAdrenoA740HwInit.h` is for the 740 (a different a6xx generation's exact register sequence) and must not be reused verbatim; the real source is `a6xx_gpu.c`/`a6xx_gmu.c`/`a6xx_hfi.c` in the same Linux tree, not yet read in full | TODO | - |
+
+## 9. USB (deferred; recorded for later)
 
 Scoping pass (2026-10-22), re-checking against the real retail dtsi rather than
 relying on the earlier deferred note: sweet's existing USB overlay (xnu/patches
@@ -205,7 +227,7 @@ PHY family entirely (SNPS femto, below) and needs its own init.
 | SS/DP PHY | `ssphy@88e8000` | OP `lahaina-usb.dtsi:142-144` | M |
 | Secondary HS PHY (unused here) | `hsphy@88e4000`, same `qcom,usb-hsphy-snps-femto` compatible, no `eud_enable_reg` entry | OP `lahaina-usb.dtsi:415-418` | M |
 
-## 9. What this means for the sweet code (feeds STEP 3)
+## 10. What this means for the sweet code (feeds STEP 3)
 
 | sweet constant | lemonadep | Change? |
 | --- | --- | --- |
