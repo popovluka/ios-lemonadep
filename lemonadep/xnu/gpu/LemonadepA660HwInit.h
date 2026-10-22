@@ -224,4 +224,34 @@ static const uint32_t LemonadepA660RscSeqMicrocode[5]={
 /* a640_gbif (shared by A660, confirmed in a6xx_catalog.c): write this same value
  * to GBIF_QSB_SIDE0..SIDE3 (consecutive dwords, +1 each). */
 #define LEMONADEP_A660_GBIF_QSB_VALUE 0x00071620u
+
+/* a660_build_bw_table() in the pinned a6xx_hfi.c -- transcribed verbatim, not
+ * derived (it is already hand-written per chip in the real source, dispatched
+ * for us by adreno_is_a660(), an exact chip_id==660 match, confirmed our
+ * a6xx_catalog.c entry has no .bcms override that would select a different,
+ * dynamically-generated table instead). Part of the real, non-legacy
+ * a6xx_hfi_start() sequence: send_perf_table, THIS, enable_acd, enable_ifpc,
+ * send_core_fw_start, send_start (a6xx_hfi.c:972-1005; A660 is not
+ * gmu->legacy -- that is only RGMU chips and adreno_is_a630_family(), GEN1). */
+struct LemonadepA660BwTable {
+    uint32_t bw_level_num;
+    uint32_t ddr_cmds_num;
+    uint32_t ddr_wait_bitmask;
+    uint32_t ddr_cmds_addrs[3];
+    uint32_t ddr_cmds_data0[3];  /* only level 0 ("off") is populated */
+    uint32_t cnoc_cmds_num;
+    uint32_t cnoc_wait_bitmask;
+    uint32_t cnoc_cmds_addrs[1];
+    uint32_t cnoc_cmds_data0[1];
+    uint32_t cnoc_cmds_data1[1];
+};
+static const struct LemonadepA660BwTable LemonadepA660BwTable_ = {
+    .bw_level_num = 1,
+    .ddr_cmds_num = 3, .ddr_wait_bitmask = 0x01,
+    .ddr_cmds_addrs = {0x50004,0x500a0,0x50000},
+    .ddr_cmds_data0 = {0x40000000,0x40000000,0x40000000},
+    .cnoc_cmds_num = 1, .cnoc_wait_bitmask = 0x01,
+    .cnoc_cmds_addrs = {0x50070},
+    .cnoc_cmds_data0 = {0x40000000}, .cnoc_cmds_data1 = {0x60000001},
+};
 #endif
