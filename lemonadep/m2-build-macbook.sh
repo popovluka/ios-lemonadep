@@ -54,7 +54,7 @@ fi
 
 echo "== 2/6: getting the repo (for mkiosroot.sh, sweet-root-tweaks.py, remotezip.py) =="
 if [ ! -d ios-sweet ]; then
-	git clone -q -b lemonadep https://github.com/popovluka/ios-sweet.git
+	git clone -q -b lemonadep https://github.com/popovluka/ios-lemonadep.git ios-sweet
 fi
 cd ios-sweet && git fetch -q origin lemonadep && git checkout -q lemonadep && git reset -q --hard origin/lemonadep
 cd "$WORK"
