@@ -33,7 +33,11 @@ if ! command -v apfs-fuse >/dev/null 2>&1; then
 	git clone -q --recursive https://github.com/sgan81/apfs-fuse.git
 	# apfs-fuse's CMakeLists.txt predates CMake 3.5; recent CMake (4.x on
 	# Arch) dropped compatibility with that old cmake_minimum_required.
-	cmake -S apfs-fuse -B apfs-fuse/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+	# Its headers also rely on <cstdint> being pulled in transitively by
+	# other includes, which recent libstdc++ (GCC 16) no longer does;
+	# force-include it instead of patching 48 source files.
+	cmake -S apfs-fuse -B apfs-fuse/build -DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_CXX_FLAGS="-include cstdint"
 	make -C apfs-fuse/build -j"$(nproc)"
 	sudo install -m 755 apfs-fuse/build/apfs-fuse /usr/local/bin/apfs-fuse
 fi
