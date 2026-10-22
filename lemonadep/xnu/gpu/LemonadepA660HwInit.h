@@ -1,0 +1,158 @@
+/* SPDX-License-Identifier: MIT */
+#ifndef LEMONADEP_A660_HWINIT_H
+#define LEMONADEP_A660_HWINIT_H
+#include <stdint.h>
+/* Derived (by lemonadep/xnu/test/derive-a660-hwinit.py, adapted from UniXNU/UniXNU's
+ * scripts/derive-a740-hwinit.py for the A660 -- plain a6xx gen4, not an A7XX variant) from the
+ * pinned ianchb/sm8550-mainline @ 42f3b40c (sha256-verified against UniXNU's own
+ * scripts/data/adreno-inputs.json record): registers/adreno/{a6xx,adreno_common,a6xx_gmu}.xml and
+ * adreno/a6xx_catalog.c (a660_hwcg, a660_protect_regs, DECLARE_ADRENO_PROTECT(a660_protect,48)).
+ * Dword register offsets. Do not edit by hand; re-run the deriving script instead. */
+#define A660_GBIF_HALT 0x03c45
+#define A660_RBBM_GBIF_HALT 0x00016
+#define A660_RBBM_SECVID_TSB_CNTL 0x0f803
+#define A660_RBBM_SECVID_TSB_TRUSTED_BASE 0x0f800
+#define A660_RBBM_SECVID_TSB_TRUSTED_SIZE 0x0f802
+#define A660_RBBM_GBIF_CLIENT_QOS_CNTL 0x00011
+#define A660_UCHE_GBIF_GX_CONFIG 0x00e3a
+#define A660_RBBM_PERFCTR_GPU_BUSY_MASKED 0x0050b
+#define A660_UCHE_TRAP_BASE 0x00e09
+#define A660_UCHE_WRITE_THRU_BASE 0x00e07
+#define A660_UCHE_GMEM_RANGE_MIN 0x00e0b
+#define A660_UCHE_GMEM_RANGE_MAX 0x00e0d
+#define A660_UCHE_CACHE_WAYS 0x00e17
+#define A660_CP_AHB_CNTL 0x0098d
+#define A660_RBBM_PERFCTR_CNTL 0x00500
+#define A660_RBBM_INTERFACE_HANG_INT_CNTL 0x0001f
+#define A660_UCHE_CLIENT_PF 0x00e19
+#define A660_CP_PROTECT_CNTL 0x0084f
+#define A660_UCHE_CMDQ_CONFIG 0x00e3c
+#define A660_CP_APRIV_CNTL 0x00844
+#define A660_RB_CMP_DBG_ECO_CNTL 0x08e28
+#define A660_RBBM_INT_0_MASK 0x00038
+#define A660_CP_SQE_INSTR_BASE 0x00830
+#define A660_CP_RB_BASE 0x00800
+#define A660_CP_RB_CNTL 0x00802
+#define A660_CP_RB_RPTR_ADDR 0x00804
+#define A660_CP_SQE_CNTL 0x00808
+#define A660_CP_RB_RPTR 0x00806
+#define A660_CP_RB_WPTR 0x00807
+#define A660_RBBM_STATUS 0x00210
+#define A660_RBBM_INT_0_STATUS 0x00201
+#define A660_CP_HW_FAULT 0x00821
+#define A660_CP_INTERRUPT_STATUS 0x00823
+#define A660_RBBM_CLOCK_CNTL 0x000ae
+#define A660_RBBM_SECVID_TRUST_CNTL 0x0f400
+#define A660_RBBM_STATUS3 0x00213
+#define A660_CP_SQE_STAT_ADDR 0x00908
+#define A660_CP_SQE_STAT_DATA 0x00909
+#define A660_RB_NC_MODE_CNTL 0x08e08
+#define A660_TPL1_NC_MODE_CNTL 0x0b604
+#define A660_SP_NC_MODE_CNTL 0x0ae02
+#define A660_CP_APERTURE_CNTL_HOST 0x00a00
+#define A660_UCHE_MODE_CNTL 0x00e01
+#define A660_RBBM_NC_MODE_CNTL 0x00534
+#define A660_RBBM_INT_CLEAR_CMD 0x00037
+#define A660_CP_ALWAYS_ON_COUNTER 0x00980
+#define A660_GPU_GMU_AO_GMU_CGC_MODE_CNTL 0x23b09
+#define A660_GPU_GMU_AO_GMU_CGC_DELAY_CNTL 0x23b0a
+#define A660_GPU_GMU_AO_GMU_CGC_HYST_CNTL 0x23b0b
+#define A660_CP_PROTECT 0x00850
+static const uint32_t LemonadepA660Hwcg[][2]={
+    {0x000b0,0x02222222},   /* RBBM_CLOCK_CNTL_SP0 */
+    {0x000b4,0x02222220},   /* RBBM_CLOCK_CNTL2_SP0 */
+    {0x000b8,0x00000080},   /* RBBM_CLOCK_DELAY_SP0 */
+    {0x000bc,0x0000f3cf},   /* RBBM_CLOCK_HYST_SP0 */
+    {0x000c0,0x22222222},   /* RBBM_CLOCK_CNTL_TP0 */
+    {0x000c4,0x22222222},   /* RBBM_CLOCK_CNTL2_TP0 */
+    {0x000c8,0x22222222},   /* RBBM_CLOCK_CNTL3_TP0 */
+    {0x000cc,0x00022222},   /* RBBM_CLOCK_CNTL4_TP0 */
+    {0x000d0,0x11111111},   /* RBBM_CLOCK_DELAY_TP0 */
+    {0x000d4,0x11111111},   /* RBBM_CLOCK_DELAY2_TP0 */
+    {0x000d8,0x11111111},   /* RBBM_CLOCK_DELAY3_TP0 */
+    {0x000dc,0x00011111},   /* RBBM_CLOCK_DELAY4_TP0 */
+    {0x000e0,0x77777777},   /* RBBM_CLOCK_HYST_TP0 */
+    {0x000e4,0x77777777},   /* RBBM_CLOCK_HYST2_TP0 */
+    {0x000e8,0x77777777},   /* RBBM_CLOCK_HYST3_TP0 */
+    {0x000ec,0x00077777},   /* RBBM_CLOCK_HYST4_TP0 */
+    {0x000f0,0x22222222},   /* RBBM_CLOCK_CNTL_RB0 */
+    {0x000f4,0x01002222},   /* RBBM_CLOCK_CNTL2_RB0 */
+    {0x000f8,0x00002220},   /* RBBM_CLOCK_CNTL_CCU0 */
+    {0x00100,0x00040f00},   /* RBBM_CLOCK_HYST_RB_CCU0 */
+    {0x00104,0x25222022},   /* RBBM_CLOCK_CNTL_RAC */
+    {0x00105,0x00005555},   /* RBBM_CLOCK_CNTL2_RAC */
+    {0x00106,0x00000011},   /* RBBM_CLOCK_DELAY_RAC */
+    {0x00107,0x00445044},   /* RBBM_CLOCK_HYST_RAC */
+    {0x00108,0x04222222},   /* RBBM_CLOCK_CNTL_TSE_RAS_RBBM */
+    {0x00111,0x00002222},   /* RBBM_CLOCK_MODE_VFD */
+    {0x00114,0x00222222},   /* RBBM_CLOCK_MODE_GPC */
+    {0x00117,0x00000002},   /* RBBM_CLOCK_DELAY_HLSQ_2 */
+    {0x0011b,0x00002222},   /* RBBM_CLOCK_MODE_HLSQ */
+    {0x00109,0x00004000},   /* RBBM_CLOCK_DELAY_TSE_RAS_RBBM */
+    {0x00112,0x00002222},   /* RBBM_CLOCK_DELAY_VFD */
+    {0x00115,0x00000200},   /* RBBM_CLOCK_DELAY_GPC */
+    {0x0011c,0x00000000},   /* RBBM_CLOCK_DELAY_HLSQ */
+    {0x0010a,0x00000000},   /* RBBM_CLOCK_HYST_TSE_RAS_RBBM */
+    {0x00113,0x00000000},   /* RBBM_CLOCK_HYST_VFD */
+    {0x00116,0x04104004},   /* RBBM_CLOCK_HYST_GPC */
+    {0x0011d,0x00000000},   /* RBBM_CLOCK_HYST_HLSQ */
+    {0x00120,0x00000222},   /* RBBM_CLOCK_CNTL_TEX_FCHE */
+    {0x00121,0x00000111},   /* RBBM_CLOCK_DELAY_TEX_FCHE */
+    {0x00122,0x00000000},   /* RBBM_CLOCK_HYST_TEX_FCHE */
+    {0x0010b,0x22222222},   /* RBBM_CLOCK_CNTL_UCHE */
+    {0x00110,0x00000004},   /* RBBM_CLOCK_HYST_UCHE */
+    {0x0010f,0x00000002},   /* RBBM_CLOCK_DELAY_UCHE */
+    {0x00533,0x00000182},   /* RBBM_ISDB_CNT */
+    {0x00044,0x00000000},   /* RBBM_RAC_THRESHOLD_CNT */
+    {0x00042,0x00000000},   /* RBBM_SP_HYST_CNT */
+    {0x00118,0x00000222},   /* RBBM_CLOCK_CNTL_GMU_GX */
+    {0x00119,0x00000111},   /* RBBM_CLOCK_DELAY_GMU_GX */
+    {0x0011a,0x00000555},   /* RBBM_CLOCK_HYST_GMU_GX */
+};
+#define LEMONADEP_A660_HWCG_COUNT 49
+/* {CP_PROTECT index, value} in a6xx_set_cp_protect order. */
+static const uint32_t LemonadepA660Protect[][2]={
+    { 0,0x13fc0000},
+    { 1,0x00140501},
+    { 2,0x0bd0050b},
+    { 3,0x8000050e},
+    { 4,0x80000510},
+    { 5,0x80000534},
+    { 6,0x82080800},
+    { 7,0x802008a0},
+    { 8,0x809008ab},
+    { 9,0x02b808de},
+    {10,0x81340900},
+    {11,0x89c8098d},
+    {12,0x80040e00},
+    {13,0x80300e03},
+    {14,0x830c3c00},
+    {15,0x7ffc3cc4},
+    {16,0x873c8630},
+    {17,0x80008e00},
+    {18,0x80008e08},
+    {19,0x807c8e50},
+    {20,0x89fc8e80},
+    {21,0x876c9624},
+    {22,0x80449e60},
+    {23,0x861c9e78},
+    {24,0x873ca630},
+    {25,0x8000ae02},
+    {26,0x84bcae50},
+    {27,0x8000b604},
+    {28,0x8018b608},
+    {29,0x8004be02},
+    {30,0x857cbe20},
+    {31,0x97fcd000},
+    {32,0xaffcf000},
+    {33,0x7ffcfc00},
+    {34,0xfffd8400},
+    {35,0xfffda400},
+    {36,0x910df400},
+    {37,0x01edf844},
+    {38,0x8001f860},
+    {39,0x806df887},
+    {47,0x8001f8c0},
+};
+#define LEMONADEP_A660_PROTECT_COUNT 41
+#endif
