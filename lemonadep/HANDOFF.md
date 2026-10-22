@@ -189,3 +189,36 @@ silicon yet -- this is the first real signal on whether the sourced register
 map and protocol sequence actually match the hardware. If something's off,
 the boot-args can disable either independently (`sweetkeys=0` or
 `sweettouch=0`) to bisect.
+
+## Review caught a real bug before the on-device test; rebuilt (2026-10-22 ~17:07)
+
+A fresh adversarial review of overlays 1004/1005 (requested explicitly, before
+the planned first on-device test) found a real bug outside anything the TCM
+framing tests exercise: `sweet_touch.c`'s lemonadep path calls
+`sweet_rpmh_vreg_enable("ldoc3", 3008)` to vote the touch rail, but that
+function (`bsd/dev/sweet_rpmh.c`, added by the base sweet series) has a
+hardcoded safety gate accepting only the literal string `"ldoc11"` --
+sweet's own resource. The call would have returned `EINVAL` immediately,
+aborting touch bring-up before any I2C/TCM access. The underlying mechanism
+(`rh_lookup`/`rh_send`) is a genuine runtime cmd-db search, not a hardcoded
+address, so the fix just widens the explicit allow-list to the one
+additional resource now reasoned through: PM8350C L3. Appended to
+`lemonadep/xnu/patches/1005-lemonadep-touch-tcm.patch`, commit `ed90ba2`.
+
+Everything else survived the review: re-verified 1004's PPID math and
+confirmed the RT_STS/SUBTYPE offsets are genuinely universal (only
+`keys_read`'s low byte matters, no override needed there); re-verified
+1005's DFS register offsets (`rcg+0x14`, `rcg+0x1c`) against the actual
+generic `drivers/clk/qcom/clk-rcg2.c` (`SE_CMD_DFSR_OFFSET`/`SE_PERF_DFSR`),
+not just "same IP generation" reasoning as before.
+
+Rebuilt the kernel (run
+https://github.com/popovluka/ios-lemonadep/actions/runs/39794051333, after
+the first attempt hit the same transient macOS-runner queue issue and
+needed one rerun) -- `kernel.development.sweet`, SHA256
+`462f55a5ec6c9290b6163a9d977c1a926229520435b87f524ce3f30b2569d3f1` --
+and the boot image: `shim/out/lemonadep/m2-boot.img`, SHA256
+`fcda58a9eeff2560eda0ec17ad2002628639f20c10be97051b9e6e1155410c5a`,
+same boot-args (`sweettouch=1 sweetkeys=1 sweetusb=0`). **This is the
+image to actually test on-device** -- the earlier one (SHA256
+`89f68b78...`) would have failed touch bring-up at the RPMh vote step.
