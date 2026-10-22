@@ -16,12 +16,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-static struct { uint8_t i2c_addr; } st = {0x4B};
+static struct { uint8_t i2c_addr; bool bitbang; } st = {0x4B, false};
 
 /* ---- mock GENI transport: records TX, replays scripted RX ---- */
 #define MOCK_MAX 32
 static struct {
-	uint8_t tx[3];
+	uint8_t tx[72];
 	unsigned nt;
 } tx_log[MOCK_MAX];
 static unsigned tx_n;
@@ -72,45 +72,60 @@ touch_msg(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx, unsigned nr
 
 /* ---- cases ---- */
 
-/* A bare (payload-less) command, e.g. CMD_IDENTIFY/CMD_ENABLE_REPORT, must
- * send exactly ONE write of [cmd] -- not zero, not two (this exact bug was
- * in the first draft: a do-while plus a redundant post-loop send). */
+/* Every command carries a 2-byte little-endian length after the command byte
+ * (syna_tcm_write_message: "adding two length bytes as part of payload"). The
+ * first draft omitted it. FIFO path: at most 2 stream bytes per transfer, the
+ * rest continue with CMD_CONTINUE_WRITE (0x01). */
 static void
 case_write_zero_len(void)
 {
 	mock_reset();
-	CHECK(touch_tcm_write(0x05, NULL, 0) == 0);
+	st.bitbang = false;
+	CHECK(touch_tcm_write(0x02, NULL, 0) == 0);
 	CHECK(tx_n == 1);
-	CHECK(tx_log[0].nt == 1 && tx_log[0].tx[0] == 0x05);
-	printf("write_zero_len: 1 transfer, [0x05]\n");
+	CHECK(tx_log[0].nt == 3 && tx_log[0].tx[0] == 0x02 && tx_log[0].tx[1] == 0 && tx_log[0].tx[2] == 0);
+	printf("write_zero_len: 1 transfer, [0x02 00 00]\n");
 }
 
-/* An 8-byte payload (our touch-report-config bytecode) must chunk into
- * ceil(8/2)=4 writes: [cmd,p0,p1] then 3x [CONTINUE_WRITE,pN,pN+1]. */
 static void
 case_write_chunked(void)
 {
 	mock_reset();
+	st.bitbang = false;
 	uint8_t payload[8] = {1, 6, 8, 8, 16, 9, 16, 3};
 	CHECK(touch_tcm_write(0x26, payload, sizeof(payload)) == 0);
-	CHECK(tx_n == 4);
-	CHECK(tx_log[0].nt == 3 && tx_log[0].tx[0] == 0x26 && tx_log[0].tx[1] == 1 && tx_log[0].tx[2] == 6);
-	CHECK(tx_log[1].nt == 3 && tx_log[1].tx[0] == 0x01 && tx_log[1].tx[1] == 8 && tx_log[1].tx[2] == 8);
-	CHECK(tx_log[2].nt == 3 && tx_log[2].tx[0] == 0x01 && tx_log[2].tx[1] == 16 && tx_log[2].tx[2] == 9);
-	CHECK(tx_log[3].nt == 3 && tx_log[3].tx[0] == 0x01 && tx_log[3].tx[1] == 16 && tx_log[3].tx[2] == 3);
-	printf("write_chunked: 4 transfers, cmd then 3x CONTINUE_WRITE\n");
+	CHECK(tx_n == 5); /* [cmd,8,0] then 4x [0x01,p,p] */
+	CHECK(tx_log[0].nt == 3 && tx_log[0].tx[0] == 0x26 && tx_log[0].tx[1] == 8 && tx_log[0].tx[2] == 0);
+	CHECK(tx_log[1].nt == 3 && tx_log[1].tx[0] == 0x01 && tx_log[1].tx[1] == 1 && tx_log[1].tx[2] == 6);
+	CHECK(tx_log[4].nt == 3 && tx_log[4].tx[0] == 0x01 && tx_log[4].tx[1] == 16 && tx_log[4].tx[2] == 3);
+	printf("write_chunked: 5 transfers, [cmd len] then CONTINUE_WRITE\n");
 }
 
-/* An odd-length payload (1 leftover byte) must still chunk correctly. */
 static void
 case_write_chunked_odd(void)
 {
 	mock_reset();
+	st.bitbang = false;
 	uint8_t payload[5] = {1, 2, 3, 4, 5};
 	CHECK(touch_tcm_write(0x26, payload, sizeof(payload)) == 0);
-	CHECK(tx_n == 3); /* 2 + 2 + 1 */
-	CHECK(tx_log[2].nt == 2 && tx_log[2].tx[0] == 0x01 && tx_log[2].tx[1] == 5);
-	printf("write_chunked_odd: 3 transfers, last carries 1 byte\n");
+	CHECK(tx_n == 4); /* [cmd,5,0] [1,1,2] [1,3,4] [1,5] */
+	CHECK(tx_log[3].nt == 2 && tx_log[3].tx[0] == 0x01 && tx_log[3].tx[1] == 5);
+	printf("write_chunked_odd: 4 transfers, last carries 1 byte\n");
+}
+
+/* Bit-banged bus: the whole packet in one transfer, as the vendor does. */
+static void
+case_write_bitbang(void)
+{
+	mock_reset();
+	st.bitbang = true;
+	uint8_t payload[9] = {1, 6, 8, 8, 16, 9, 16, 3, 0};
+	CHECK(touch_tcm_write(0x26, payload, sizeof(payload)) == 0);
+	CHECK(tx_n == 1 && tx_log[0].nt == 12);
+	CHECK(tx_log[0].tx[0] == 0x26 && tx_log[0].tx[1] == 9 && tx_log[0].tx[2] == 0 &&
+	    tx_log[0].tx[3] == 1 && tx_log[0].tx[11] == 0);
+	st.bitbang = false;
+	printf("write_bitbang: 1 transfer, [0x26 09 00 + 9 bytes]\n");
 }
 
 /* STATUS_OK with a zero-length payload: just the 5-byte header+padding read,
@@ -224,6 +239,7 @@ main(void)
 	case_write_zero_len();
 	case_write_chunked();
 	case_write_chunked_odd();
+	case_write_bitbang();
 	case_read_empty();
 	case_read_one_byte();
 	case_read_multi_byte();

@@ -81,5 +81,14 @@ clang -O1 -g -Wall -Wextra -fsanitize=address,undefined -fno-sanitize-recover=al
 aarch64-linux-gnu-gcc -O1 -g -Wall -Wextra -fsanitize=undefined -fsanitize-undefined-trap-on-error -I"$W" \
 	-static -o "$W/test_touch_tcm_arm64" "$W/test_touch_tcm.c"
 qemu-aarch64 "$W/test_touch_tcm_arm64"
+echo "== overlay 1005 (touch) end to end: bit-banged I2C + mock S3908 (host ASan/UBSan + aarch64)"
+python3 "$T/gen_touch_bb.py" "$X" "$W"
+cp "$T/test_touch_bb.c" "$W/"
+clang -std=gnu11 -O1 -g -Wall -Wno-unused-function -fsanitize=address,undefined -fno-sanitize-recover=all \
+	-I"$W" -o "$W/test_touch_bb" "$W/test_touch_bb.c"
+"$W/test_touch_bb"
+aarch64-linux-gnu-gcc -std=gnu11 -O1 -g -Wall -Wno-unused-function -fsanitize=undefined \
+	-fsanitize-undefined-trap-on-error -I"$W" -static -o "$W/test_touch_bb_arm64" "$W/test_touch_bb.c"
+qemu-aarch64 "$W/test_touch_bb_arm64"
 
 echo "overlay check: ok"

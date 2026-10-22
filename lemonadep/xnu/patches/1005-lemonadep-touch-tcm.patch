@@ -14,20 +14,16 @@
   */
  #if defined(ARM64_BOARD_CONFIG_SWEET)
  #include <sys/param.h>
-@@ -14,7 +21,12 @@
+@@ -14,7 +21,7 @@
  #include <kern/sched_prim.h>
  #include <machine/machine_routines.h>
  #include <pexpert/pexpert.h>
+-
 +#include <pexpert/device_tree.h>
-+#include <arm/caches_internal.h>
-+#include <vm/pmap.h>
-+#include <vm/vm_kern.h>
- 
-+extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
  extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
  extern kern_return_t thread_terminate(thread_t);
-@@ -32,12 +44,55 @@
+@@ -32,12 +39,56 @@
  #define TOUCH_MAX        10u
  #define TOUCH_GOODIX     1
  #define TOUCH_FTS        2
@@ -57,6 +53,7 @@
 +#define TCM_CMD_SET_REPORT_CONFIG 0x26u
 +#define TCM_STATUS_OK             0x01u
 +#define TCM_STATUS_CONTINUED_READ 0x03u
++#define TCM_REPORT_IDENTIFY       0x10u
 +#define TCM_REPORT_TOUCH          0x11u
 +#define TCM_MODE_APPLICATION      0x01u
 +#define TCM_RESET_LOW_MS          10u   /* POWEWRUP_TO_RESET_TIME */
@@ -83,35 +80,16 @@
  #define SE_STATUS       0x040u
  #define SE_MCLK         0x048u
  #define SE_FW           0x068u
-@@ -70,6 +125,27 @@
+@@ -70,6 +121,8 @@
   * MSB-to-LSB, length 8, STOP only on vector 3. FIFO bytes remain LSB first. */
  #define SE_PACK0        0x0007f8feu
  #define SE_PACK1        0x000ffefeu
-+/* SE DMA engine (non-GSI), offsets from the vendor msm-geni-se / qcom-geni-se */
-+#define SE_DMA_TX_PTR_L     0xc30u
-+#define SE_DMA_TX_PTR_H     0xc34u
-+#define SE_DMA_TX_ATTR      0xc38u
-+#define SE_DMA_TX_LEN       0xc3cu
-+#define SE_DMA_TX_IRQ_STAT  0xc40u
-+#define SE_DMA_TX_IRQ_CLR   0xc44u
-+#define SE_DMA_TX_IRQ_EN_SET 0xc4cu
-+#define SE_DMA_TX_FSM_RST   0xc58u
-+#define SE_DMA_RX_PTR_L     0xd30u
-+#define SE_DMA_RX_PTR_H     0xd34u
-+#define SE_DMA_RX_ATTR      0xd38u
-+#define SE_DMA_RX_LEN       0xd3cu
-+#define SE_DMA_RX_IRQ_STAT  0xd40u
-+#define SE_DMA_RX_IRQ_CLR   0xd44u
-+#define SE_DMA_RX_IRQ_EN_SET 0xd4cu
-+#define SE_DMA_RX_FSM_RST   0xd58u
-+#define SE_DMA_DONE_EN      (1u << 0)
-+#define SE_DMA_EOT_EN       (1u << 1)
-+#define SE_DMA_AHB_ERR_EN   (1u << 2)
-+#define SE_DMA_TX_EOT_BUF   (1u << 0)
++/* lemonadep bit-banged I2C: half SCL period (~200 kHz, as ios-sargo) */
++#define BB_HALF_NS      2500u
  
  static struct {
  	vm_offset_t se, gcc, gpio;
-@@ -78,6 +154,21 @@
+@@ -78,6 +131,21 @@
  	uint32_t irq_status, irq_last, active;
  	unsigned sent, got;
  	int x[TOUCH_MAX], y[TOUCH_MAX];
@@ -123,17 +101,17 @@
 +	uint32_t gcc_halt[5]; /* core, core_2x, m_ahb, s_ahb, se (in that order) */
 +	uint8_t i2c_addr, reset_gpio, irq_gpio, sda_gpio, scl_gpio;
 +	uint8_t pwr_gpio_2v8, pwr_gpio_1v8;
-+	/* lemonadep SE4 has its FIFO interface disabled by design (the vendor
-+	 * dtsi gives it dmas = <&gpi_dma0 ...>; FIFO_IF_DISABLE reads 1), so
-+	 * transfers go through the SE's own DMA engine instead. */
-+	bool dma;
-+	uint8_t *dma_va;
-+	uint64_t dma_pa;
-+	unsigned dma_errs;
++	/* lemonadep SE4 is a GSI-mode engine: FIFO interface disabled (vendor
++	 * dtsi dmas = <&gpi_dma0 ...>, FIFO_IF_DISABLE reads 1) and driving its
++	 * DMA engine crashed the SoC on-device (2026-10-22, XBL ramdump) -- the
++	 * same finding as zoe-vb/ios-sargo on the Pixel 3a. So the I2C bus is
++	 * bit-banged on the SDA/SCL pins as plain TLMM GPIOs and SE4 is never
++	 * touched. */
++	bool bitbang;
  } st;
  static int touch_sleep_chan;
  
-@@ -133,19 +224,69 @@
+@@ -133,19 +201,69 @@
  	touch_wr(st.gpio, off, cfg);
  }
  
@@ -210,7 +188,7 @@
  		if ((cfg & 0x371fu) != 1u) {
  			printf("SWEET TOUCH: DFS level0=%#x is not XO/1; need clock integration\n", cfg);
  			return false;
-@@ -153,13 +294,33 @@
+@@ -153,13 +271,33 @@
  	} else {
  		/* XO parent 0, HID divider 1 => 19.2 MHz. No PLL or voltage change. */
  		cfg = (cfg & ~(0x371fu | (1u << 20))) | 1u;
@@ -247,94 +225,154 @@
  	const uint32_t branches[] = {0x18004, 0x18008, 0x1800c, 0x18010, 0x18144};
  	for (unsigned i = 0; i < sizeof(branches) / sizeof(branches[0]); ++i) {
  		if (!touch_wait_clear(st.gcc, branches[i], 1u << 31)) {
-@@ -288,13 +449,101 @@
+@@ -288,13 +426,161 @@
  	return err;
  }
  
 +/*
-+ * One I2C message through the SE DMA engine (GENI_DMA_MODE_EN=1), following
-+ * the vendor driver's DMA path (i2c-qcom-geni.c geni_i2c_{tx,rx}_one_msg with
-+ * qcom-geni-se.c geni_se_{tx,rx}_dma_prep): program the M command first, then
-+ * the DMA pointer/attr/length. Polled; completion = M_CMD_DONE plus the
-+ * direction's DMA_DONE.
++ * Bit-banged I2C on st.sda_gpio/st.scl_gpio, ported from zoe-vb/ios-sargo
++ * xnu/patches/0087 (proven on a Pixel 3a whose touch SE is also GSI-only).
++ * Open drain: a line is either driven low (output, latch 0) or released
++ * (input, pull-up). TLMM bit layout is the one touch_gpio() already uses:
++ * pull bits 0-1 (3 = pull-up), drive bits 6-8, OE bit 9, IO bit0 in/bit1 out.
 + */
++static void
++bb_ndelay(uint32_t ns)
++{
++	uint64_t abs, end;
++	nanoseconds_to_absolutetime(ns, &abs);
++	end = mach_absolute_time() + (abs ? abs : 1);
++	while (mach_absolute_time() < end) {
++	}
++}
++
++static void
++bb_low(unsigned pin)
++{
++	touch_wr(st.gpio, TOUCH_GPIO_IO(pin), touch_rd(st.gpio, TOUCH_GPIO_IO(pin)) & ~2u);
++	touch_wr(st.gpio, TOUCH_GPIO_CFG(pin),
++	    (touch_rd(st.gpio, TOUCH_GPIO_CFG(pin)) & ~0x3ffu) | 3u | (1u << 6) | 0x200u);
++}
++
++static void
++bb_release(unsigned pin)
++{
++	touch_wr(st.gpio, TOUCH_GPIO_CFG(pin),
++	    (touch_rd(st.gpio, TOUCH_GPIO_CFG(pin)) & ~0x3ffu) | 3u | (1u << 6));
++}
++
 +static int
-+touch_msg_dma(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
++bb_get(unsigned pin)
++{
++	return (int)(touch_rd(st.gpio, TOUCH_GPIO_IO(pin)) & 1u);
++}
++
++static bool
++bb_scl_high(void)
++{
++	bb_release(st.scl_gpio);
++	for (unsigned i = 0; i < 20000 && !bb_get(st.scl_gpio); i++) {  /* clock stretching */
++		bb_ndelay(1000);
++	}
++	return bb_get(st.scl_gpio) != 0;
++}
++
++static void
++bb_start(void)
++{
++	bb_release(st.sda_gpio);
++	(void)bb_scl_high();
++	bb_ndelay(BB_HALF_NS);
++	bb_low(st.sda_gpio);
++	bb_ndelay(BB_HALF_NS);
++	bb_low(st.scl_gpio);
++}
++
++static void
++bb_stop(void)
++{
++	bb_low(st.sda_gpio);
++	bb_ndelay(BB_HALF_NS);
++	(void)bb_scl_high();
++	bb_ndelay(BB_HALF_NS);
++	bb_release(st.sda_gpio);
++	bb_ndelay(BB_HALF_NS);
++}
++
++/* Returns 1 on NACK. */
++static int
++bb_put(uint8_t b)
++{
++	for (int i = 7; i >= 0; i--) {
++		if (b & (1u << i)) {
++			bb_release(st.sda_gpio);
++		} else {
++			bb_low(st.sda_gpio);
++		}
++		bb_ndelay(BB_HALF_NS);
++		(void)bb_scl_high();
++		bb_ndelay(BB_HALF_NS);
++		bb_low(st.scl_gpio);
++	}
++	bb_release(st.sda_gpio);
++	bb_ndelay(BB_HALF_NS);
++	(void)bb_scl_high();
++	int nack = bb_get(st.sda_gpio);
++	bb_ndelay(BB_HALF_NS);
++	bb_low(st.scl_gpio);
++	return nack;
++}
++
++static uint8_t
++bb_get_byte(bool ack)
++{
++	uint8_t b = 0;
++	bb_release(st.sda_gpio);
++	for (int i = 0; i < 8; i++) {
++		bb_ndelay(BB_HALF_NS);
++		(void)bb_scl_high();
++		b = (uint8_t)(b << 1 | (uint8_t)bb_get(st.sda_gpio));
++		bb_ndelay(BB_HALF_NS);
++		bb_low(st.scl_gpio);
++	}
++	if (ack) {
++		bb_low(st.sda_gpio);
++	}
++	bb_ndelay(BB_HALF_NS);
++	(void)bb_scl_high();
++	bb_ndelay(BB_HALF_NS);
++	bb_low(st.scl_gpio);
++	bb_release(st.sda_gpio);
++	return b;
++}
++
++static int
++touch_msg_bb(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
 +    unsigned nr, bool stretch)
 +{
-+	if (st.dead || !st.dma_va || nt > 64 || nr > 90 || (nt && nr) || (!nt && !nr)) {
++	(void)stretch; /* TCM never needs a repeated start */
++	if (st.dead || nt > 80 || nr > 90 || (nt && nr) || (!nt && !nr)) {
 +		return EIO;
 +	}
-+	if (!touch_wait_clear(st.se, SE_STATUS, 1u)) {
-+		st.dead = true;
-+		return EBUSY;
++	int err = 0;
++	bb_start();
++	if (bb_put((uint8_t)((addr << 1) | (nr ? 1u : 0u)))) {
++		err = ENXIO;
++		goto stop;
 +	}
-+	unsigned len = nt ? nt : nr;
-+	uint32_t dstat_off = nt ? SE_DMA_TX_IRQ_STAT : SE_DMA_RX_IRQ_STAT;
-+	touch_wr(st.se, SE_IRQ_CLR, 0xffffffffu);
-+	touch_wr(st.se, SE_DMA_TX_IRQ_CLR, 0xffffffffu);
-+	touch_wr(st.se, SE_DMA_RX_IRQ_CLR, 0xffffffffu);
-+	touch_wr(st.se, SE_DMA, 1u); /* GENI_DMA_MODE_EN */
-+	if (nt) {
-+		memcpy(st.dma_va, tx, nt);
-+	} else {
-+		memset(st.dma_va, 0xa5, nr);
-+	}
-+	flush_dcache64((addr64_t)st.dma_pa, len, TRUE);
-+	touch_wr(st.se, nr ? SE_RX_LEN : SE_TX_LEN, len);
-+	touch_wr(st.se, SE_CMD, ((nr ? 2u : 1u) << 27) |
-+	    ((uint32_t)addr << 9) | (stretch ? 4u : 0u));
-+	if (nt) {
-+		touch_wr(st.se, SE_DMA_TX_IRQ_EN_SET, SE_DMA_DONE_EN | SE_DMA_EOT_EN | SE_DMA_AHB_ERR_EN);
-+		touch_wr(st.se, SE_DMA_TX_PTR_L, (uint32_t)st.dma_pa);
-+		touch_wr(st.se, SE_DMA_TX_PTR_H, (uint32_t)(st.dma_pa >> 32));
-+		touch_wr(st.se, SE_DMA_TX_ATTR, SE_DMA_TX_EOT_BUF);
-+		touch_wr(st.se, SE_DMA_TX_LEN, len);
-+	} else {
-+		touch_wr(st.se, SE_DMA_RX_IRQ_EN_SET, SE_DMA_DONE_EN | SE_DMA_EOT_EN | SE_DMA_AHB_ERR_EN);
-+		touch_wr(st.se, SE_DMA_RX_PTR_L, (uint32_t)st.dma_pa);
-+		touch_wr(st.se, SE_DMA_RX_PTR_H, (uint32_t)(st.dma_pa >> 32));
-+		touch_wr(st.se, SE_DMA_RX_ATTR, 0);
-+		touch_wr(st.se, SE_DMA_RX_LEN, len);
-+	}
-+	int err = ETIMEDOUT;
-+	uint32_t irq = 0, dstat = 0;
-+	for (unsigned i = 0; i < 20000; ++i) {
-+		irq = touch_irq();
-+		dstat = touch_rd(st.se, dstat_off);
-+		if (irq & SE_ERRORS) {
-+			err = (irq & SE_NACK) ? ENXIO : EIO;
-+			for (unsigned j = 0; j < 5000 && !(irq & SE_DONE); ++j) {
-+				delay(1);
-+				irq = touch_irq();
-+			}
-+			break;
++	for (unsigned i = 0; i < nt; i++) {
++		if (bb_put(tx[i])) {
++			err = EIO;
++			goto stop;
 +		}
-+		if ((irq & SE_DONE) && (dstat & SE_DMA_DONE_EN)) {
-+			err = 0;
-+			break;
-+		}
-+		delay(1);
++		st.sent = i + 1;
 +	}
-+	if (err == 0 && nr) {
-+		flush_dcache64((addr64_t)st.dma_pa, len, TRUE);
-+		memcpy(rx, st.dma_va, nr);
-+		st.got = nr;
++	for (unsigned i = 0; i < nr; i++) {
++		rx[i] = bb_get_byte(i + 1 < nr);
 +	}
-+	if (err) {
-+		if (st.dma_errs++ < 6) {
-+			printf("SWEET TOUCH: dma xfer addr=%#x %s len=%u err=%d irq=%#x dma=%#x status=%#x len_in=%#x fifo_dis=%#x\n",
-+			    addr, nr ? "read" : "write", len, err, irq, dstat,
-+			    touch_rd(st.se, SE_STATUS),
-+			    touch_rd(st.se, nt ? 0xc54u : 0xd54u), touch_rd(st.se, 0x64));
-+		}
-+		touch_wr(st.se, SE_DMA_TX_FSM_RST, 1u);
-+		touch_wr(st.se, SE_DMA_RX_FSM_RST, 1u);
-+		touch_abort();
-+	}
-+	touch_wr(st.se, SE_IRQ_CLR, 0xffffffffu);
-+	touch_wr(st.se, SE_DMA_TX_IRQ_CLR, 0xffffffffu);
-+	touch_wr(st.se, SE_DMA_RX_IRQ_CLR, 0xffffffffu);
++	st.got = nr;
++stop:
++	bb_stop();
 +	return err;
 +}
 +
@@ -345,41 +383,53 @@
  	st.irq_status = st.irq_last = 0;
  	st.sent = st.got = 0;
 -	int err = touch_msg_run(addr, tx, nt, rx, nr, stretch);
-+	int err = st.dma ? touch_msg_dma(addr, tx, nt, rx, nr, stretch) :
++	int err = st.bitbang ? touch_msg_bb(addr, tx, nt, rx, nr, stretch) :
 +	    touch_msg_run(addr, tx, nt, rx, nr, stretch);
  	if (st.probing) {
  		printf("SWEET TOUCH: probe xfer addr=%#x %s len=%u stretch=%u err=%d irq=%#x seen=%#x tx=%u rx=%u status=%#x\n",
  		    addr, nr ? "read" : "write", nr ? nr : nt, stretch ? 1u : 0u,
-@@ -487,22 +736,240 @@
+@@ -487,22 +773,289 @@
  	return 0;
  }
  
-+/* lemonadep: chunked TCM command write. touch_msg_run caps one FIFO write at
-+ * 3 bytes, so a payload longer than 2 bytes continues with CMD_CONTINUE_WRITE
-+ * (the same mechanism Syna_tcm_oncell's syna_tcm_raw_write uses, just with a
-+ * fixed 2-byte chunk instead of its configurable wr_chunk_size). */
++/*
++ * lemonadep: TCM command write. The packet is [command, length_lo,
++ * length_hi, payload...] -- syna_tcm_write_message: "adding two length bytes
++ * as part of payload". When it doesn't fit one transfer it continues with
++ * CMD_CONTINUE_WRITE chunks of the [length, payload] stream, as the vendor
++ * does. Bit-banged I2C has no FIFO limit (one transfer); the FIFO path caps a
++ * transfer at 3 bytes (command/continue byte + 2).
++ */
 +static int
 +touch_tcm_write(uint8_t cmd, const uint8_t *payload, unsigned len)
 +{
-+	unsigned sent = 0;
-+	/* One iteration minimum, so a bare (payload-less) command is still sent
-+	 * when len == 0 (chunk == 0, tx == [cmd]). */
-+	do {
-+		unsigned chunk = len - sent;
-+		if (chunk > 2) {
-+			chunk = 2;
++	uint8_t body[64];
++	if (len + 2u > sizeof(body)) {
++		return EIO;
++	}
++	body[0] = (uint8_t)len;
++	body[1] = (uint8_t)(len >> 8);
++	for (unsigned i = 0; i < len; ++i) {
++		body[2 + i] = payload[i];
++	}
++	unsigned total = len + 2u, sent = 0;
++	unsigned chunk_space = st.bitbang ? (unsigned)sizeof(body) : 2u;
++	while (sent < total) {
++		unsigned chunk = total - sent;
++		if (chunk > chunk_space) {
++			chunk = chunk_space;
 +		}
-+		uint8_t tx[3];
++		uint8_t tx[1 + sizeof(body)];
 +		tx[0] = sent == 0 ? cmd : TCM_CMD_CONTINUE_WRITE;
 +		for (unsigned i = 0; i < chunk; ++i) {
-+			tx[1 + i] = payload[sent + i];
++			tx[1 + i] = body[sent + i];
 +		}
 +		int err = touch_msg(st.i2c_addr, tx, 1 + chunk, NULL, 0, false);
 +		if (err) {
 +			return err;
 +		}
 +		sent += chunk;
-+	} while (sent < len);
++	}
 +	return 0;
 +}
 +
@@ -438,81 +488,118 @@
 +	return 0;
 +}
 +
++/*
++ * Read until a message other than STATUS_IDLE/BUSY arrives, up to tries x
++ * 10 ms. ENXIO (no 0xA5 marker, or address NACK while the IC is busy) means
++ * "nothing yet".
++ */
 +static int
-+touch_tcm_identify(uint8_t *mode)
++touch_tcm_wait_msg(uint8_t *code, uint8_t *payload, unsigned max, unsigned *got,
++    unsigned tries)
 +{
-+	int err = touch_tcm_write(TCM_CMD_IDENTIFY, NULL, 0);
++	int err = ETIMEDOUT;
++	for (unsigned i = 0; i < tries; ++i) {
++		err = touch_tcm_read(code, payload, max, got);
++		if (!err && *code != 0x00u && *code != 0x02u) {
++			return 0;
++		}
++		if (err && err != ENXIO) {
++			return err;
++		}
++		touch_wait(10);
++	}
++	return err ? err : ETIMEDOUT;
++}
++
++/* Send a command, then wait for its STATUS_OK, skipping unrelated reports
++ * (codes >= 0x10) that may arrive first. */
++static int
++touch_tcm_cmd(uint8_t cmd, const uint8_t *payload, unsigned len)
++{
++	int err = touch_tcm_write(cmd, payload, len);
 +	if (err) {
 +		return err;
 +	}
-+	touch_wait(10);
-+	uint8_t code, payload[32];
-+	unsigned got;
-+	err = touch_tcm_read(&code, payload, sizeof(payload), &got);
-+	if (err) {
-+		return err;
++	uint8_t code = 0, resp[88];
++	unsigned got = 0;
++	for (unsigned n = 0; n < 8; ++n) {
++		err = touch_tcm_wait_msg(&code, resp, sizeof(resp), &got, 50);
++		if (err) {
++			printf("SWEET TOUCH: TCM cmd %#x: no response (err=%d)\n", cmd, err);
++			return err;
++		}
++		if (code == TCM_STATUS_OK) {
++			return 0;
++		}
++		if (code < 0x10u) {
++			printf("SWEET TOUCH: TCM cmd %#x: status %#x\n", cmd, code);
++			return EIO;
++		}
 +	}
-+	/* struct syna_tcm_identification: version(1B), mode(1B), ... */
-+	if (code != TCM_STATUS_OK || got < 2) {
-+		return EIO;
-+	}
-+	*mode = payload[1];
-+	return 0;
++	return EIO;
 +}
 +
 +static int
 +touch_tcm_bringup(void)
 +{
-+	/* Vendor reset sequence (Syna_tcm_oncell's syna_tcm_reset). */
++	/* Vendor power-on tail (syna_power_control): reset low 10 ms, high 80 ms. */
 +	touch_gpio(st.reset_gpio, 0, 3, 3, true, false);
 +	touch_wait(TCM_RESET_LOW_MS);
 +	touch_gpio(st.reset_gpio, 0, 3, 3, true, true);
 +	touch_wait(TCM_RESET_HIGH_MS);
-+	uint8_t mode = 0, code, payload[32];
-+	unsigned got;
-+	int err = touch_tcm_identify(&mode);
-+	if (err) {
-+		printf("SWEET TOUCH: TCM identify failed err=%d\n", err);
-+		return err;
-+	}
-+	if (mode != TCM_MODE_APPLICATION) {
-+		printf("SWEET TOUCH: TCM mode=%#x, not application; requesting app firmware\n", mode);
-+		err = touch_tcm_write(TCM_CMD_RUN_APP_FIRMWARE, NULL, 0);
-+		if (err) {
-+			return err;
++	uint8_t code = 0, payload[88];
++	unsigned got = 0;
++	/*
++	 * After reset the application firmware posts an unsolicited
++	 * REPORT_IDENTIFY; the vendor driver fills id_info from it
++	 * (syna_tcm_reset -> syna_tcm_identify(tcm_info, false)). Payload =
++	 * struct syna_tcm_identification: version, mode, part_number[16], ...
++	 */
++	int err = touch_tcm_wait_msg(&code, payload, sizeof(payload), &got, 30);
++	printf("SWEET TOUCH: TCM after reset: err=%d code=%#x len=%u mode=%#x\n",
++	    err, code, got, got > 1 ? payload[1] : 0u);
++	if (err || code != TCM_REPORT_IDENTIFY || got < 2) {
++		err = touch_tcm_write(TCM_CMD_IDENTIFY, NULL, 0);
++		for (unsigned n = 0; !err && n < 8; ++n) {
++			err = touch_tcm_wait_msg(&code, payload, sizeof(payload), &got, 50);
++			if (!err && (code == TCM_STATUS_OK || code == TCM_REPORT_IDENTIFY)) {
++				break;
++			}
 +		}
-+		touch_wait(100);
-+		(void)touch_tcm_read(&code, payload, sizeof(payload), &got); /* discard response */
-+		err = touch_tcm_identify(&mode);
-+		if (err || mode != TCM_MODE_APPLICATION) {
-+			printf("SWEET TOUCH: TCM did not reach application mode (mode=%#x err=%d)\n",
-+			    mode, err);
++		if (err || (code != TCM_STATUS_OK && code != TCM_REPORT_IDENTIFY) || got < 2) {
++			printf("SWEET TOUCH: TCM identify failed err=%d code=%#x len=%u\n", err, code, got);
 +			return err ? err : EIO;
 +		}
 +	}
-+	err = touch_tcm_write(TCM_CMD_SET_REPORT_CONFIG, tcm_report_cfg, sizeof(tcm_report_cfg));
++	if (payload[1] != TCM_MODE_APPLICATION) {
++		printf("SWEET TOUCH: TCM mode=%#x, not application; requesting app firmware\n", payload[1]);
++		(void)touch_tcm_write(TCM_CMD_RUN_APP_FIRMWARE, NULL, 0);
++		touch_wait(100);
++		for (unsigned n = 0; n < 8; ++n) {
++			err = touch_tcm_wait_msg(&code, payload, sizeof(payload), &got, 50);
++			if (err || code == TCM_REPORT_IDENTIFY) {
++				break;
++			}
++		}
++		if (err || code != TCM_REPORT_IDENTIFY || got < 2 || payload[1] != TCM_MODE_APPLICATION) {
++			printf("SWEET TOUCH: TCM did not reach application mode (err=%d code=%#x mode=%#x)\n",
++			    err, code, got > 1 ? payload[1] : 0u);
++			return err ? err : EIO;
++		}
++	}
++	err = touch_tcm_cmd(TCM_CMD_SET_REPORT_CONFIG, tcm_report_cfg, sizeof(tcm_report_cfg));
 +	if (err) {
 +		printf("SWEET TOUCH: TCM set report config failed err=%d\n", err);
 +		return err;
 +	}
-+	touch_wait(10);
-+	err = touch_tcm_read(&code, payload, sizeof(payload), &got);
-+	if (err || code != TCM_STATUS_OK) {
-+		printf("SWEET TOUCH: TCM set report config response err=%d code=%#x\n", err, code);
-+		return err ? err : EIO;
-+	}
-+	err = touch_tcm_write(TCM_CMD_ENABLE_REPORT, NULL, 0);
++	/* syna_tcm_enable_report sends one payload byte, the report type. Touch
++	 * reports are normally on already, so a refusal here is not fatal. */
++	const uint8_t rep_touch = TCM_REPORT_TOUCH;
++	err = touch_tcm_cmd(TCM_CMD_ENABLE_REPORT, &rep_touch, 1);
 +	if (err) {
-+		printf("SWEET TOUCH: TCM enable report failed err=%d\n", err);
-+		return err;
++		printf("SWEET TOUCH: TCM enable touch report: err=%d (continuing)\n", err);
 +	}
-+	touch_wait(10);
-+	err = touch_tcm_read(&code, payload, sizeof(payload), &got);
-+	if (err || code != TCM_STATUS_OK) {
-+		printf("SWEET TOUCH: TCM enable report response err=%d code=%#x\n", err, code);
-+		return err ? err : EIO;
-+	}
-+	printf("SWEET TOUCH: TCM bring-up ok, mode=%#x\n", mode);
++	printf("SWEET TOUCH: TCM bring-up ok, mode=%#x\n", payload[1]);
 +	return 0;
 +}
 +
@@ -595,7 +682,7 @@
  		return false;
  	}
  	touch_wr(st.se, 0xe18, 0); /* no GSI events */
-@@ -551,17 +1018,18 @@
+@@ -551,71 +1104,109 @@
  	unsigned delay_s = 45;
  	(void)arg;
  	(void)result;
@@ -618,8 +705,9 @@
  	if (!st.gcc || !st.gpio || !st.se) {
  		printf("SWEET TOUCH: MMIO mapping failed\n");
  		goto out;
-@@ -569,53 +1037,97 @@
- 	if (!touch_clocks() || !touch_se_init()) {
+ 	}
+-	if (!touch_clocks() || !touch_se_init()) {
++	if (!st.lmn && (!touch_clocks() || !touch_se_init())) {
  		goto out;
  	}
 -	printf("SWEET TOUCH: TLMM reset=%#x irq=%#x vdd90=%#x; voting L11C through RPMh\n",
@@ -678,20 +766,13 @@
 +		touch_gpio(st.pwr_gpio_2v8, 0, 0, 0, true, true);
 +		touch_gpio(st.pwr_gpio_1v8, 0, 0, 0, true, true);
 +		touch_wait(10); /* conservative rail settling; not a DT timing value */
-+		touch_gpio(st.sda_gpio, 1, 3, 0, false, false); /* qup4 SDA/SCL, 2 mA, bias-pull-up */
-+		touch_gpio(st.scl_gpio, 1, 3, 0, false, false);
-+		vm_offset_t dma_va = 0;
-+		if (kmem_alloc_contig(kernel_map, &dma_va, PAGE_SIZE, PAGE_MASK, 0, 0,
-+		    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) == KERN_SUCCESS) {
-+			ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)dma_va);
-+			if (pn) {
-+				st.dma_va = (uint8_t *)dma_va;
-+				st.dma_pa = ptoa_64(pn);
-+				st.dma = true;
-+			}
-+		}
-+		printf("SWEET TOUCH: SE4 transfers via %s (dma pa=%#llx)\n",
-+		    st.dma ? "SE DMA" : "FIFO", (unsigned long long)st.dma_pa);
++		/* SDA/SCL as plain GPIOs (mux 0), released high with pull-up: the
++		 * bus is bit-banged and SE4 is detached from the pins. */
++		touch_gpio(st.sda_gpio, 0, 3, 1, false, false);
++		touch_gpio(st.scl_gpio, 0, 3, 1, false, false);
++		st.bitbang = true;
++		printf("SWEET TOUCH: I2C bit-banged on gpio%u/%u (SDA/SCL), SE4 untouched\n",
++		    st.sda_gpio, st.scl_gpio);
 +		int err = touch_tcm_bringup();
 +		if (err) {
 +			printf("SWEET TOUCH: no S3908 (err=%d); stopping\n", err);
