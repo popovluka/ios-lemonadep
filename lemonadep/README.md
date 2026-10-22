@@ -14,7 +14,9 @@
 | M4: touch (Synaptics S3908 over TCM) | overlay written, kernel builds and links cleanly, boot image built — **not yet verified against the real touch controller** |
 | M5: buttons (PMK8350/PM8350 keys) + interactive home screen | overlay written, kernel builds and links cleanly, boot image built — **not yet verified against the real PMIC** |
 
-Everything through M3 has been seen working on a real OnePlus 9 Pro. M4 and M5's code compiles, passes the project's local test suite (`lemonadep/xnu/check-overlay.sh`, including a standalone host test of the touch protocol framing), and the kernel that CI actually built and linked is sitting ready — but neither has had its first real boot yet. Don't take the hardware facts below as proven correct until that happens; take them as carefully sourced, not guessed (every one has a citation in `HWMAP_lemonadep.md`).
+Everything through M3 has been seen working on a real OnePlus 9 Pro. M4 and M5's code compiles, passes the project's local test suite (`lemonadep/xnu/check-overlay.sh`, including a standalone host test of the touch protocol framing), and a fresh adversarial review caught and fixed one real bug before this build — but neither has had its first real boot yet. Don't take the hardware facts below as proven correct until that happens; take them as carefully sourced, not guessed (every one has a citation in `HWMAP_lemonadep.md`).
+
+**Want to try the current M4/M5 build yourself without your own CI run?** Grab the prebuilt kernel and boot image from the [`lemonadep-m4-m5-2026-10-22` release](https://github.com/popovluka/ios-lemonadep/releases/tag/lemonadep-m4-m5-2026-10-22) — you still need your own iOS root image (step 2 below), but the kernel build step is done for you.
 
 ## What's different from sweet
 
