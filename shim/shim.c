@@ -25,6 +25,7 @@
 #define GICR_IPRIORITYR		(GICR_SGI + 0x400)
 #define GICR_ISPENDR0		(GICR_SGI + 0x200)
 #define GICR_ISACTIVER0		(GICR_SGI + 0x300)
+#define GICR_ICACTIVER0		(GICR_SGI + 0x380)
 #define GICR_ICFGR1		(GICR_SGI + 0xc04)
 #define SGI_INTID		1
 
@@ -130,10 +131,36 @@ static void irq_handler(void)
 	isb();
 }
 
+/*
+ * Fault-tolerant MMIO probing: while probe_armed, a data abort from the
+ * current EL (EC 0x25) is counted and the faulting instruction skipped
+ * instead of ending in the panic screen. Used to map which GIC registers
+ * the lemonadep firmware lets EL1 write.
+ */
+static volatile int probe_armed;
+static volatile uint32_t probe_faults, probe_esr;
+
+static int try_wr32(uintptr_t a, uint32_t v)
+{
+	probe_faults = 0;
+	probe_armed = 1;
+	__asm__ volatile("dsb sy; isb" ::: "memory");
+	wr32(a, v);
+	__asm__ volatile("dsb sy; isb" ::: "memory");
+	probe_armed = 0;
+	return probe_faults != 0;
+}
+
 void exc_handler(uint64_t slot, uint64_t *regs)
 {
 	if (slot == 5) {	/* IRQ from current EL, SPx */
 		irq_handler();
+		return;
+	}
+	if (slot == 4 && probe_armed && (rsr("esr_el1") >> 26) == 0x25) {
+		probe_faults++;
+		probe_esr = (uint32_t)rsr("esr_el1");
+		wsr("elr_el1", rsr("elr_el1") + 4);	/* skip the faulting access */
 		return;
 	}
 	con_clear(BLUE);
@@ -308,17 +335,34 @@ static void test_gic(void)
 	con_hex2("GICR", "base=", r, "waker=", rd32(r + GICR_WAKER));
 
 	stage = "gic config";
-	uint32_t grp = rd32(r + GICR_IGROUPR0);
-	wr32(r + GICR_IGROUPR0, 0xffffffff);	/* NS view: secure bits are WI */
+	/*
+	 * lemonadep: writes to GICR_IPRIORITYR0 (SGIs 0-3) took a synchronous
+	 * external abort, while Linux on the same phone writes all eight
+	 * words after disabling and deactivating SGIs/PPIs. Map it: every
+	 * write below is fault-tolerant; a bit set in a mask = that word faulted.
+	 */
+	con_hex2("GICR", "ctlr=", rd32(r + 0x0), "iidr=", rd32(r + 0x4));
+	con_hex2("GICR", "pwrr=", rd32(r + 0x24), "typer=", (uint32_t)rd64(r + GICR_TYPER));
+	con_hex2("SGIPPI", "en=", rd32(r + GICR_ISENABLER0), "act=", rd32(r + GICR_ISACTIVER0));
+	uint32_t grp_fault = try_wr32(r + GICR_IGROUPR0, 0xffffffff);	/* NS view: secure bits are WI */
+	con_hex2("IGROUPR", "now=", rd32(r + GICR_IGROUPR0), "fault=", grp_fault);
+	uint32_t pa = 0, pb = 0, esr = 0;
+	for (int w = 0; w < 8; w++) {
+		if (try_wr32(r + GICR_IPRIORITYR + 4 * w, 0xa0a0a0a0U)) {
+			pa |= 1u << w;
+			esr = probe_esr;
+		}
+	}
+	con_hex2("PRIO A", "fault=", pa, "esr=", esr);	/* as XNU 0004 does it */
+	uint32_t cf = try_wr32(r + GICR_ICACTIVER0, 0xffffffff) | try_wr32(r + GICR_ICENABLER0, 0xffffffff) << 1;
+	for (int w = 0; w < 8; w++)
+		if (try_wr32(r + GICR_IPRIORITYR + 4 * w, 0xa0a0a0a0U))
+			pb |= 1u << w;
+	con_hex2("PRIO B", "fault=", pb, "clr=", cf);	/* after Linux's disable + deactivate */
+	con_hex2("PRIO", "w0=", rd32(r + GICR_IPRIORITYR), "w6=", rd32(r + GICR_IPRIORITYR + 24));
 	uint32_t en_before = rd32(r + GICR_ISENABLER0);
-	uint32_t pri_before = rd32(r + GICR_IPRIORITYR + 16);	/* INTIDs 16..19 */
-	/* 32-bit writes: SM8350 (lemonadep) takes a synchronous external abort on byte writes to GICR */
-	for (int id = 0; id < 32; id += 4)
-		wr32(r + GICR_IPRIORITYR + id, 0xa0a0a0a0U);
-	wr32(r + GICR_ISENABLER0, (1U << VTIMER_INTID) | (1U << PTIMER_INTID) | (1U << SGI_INTID));
-	con_hex2("ENABLE", "was=", en_before, "now=", rd32(r + GICR_ISENABLER0));
-	(void)grp;
-	(void)pri_before;
+	uint32_t ef = try_wr32(r + GICR_ISENABLER0, (1U << VTIMER_INTID) | (1U << PTIMER_INTID) | (1U << SGI_INTID));
+	con_hex2("ENABLE", "was=", en_before, "now=", rd32(r + GICR_ISENABLER0) | (ef ? 0x80000000u : 0));
 
 	uint64_t ctlr = rsr("icc_ctlr_el1");
 	wsr("icc_ctlr_el1", ctlr & ~2ULL);	/* EOImode 0: EOIR also deactivates */
@@ -332,7 +376,7 @@ static void test_gic(void)
 	irq_window("VTIMER", r, VTIMER_INTID);
 	stage = "gic sgi";
 	irq_window("SGI1", r, SGI_INTID);
-	wr32(r + GICR_ICENABLER0, 0xffffffff);
+	(void)try_wr32(r + GICR_ICENABLER0, 0xffffffff);
 	isb();
 }
 
