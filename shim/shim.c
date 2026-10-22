@@ -88,6 +88,13 @@ static uint64_t now(void)
 	return rsr("cntpct_el0");
 }
 
+static void delay_us(unsigned us)
+{
+	uint64_t end = now() + rsr("cntfrq_el0") / 1000000 * us;
+	while (now() < end)
+		;
+}
+
 static void delay_ms(unsigned ms)
 {
 	uint64_t end = now() + rsr("cntfrq_el0") / 1000 * ms;
@@ -377,31 +384,30 @@ static void test_gic(void)
 	con_hex2("PRIO B", "fault=", pb, "clr=", cf);	/* after Linux's disable + deactivate */
 	con_hex2("PRIO", "w0=", rd32(r + GICR_IPRIORITYR), "w6=", rd32(r + GICR_IPRIORITYR + 24));
 	/*
-	 * Run 4: priority writes right after IGROUPR0/ICENABLER0 faulted, the
-	 * same writes a few ms later did not. Does polling GICR_CTLR.RWP (as
-	 * Linux's gic_redist_wait_for_rwp does) make them safe? E = no wait
-	 * (control), C = RWP wait after ICENABLER0, D = after IGROUPR0.
+	 * Run 5: GICR_CTLR.RWP never sets on this virtual GIC (0 spins) and
+	 * polling it does not help: a priority write immediately after
+	 * IGROUPR0/ICENABLER0 faults, one a few ms later does not. Measure
+	 * the settle time, then replay XNU's exact sequence (IGROUPR0, 8
+	 * priority words, ISENABLER0) with it. Bit n of SETTLE = delay n faulted.
 	 */
-	uint32_t me = 0, mc = 0, md = 0, nc = 0, nd = 0;
-	(void)try_wr32(r + GICR_ICENABLER0, 0xffffffff);
+	static const uint32_t settle_us[4] = { 0, 100, 1000, 10000 };
+	uint32_t ms = 0;
+	for (int d = 0; d < 4; d++) {
+		delay_ms(20);
+		(void)try_wr32(r + GICR_IGROUPR0, 0xffffffff);
+		delay_us(settle_us[d]);
+		ms |= try_wr32(r + GICR_IPRIORITYR, 0xa0a0a0a0U) << d;
+	}
+	con_hex2("SETTLE", "0/.1/1/10ms=", ms, 0, 0);
+	delay_ms(20);
+	uint32_t xs = try_wr32(r + GICR_IGROUPR0, 0xffffffff);
+	delay_us(10000);
 	for (int w = 0; w < 8; w++)
-		me |= try_wr32(r + GICR_IPRIORITYR + 4 * w, 0xa0a0a0a0U) << w;
-	delay_ms(5);
-	(void)try_wr32(r + GICR_ICENABLER0, 0xffffffff);
-	while ((rd32(r + 0x0) & 8) && nc < 10000000)
-		nc++;
-	for (int w = 0; w < 8; w++)
-		mc |= try_wr32(r + GICR_IPRIORITYR + 4 * w, 0xa0a0a0a0U) << w;
-	delay_ms(5);
-	(void)try_wr32(r + GICR_IGROUPR0, 0xffffffff);
-	while ((rd32(r + 0x0) & 8) && nd < 10000000)
-		nd++;
-	for (int w = 0; w < 8; w++)
-		md |= try_wr32(r + GICR_IPRIORITYR + 4 * w, 0xa0a0a0a0U) << w;
-	delay_ms(5);
-	con_hex2("RWP E", "fault=", me, 0, 0);
-	con_hex2("RWP C", "fault=", mc, "spins=", nc);
-	con_hex2("RWP D", "fault=", md, "spins=", nd);
+		xs |= try_wr32(r + GICR_IPRIORITYR + 4 * w, 0xa0a0a0a0U) << (w + 1);
+	delay_us(10000);
+	xs |= try_wr32(r + GICR_ISENABLER0, 1U << SGI_INTID) << 9;
+	delay_us(10000);
+	con_hex2("XNU SEQ", "fault=", xs, "settle us=", 10000);
 	uint32_t en_before = rd32(r + GICR_ISENABLER0);
 	uint32_t ef = try_wr32(r + GICR_ISENABLER0, (1U << VTIMER_INTID) | (1U << PTIMER_INTID) | (1U << SGI_INTID));
 	con_hex2("ENABLE", "was=", en_before, "now=", rd32(r + GICR_ISENABLER0) | (ef ? 0x80000000u : 0));
