@@ -184,11 +184,24 @@ The kernel driver adopts the host ABL left running, so the base address is the o
 
 ## 8. USB (deferred; recorded for later)
 
+Scoping pass (2026-10-22), re-checking against the real retail dtsi rather than
+relying on the earlier deferred note: sweet's existing USB overlay (xnu/patches
+0072-0077, 0081; ~1266 lines total) is almost entirely DWC3-generic, not
+SE7/sweet-specific. Only `QUSB2`/PHY references appear in 0072/0073 (8 lines
+total across the whole series, `grep -c QUSB2`); 0074-0077 and 0081
+(VBUS override, ECM networking, RX mbuf, live log, link-state -- the bulk of
+the code) have zero PHY-specific lines and should apply to lemonadep
+unchanged. The real, bounded new work for a future overlay 1006 is just the
+PHY init sequence: sweet's is QUSB2-specific, lemonadep's chip is a different
+PHY family entirely (SNPS femto, below) and needs its own init.
+
 | Component | Value | Source | Conf |
 | --- | --- | --- | --- |
-| DWC3 | `ssusb@a600000` (`androidboot.usbcontroller=a600000.dwc3`) | OP `qcom/lahaina-usb.dtsi:6`; LOS-C `BoardConfigCommon.mk` cmdline | M |
-| HS PHY | **SNPS femto** `hsphy@88e3000` (sweet: QUSB2) | OP `lahaina-usb.dtsi:118-120` | M |
+| DWC3 | `ssusb@a600000`, `reg = <0xa600000 0x100000>`, `compatible = "qcom,dwc-usb3-msm"` -- **identical address and compatible string to sweet's own DWC3** (`androidboot.usbcontroller=a600000.dwc3`) | OP `qcom/lahaina-usb.dtsi:6-9`; LOS-C `BoardConfigCommon.mk` cmdline | H |
+| HS PHY (primary port) | **SNPS femto** (`compatible = "qcom,usb-hsphy-snps-femto"`), `hsphy@88e3000`, `reg = <0x88e3000 0x114>` -- a different PHY family from sweet's QUSB2, needs its own init sequence, not just a new address | OP `lahaina-usb.dtsi:118-121` | H |
+| ⚠ trap: `0x088e2000` | This is sweet's own `QUSB2_PA` (its PHY base). On lemonadep the *same* address is a completely unrelated register: the primary HS PHY node's **second** `reg` entry, labelled `"eud_enable_reg"` (Embedded USB Debugger enable) -- not a PHY register at all. Do not reuse sweet's `QUSB2_PA` value for anything on lemonadep; it means something else here | OP `lahaina-usb.dtsi:119-123` | H |
 | SS/DP PHY | `ssphy@88e8000` | OP `lahaina-usb.dtsi:142-144` | M |
+| Secondary HS PHY (unused here) | `hsphy@88e4000`, same `qcom,usb-hsphy-snps-femto` compatible, no `eud_enable_reg` entry | OP `lahaina-usb.dtsi:415-418` | M |
 
 ## 9. What this means for the sweet code (feeds STEP 3)
 

@@ -97,6 +97,12 @@ Not in git: partition backups, live device trees, recovery images, Apple firmwar
 | 0066–0067 | Fault-region crash info; console mute |
 | 0068 | IOSurface lookup semantics for already-mapped surfaces |
 | 0069 | Batched persistent-log flushes |
+| 0070 | PID hibernate support |
+| 0071 | Touch edge-case fixes |
+| 0072–0077, 0081 | USB device-mode networking: DWC3 probe, EP0, VBUS override, ECM, RX mbuf handling, live log, link-state reporting |
+| 0078 | SMP: all 8 cores (6×A55 + 2×A76) as one homogeneous cluster |
+| 0079 | Display power management |
+| 0080 | Network packet tracing |
 | `lemonadep/xnu/patches/1001` | Early framebuffer address read from `boot_args->Video` instead of hardcoded |
 | `lemonadep/xnu/patches/1002` | Hypervisor quirks: skip `CNTP_CTL_EL0`/`GICR_IPRIORITYR` writes when the ADT says to |
 | `lemonadep/xnu/patches/1004` | Keys: PMK8350 PON (gen-3) + PM8350 GPIO6, as ADT overrides of sweet's own PM6150/PM6150L driver |
