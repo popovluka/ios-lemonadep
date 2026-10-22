@@ -207,7 +207,7 @@
  	const uint32_t branches[] = {0x18004, 0x18008, 0x1800c, 0x18010, 0x18144};
  	for (unsigned i = 0; i < sizeof(branches) / sizeof(branches[0]); ++i) {
  		if (!touch_wait_clear(st.gcc, branches[i], 1u << 31)) {
-@@ -487,22 +616,238 @@
+@@ -487,22 +616,240 @@
  	return 0;
  }
  
@@ -421,20 +421,22 @@
  	    touch_rd(st.se, 0x908));
 -	if (((fw >> 8) & 0xffu) != 3u || (touch_rd(st.se, 0x64) & 1u) ||
 +	/*
-+	 * 0x64 is GENI_IF_FIFO_DISABLE_RO (bit0 FIFO_IF_DISABLE): set while the
-+	 * engine is in GSI/DMA mode. Confirmed on-device 2026-10-22: lemonadep's
-+	 * SE4 reports it set at cpus=4, and the vendor driver's FIFO-mode select
-+	 * (msm-geni-se.c geni_se_select_fifo_mode / se_io_set_mode) starts by
-+	 * writing SE_GSI_EVENT_EN (0xe18) = 0, which is what releases the FIFO
-+	 * interface. Do that first (nothing else uses SE4), then re-check.
++	 * 0x64 is GENI_IF_FIFO_DISABLE_RO (bit0 FIFO_IF_DISABLE), a read-only
++	 * status. Confirmed on-device 2026-10-22: lemonadep's SE4 reads it as 1
++	 * and it stays 1 after clearing SE_GSI_EVENT_EN (0xe18). The vendor
++	 * driver never gates on it -- its FIFO-mode select (msm-geni-se.c
++	 * geni_se_select_fifo_mode / se_io_set_mode) just clears 0xe18 and
++	 * SE_GENI_DMA_MODE_EN, which the init below does too. So on lemonadep
++	 * report it and let the first real FIFO transfer decide (its error is
++	 * logged); sweet keeps the strict check.
 +	 */
 +	uint32_t fifo_dis = touch_rd(st.se, 0x64);
 +	if (st.lmn && (fifo_dis & 1u)) {
 +		touch_wr(st.se, 0xe18, 0);
 +		delay(100);
-+		printf("SWEET TOUCH: FIFO_IF_DISABLE was set (%#x); cleared GSI events, now %#x\n",
-+		    fifo_dis, touch_rd(st.se, 0x64));
-+		fifo_dis = touch_rd(st.se, 0x64);
++		printf("SWEET TOUCH: FIFO_IF_DISABLE=%#x (dma_mode_en=%#x), proceeding; the transfer will tell\n",
++		    touch_rd(st.se, 0x64), touch_rd(st.se, SE_DMA));
++		fifo_dis = 0;
 +	}
 +	if (((fw >> 8) & 0xffu) != 3u || (fifo_dis & 1u) ||
  	    ((tx >> 24) & 0x3fu) != 32u || ((rx >> 24) & 0x3fu) != 32u ||
@@ -450,7 +452,7 @@
  		return false;
  	}
  	touch_wr(st.se, 0xe18, 0); /* no GSI events */
-@@ -551,17 +896,18 @@
+@@ -551,17 +898,18 @@
  	unsigned delay_s = 45;
  	(void)arg;
  	(void)result;
@@ -473,7 +475,7 @@
  	if (!st.gcc || !st.gpio || !st.se) {
  		printf("SWEET TOUCH: MMIO mapping failed\n");
  		goto out;
-@@ -569,53 +915,85 @@
+@@ -569,53 +917,85 @@
  	if (!touch_clocks() || !touch_se_init()) {
  		goto out;
  	}
