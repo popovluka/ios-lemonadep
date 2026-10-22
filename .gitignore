@@ -8,3 +8,5 @@ shim/out/
 xnu/out/
 xnu/out-*/
 __pycache__/
+# built iOS root image (multi-GB; rebuild with lemonadep/m2-build-macbook.sh)
+lemonadep/m2-artifacts/

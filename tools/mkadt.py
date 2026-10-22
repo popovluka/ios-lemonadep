@@ -85,6 +85,29 @@ BOARDS = {
         # comes from the CPUFREQ-HW LUT at runtime and XNU defaults it to 0.
         cpus=[('arm,cortex-a55', None)] * 4 + [('arm,cortex-a78', None)] * 3 + [('arm,cortex-x1', None)],
         bus_frequency=None, memory_frequency=None,
+        # Power/vol-down: PMK8350 (SID 0) PON_HLOS. Vol-up: PM8350 (SID 1)
+        # GPIO6. Same SPMI arbiter core/obsrvr/cnfg bases as sweet's PM6150;
+        # only the PPIDs and (because PMK8350 is gen-3 PON, sweet's PM6150
+        # is gen-2) the RT_STS bit positions differ. Sources:
+        #   PPIDs: qcom/pmk8350.dtsi pon@1300 (reg 0x1300 -> periph 0x13,
+        #     SID 0 from pmk8350: qcom,pmk8350@0 => PPID 0x013) and
+        #     qcom/pm8350.dtsi pinctrl@8800 (reg 0x8800 -> periph 0x88, SID 1
+        #     from pm8350: qcom,pm8350@1); GPIO6 = base + (6-1)*0x100
+        #     (drivers/pinctrl/qcom/pinctrl-spmi-gpio.c PMIC_GPIO_ADDRESS_RANGE)
+        #     => periph 0x8D => PPID 0x18D.
+        #   Gen-3 bits: drivers/input/misc/qpnp-power-on.c
+        #     QPNP_PON_GEN3_KPDPWR_N_SET = BIT(7), QPNP_PON_GEN3_RESIN_N_SET
+        #     = BIT(6) (sweet's gen-2 PM6150 uses BIT(0)/BIT(1)); both read
+        #     from the same QPNP_PON_RT_STS offset (base+0x10) as gen-2.
+        #   Subtype check: QPNP_PON_PERPH_SUBTYPE = base+0x05,
+        #     PON_GEN3_HLOS = 0x09 (is_pon_gen3()).
+        # Overlay 1004 falls back to sweet's gen-2 constants when these are
+        # absent, so the sweet ADT (and kernel behaviour) is unchanged.
+        button_props=[
+            ('pon-ppid', struct.pack('<I', 0x013)), ('pon-subtype-gen3', struct.pack('<I', 0x09)),
+            ('pon-kpdpwr-bit', struct.pack('<I', 1 << 7)), ('pon-resin-bit', struct.pack('<I', 1 << 6)),
+            ('vol-down-gpio-ppid', struct.pack('<I', 0x18D)),
+        ],
     ),
 }
 
@@ -283,7 +306,7 @@ def build(seed=None, qemu=False, highmem=False, board='sweet', dram=None, fb_geo
         ('button-names', cstr('volup') + cstr('voldown') + cstr('hold')),
         ('home-button-type', u32(2)),
         ('opposed-power-vol-buttons', u32(1)),
-    ])
+    ] + b.get('button_props', []))
 
     product_props = d22ap_product()
     product = [node('product', [ph()] + product_props)] if product_props else []
