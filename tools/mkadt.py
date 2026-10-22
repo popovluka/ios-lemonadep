@@ -107,6 +107,15 @@ BOARDS = {
             ('pon-ppid', struct.pack('<I', 0x013)), ('pon-subtype-gen3', struct.pack('<I', 0x09)),
             ('pon-kpdpwr-bit', struct.pack('<I', 1 << 7)), ('pon-resin-bit', struct.pack('<I', 1 << 6)),
             ('vol-down-gpio-ppid', struct.pack('<I', 0x18D)),
+            # Confirmed on-device (2026-10-22): the retail lemonadep devicetree
+            # reassigns both of these relative to the generic QCOM reference
+            # design (and to sweet's own PM6150/PM6150L wiring, which this
+            # driver's now[1]/now[2] array positions were written to match):
+            #   &pmk8350/pon_hlos@1300/qcom,pon_2 (= RESIN) -> KEY_VOLUMEUP
+            #   &soc/gpio_keys/vol_up (= PM8350 GPIO6, this same PPID)
+            #     relabeled "volume_down" -> KEY_VOLUMEDOWN
+            # OP devicetree/oplus/lemonadev/lemonade_common.dtsi:689-707.
+            ('swap-volume-keys', struct.pack('<I', 1)),
         ],
         # Touch: Synaptics S3908 (synaptics-s3908), TCM protocol, on QUPv3
         # wrap0 SE4 I2C (sweet's touch is GENI SE7/Goodix GT9896; same GENI
