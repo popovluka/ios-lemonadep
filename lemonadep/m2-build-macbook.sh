@@ -31,7 +31,9 @@ if ! command -v apfs-fuse >/dev/null 2>&1; then
 	echo "-- apfs-fuse not found, building from source --"
 	rm -rf apfs-fuse
 	git clone -q --recursive https://github.com/sgan81/apfs-fuse.git
-	cmake -S apfs-fuse -B apfs-fuse/build -DCMAKE_BUILD_TYPE=Release
+	# apfs-fuse's CMakeLists.txt predates CMake 3.5; recent CMake (4.x on
+	# Arch) dropped compatibility with that old cmake_minimum_required.
+	cmake -S apfs-fuse -B apfs-fuse/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 	make -C apfs-fuse/build -j"$(nproc)"
 	sudo install -m 755 apfs-fuse/build/apfs-fuse /usr/local/bin/apfs-fuse
 fi
