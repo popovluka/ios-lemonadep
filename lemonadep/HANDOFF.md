@@ -1,4 +1,46 @@
-# lemonadep handoff (2026-10-22 ~04:00) — read first
+# lemonadep handoff (2026-10-23 ~00:10) — read first
+
+## TOUCH WORKS ON-DEVICE (2026-10-23)
+
+Confirmed live: Settings app opened, scrolled through its list (Wi-Fi,
+Notifications, Sounds, Focus, Screen Time, Control Center, Display &
+Brightness, Home Screen, General), all via real finger touches on the
+panel. Volume/power keys work at the same time. This is the first time
+GUI interaction has worked on lemonadep.
+
+Root cause of the earlier `ENXIO`/`no S3908 (err=6)` failure: the touch
+1.8V enable pin (gpio197) is an SM8350 **eGPIO** pad, owned by an island
+subsystem until the apps processor explicitly claims it (set bit 12 when
+bit 11 reads 1 — see `pinctrl-sm8350.c`/`pinctrl-msm.c`, and
+`blahajcoding/op9pro-mainline-poc`, mainline Linux on this exact board,
+which hit the identical wall). `touch_gpo()` now sets that claim bit.
+Also fixed in the same push: `SweetHIDTouch` no longer hardcodes sweet's
+1080x2400 panel — it reads the real boot framebuffer size
+(`PE_current_console`) and the digitizer's own extents (ADT /touch
+panel-x/panel-y = 1440x3216) and scales between them, instead of clamping
+raw digitizer coordinates to iPhone-X-sized bounds. See the dated section
+below ("Touch: SE4 is GSI-only...") for the full root-cause writeup and
+the commits (`b9cb8c6`, `eacd968`, `e7c623c`).
+
+On-device log confirms every step cleanly:
+```
+SWEET TOUCH: pwr 2v8 gpio31 cfg=0x200 io=0x3, 1v8 gpio197 cfg=0x1a00 io=0x3
+SWEET TOUCH: I2C bit-banged on gpio20/21 (SDA/SCL), SE4 untouched
+SWEET TOUCH: bus self-test released sda=1 scl=1, driven-low sda=0 scl=0
+SWEET TOUCH: TCM after reset: err=0 code=0x10 len=24 mode=0x1
+SWEET TOUCH: TCM bring-up ok, mode=0x1
+SWEET TOUCH: selected Synaptics S3908 TCM, poll=10ms
+SWEET TOUCH: touch report len 5 -> configured layout, 1 object(s)
+SWEET HID: digitizer 1440x3216 -> panel 1080x2412, presented 1125x2436
+SWEET HID: touch 0 down at 974,3215 edge
+```
+Kernel run: https://github.com/popovluka/ios-lemonadep/actions/runs/39858965799
+(cpus=4 boot image, boot-args unchanged: `sweettouch=1 sweetkeys=1 sweetusb=0`).
+
+**Next**: M5 is effectively reached (home screen + keys + touch all work
+together). Remaining open items: GPU acceleration, USB, WiFi/BT, cellular —
+see `GAPS.md`.
+
 
 Branch `lemonadep`, pushed to `fork` = github.com/popovluka/ios-sweet. Phone: LE2123 8 GB, Evolution X 16 + Magisk, slot b,
 `fastboot boot` of our v3 shim works. Backups in `backup/partitions` (23, SHA-256 verified). Tools: `C:\platform-tools`,
