@@ -38,7 +38,8 @@ on:
 
 concurrency:
   group: lemonadep-${{ github.ref }}
-  cancel-in-progress: true
+  # queue, never cancel: a doc push must not kill a running kernel build
+  cancel-in-progress: false
 
 env:
   DXB_REPO: https://github.com/blacktop/darwin-xnu-build
