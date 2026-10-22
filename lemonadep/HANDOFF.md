@@ -99,12 +99,16 @@ pieces we need are tracked files, not something to reconstruct secondhand:
   real `tu_knl_darwin.cc` plus the `tu_knl.cc`/`tu_device.cc`/
   `wsi_common_metal_layer.m` hookup. Confirms the IOKit discovery path:
   `IOServiceGetMatchingService` for `$TU_DARWIN_SERVICE` (default
-  `"IOAcceleratorES"` -- **the same class name sweet's own
-  `SweetAccelerator.cpp` already uses**), open type `$TU_DARWIN_OPEN_TYPE`
+  `"IOAcceleratorES"` -- **confirmed by the patch's own comment to be the
+  real Apple class name "the original Metal discovery finds", not something
+  any of these projects invented**), open type `$TU_DARWIN_OPEN_TYPE`
   (default `0x4147`); `"NativeAdrenoGpuPublished"` as the service name selects
   the unsandboxed direct form (external-method selector == ABI method
   number), the simpler path for us since sweet's own sandbox MAC policy is
-  already permissive.
+  already permissive. **Correction**: an earlier version of this note said
+  sweet already has a `SweetAccelerator.cpp` using this name -- checked and
+  that file does not exist in our tree (matches the README's own "no GPU
+  driver" statement). There is nothing to extend; the GPU driver is new.
 - **`scripts/data/adreno-compiler-inputs.json`** (UniXNU/UniXNU): the exact
   pinned Mesa commit (`85fda3b36405bcaea8bffc64aa4f2651dc90770d`) and the full
   ordered patch list (9 patches: `turnip-darwin-kmd`, `ir3-darwin-build-id`,
