@@ -170,7 +170,7 @@
  		if ((cfg & 0x371fu) != 1u) {
  			printf("SWEET TOUCH: DFS level0=%#x is not XO/1; need clock integration\n", cfg);
  			return false;
-@@ -153,13 +262,23 @@
+@@ -153,13 +262,33 @@
  	} else {
  		/* XO parent 0, HID divider 1 => 19.2 MHz. No PLL or voltage change. */
  		cfg = (cfg & ~(0x371fu | (1u << 20))) | 1u;
@@ -186,7 +186,17 @@
  	}
 +	if (st.lmn) {
 +		for (unsigned i = 0; i < 5; ++i) {
-+			if (!touch_wait_clear(st.gcc, st.gcc_halt[i], 1u << 31)) {
++			/* m_ahb (index 2) and s_ahb (index 3) carry .hwcg_reg/.hwcg_bit=1
++			 * in gcc-lahaina.c: with HW clock gating on (bit 1 of the same
++			 * register) CLK_OFF legitimately reads 1 whenever the bus is
++			 * idle, and Linux's clk_branch_wait() skips the halt check in
++			 * that mode (clk_branch_in_hwcg_mode). Confirmed on-device
++			 * 2026-10-22: S_AHB read back 0x80000002 (CLK_OFF | HWCG) at
++			 * cpus=4 -- an idle-gated branch, not a failed enable. */
++			bool hwcg = (i == 2 || i == 3) &&
++			    (touch_rd(st.gcc, st.gcc_halt[i]) & 2u);
++			bool ok = hwcg || touch_wait_clear(st.gcc, st.gcc_halt[i], 1u << 31);
++			if (!ok) {
 +				printf("SWEET TOUCH: GCC branch %#x halted (%#x)\n", st.gcc_halt[i],
 +				    touch_rd(st.gcc, st.gcc_halt[i]));
 +				return false;
@@ -197,7 +207,7 @@
  	const uint32_t branches[] = {0x18004, 0x18008, 0x1800c, 0x18010, 0x18144};
  	for (unsigned i = 0; i < sizeof(branches) / sizeof(branches[0]); ++i) {
  		if (!touch_wait_clear(st.gcc, branches[i], 1u << 31)) {
-@@ -487,12 +606,211 @@
+@@ -487,12 +616,211 @@
  	return 0;
  }
  
@@ -410,7 +420,7 @@
  	    fw, (fw >> 8) & 0xffu, touch_rd(st.se, SE_STATUS), tx, rx,
  	    touch_rd(st.se, 0x908));
  	if (((fw >> 8) & 0xffu) != 3u || (touch_rd(st.se, 0x64) & 1u) ||
-@@ -502,7 +820,7 @@
+@@ -502,7 +830,7 @@
  		return false;
  	}
  	if (touch_rd(st.se, SE_STATUS) & 0x1001u) {
@@ -419,7 +429,7 @@
  		return false;
  	}
  	touch_wr(st.se, 0xe18, 0); /* no GSI events */
-@@ -551,17 +869,18 @@
+@@ -551,17 +879,18 @@
  	unsigned delay_s = 45;
  	(void)arg;
  	(void)result;
@@ -442,7 +452,7 @@
  	if (!st.gcc || !st.gpio || !st.se) {
  		printf("SWEET TOUCH: MMIO mapping failed\n");
  		goto out;
-@@ -569,53 +888,85 @@
+@@ -569,53 +898,85 @@
  	if (!touch_clocks() || !touch_se_init()) {
  		goto out;
  	}
@@ -595,27 +605,3 @@
  		return EINVAL;
  	}
  	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
---- a/bsd/dev/sweet_touch.c
-+++ b/bsd/dev/sweet_touch.c
-@@ -271,7 +271,20 @@
- 	}
- 	if (st.lmn) {
- 		for (unsigned i = 0; i < 5; ++i) {
--			if (!touch_wait_clear(st.gcc, st.gcc_halt[i], 1u << 31)) {
-+			bool ok = touch_wait_clear(st.gcc, st.gcc_halt[i], 1u << 31);
-+			/* Confirmed on-device 2026-10-22: at cpus=1 every branch came up
-+			 * first try; at cpus=4 S_AHB alone stayed halted even though our
-+			 * vote bit read back set. The shared vote register (0x52008) is
-+			 * a plain read-modify-write with no lock -- a concurrent voter
-+			 * on another core can race it and clobber our bit right after
-+			 * we confirm it, which only becomes possible with real SMP.
-+			 * Re-assert and retry a few times rather than give up on one
-+			 * lost race. */
-+			for (unsigned retry = 0; !ok && retry < 3; ++retry) {
-+				touch_wr(st.gcc, vote_reg, touch_rd(st.gcc, vote_reg) | vote_mask);
-+				ok = touch_wait_clear(st.gcc, st.gcc_halt[i], 1u << 31);
-+			}
-+			if (!ok) {
- 				printf("SWEET TOUCH: GCC branch %#x halted (%#x)\n", st.gcc_halt[i],
- 				    touch_rd(st.gcc, st.gcc_halt[i]));
- 				return false;
