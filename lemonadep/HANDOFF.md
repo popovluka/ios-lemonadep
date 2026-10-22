@@ -130,6 +130,57 @@ is for the 740 and chip-generation-specific, so 660's sequence needs its own
 sourcing from the real Linux `msm` driver, not reuse), and the Apple
 cross-toolchain build of Turnip + the frontend bridge.
 
+## GPU, Phase 2: real A660 register table derived; found the real GMU algorithm (2026-10-23)
+
+**Derived `lemonadep/xnu/gpu/LemonadepA660HwInit.h`**, the A660 equivalent of
+UniXNU's own `NativeAdrenoA740HwInit.h`: same method (`derive-a660-hwinit.py`,
+adapted from their `scripts/derive-a740-hwinit.py`), not hand-guessed values.
+Source: `ianchb/sm8550-mainline` @ `42f3b40c` -- the exact commit UniXNU's own
+`scripts/data/adreno-inputs.json` pins, sha256-verified before deriving
+anything. Four registers in UniXNU's own A740 list don't exist for A660 (found
+while deriving, not assumed): `CP_BV_APRIV_CNTL`, `CP_BV_RB_RPTR_ADDR`,
+`CP_LPAC_APRIV_CNTL`, `GRAS_NC_MODE_CNTL` -- checked against the real
+`a6xx_gpu.c hw_init()`, all four are written only inside
+`if (adreno_is_a7xx(adreno_gpu))`, and the register XML tags them
+`variants="A7XX"` with no A6XX entry at all. A660 doesn't have that hardware
+(the BV/visibility ring and LPAC async-compute block are A7XX-only).
+Result: 50 registers, 49 hwcg entries, 41 protect writes. Reproducible:
+`lemonadep/xnu/gpu/fetch-and-derive.sh`.
+
+**Found where the real GMU cold-start algorithm lives**: not in
+`UniXNU/NativeAdreno` itself (that repo's `NativeAdrenoGmuPlatform.cpp` is
+pure MMIO plumbing, binding IOKit-mapped windows to an external `ShengGmuIo`
+interface) -- the actual state machine is `UniXNU-sheng/package/ShengGmu.c`
+(282 lines), copied and adapted by several other device forks for their own
+SoCs (`UniXNU-kebab`, `UniXNU-uke`, `UniXNU-braveark`, `UniXNU-komodo`), the
+same pattern this project already follows for touch/buttons. Read it in
+full. It implements, with real register names matching the pinned Linux
+`a6xx_gmu.c`/`a6xx_hfi.c` I already have: reset/idle precondition checks,
+RSC/PDC setup writes, TCM firmware download with full readback verification
+(every word, not spot-checked), HFI memory zeroing, CM3 release, and polling
+`FW_INIT_RESULT`/`HFI_CTRL_STATUS` with both elapsed-time and iteration
+bounds. Its own header comments are explicit about the stakes: "No
+substituted ACK exists", "A device allows one attempt", "Any failure after
+mutation attempts reset assertion and poisons the session" -- matches the
+risk I already flagged (same failure class as the SE4-DMA crash), and
+confirms the state machine itself treats a bad attempt as unrecoverable
+*within one boot*, not silently retryable; our own recovery stays the same
+(temporary `fastboot boot`, reboot and try again).
+
+**What's genuinely chip-and-board-specific, not reusable, and not yet
+derived**: `ShengGmuSource.h` -- the companion file `ShengGmu.c` includes,
+which `UniXNU-sheng` deliberately does **not** commit ("Generated only from
+exact pinned XML/catalog/DT/firmware policy; ignored. In particular, no
+vendor firmware or sequencer payload is stored in Git"). It holds: the
+RSC/PDC register-setup sequence (board-specific RPMh/PDC resource wiring,
+the same kind of cmd-db lookup our own touch/keys work already did for
+`ldoc3`/`ldoc11`, not shareable across boards even on the same chip), the
+pinned firmware's exact byte count and sha256 (ours: the real
+`a660_gmu.bin` already pulled into `lemonadep/fw-gpu/`), and the five GMU
+MMIO window physical addresses/sizes (GMU core, RSCC, PDC, GPU register
+window, CX misc). This is the next real derivation, same rigor as the
+hwinit table, not a copy.
+
 Branch `lemonadep`, pushed to `fork` = github.com/popovluka/ios-sweet. Phone: LE2123 8 GB, Evolution X 16 + Magisk, slot b,
 `fastboot boot` of our v3 shim works. Backups in `backup/partitions` (23, SHA-256 verified). Tools: `C:\platform-tools`,
 WSL distro `LemonadepLab` (aarch64 gcc, dtc, qemu-user, AOSP mkbootimg at `/opt/aosp-mkbootimg`).
