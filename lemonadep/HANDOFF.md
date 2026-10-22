@@ -131,3 +131,61 @@ Related projects noted (2026-10-22, not yet investigated): github.com/UniXNU/Uni
 (UEFI-based iOS/macOS on non-Apple ARM64, different approach) and
 github.com/oosexgang (hackios-xnu-kernel, hackios-xnu-userland -- new org, similar
 bring-up effort, possibly worth cross-referencing for lemonadep-specific techniques).
+
+## Overlays 1004 (keys) + 1005 (touch) written, kernel built, first on-device boot queued (2026-10-22 ~15:40)
+
+GitHub's macOS Actions runners stopped being assigned for a few hours today
+(queued jobs sat with no runner, then auto-cancelled after ~15 min -- a
+transient capacity issue, not a quota/billing one: this repo is public, so
+Actions minutes including macOS are free and unlimited regardless). Verified
+by diffing `runner_name` across today's runs: real runner at 00:16, none
+from ~12:13 onward, real runner again at 13:31.
+
+Wrote overlay 1005 (`lemonadep/xnu/patches/1005-lemonadep-touch-tcm.patch`):
+Synaptics S3908 touch over the standard TCM v1/v2 protocol, GENI SE4 (not
+sweet's SE7), selected at runtime from a new ADT `/touch` node (so sweet is
+byte-for-byte unchanged). Every address came from real source, not guesses
+-- see HWMAP_lemonadep.md section 6: the exact driver match (Syna_tcm_oncell,
+via its own `of_device_id compatible="synaptics-s3908"`, ruling out the
+similarly-named S3706/Syna_tcm_S3910), the resolved TLMM base (the earlier
+"disagreement" was never real -- vendor dtsi's raw IP base + the driver's own
+pin-array offset fold to exactly mainline's pre-folded address), and the
+full SE4/wrap0 GCC clock bring-up register map (vote reg/mask, 5 halt regs,
+RCG), derived from `gcc-lahaina.c` the same way sweet's own SE7/wrap1
+`touch_clocks()` is built.
+
+Also added `lemonadep/xnu/test/test_touch_tcm.c` (+ `gen_touch.py`, extracting
+the real functions verbatim, same technique `gen.py` uses for 1001): a host
+ASan/UBSan + aarch64/qemu test of the TCM message-framing logic against a
+scripted mock transport, wired into `check-overlay.sh`. It caught two real
+bugs before they ever reached a kernel build: `touch_tcm_write` sent a bare
+command twice, and `touch_tcm_read` left a message's trailing padding byte
+unread when the whole payload fit in the initial header read, which would
+have desynced the next transaction's framing. Both fixed and now pinned by
+`write_zero_len` / `read_one_byte` test cases.
+
+Manually triggered the kernel build (`gh workflow run lemonadep.yml -f
+build_kernel=true`) once a real macOS runner was confirmed available (run
+https://github.com/popovluka/ios-sweet/actions/runs/39786869668). **Both
+overlays compiled and linked successfully** -- `kernel.development.sweet`,
+SHA256 `7686e006b3d724ff63a18b7794156843cd568eee3f0d9c26d9510d235ff140dd`,
+only the pre-existing declaration-after-statement style warnings (already
+present before these patches, explicitly non-fatal via
+`-Wno-error=declaration-after-statement`), no compile errors. The overlay
+verification step confirmed `1001 + 1002 + 1004 + 1005 applied`.
+
+Built the M2 boot image with **both touch and keys enabled together** for
+the first time (`sweettouch=1 sweetkeys=1 sweetusb=0`, via
+`lemonadep/m2-boot-build.sh`): `shim/out/lemonadep/m2-boot.img`, SHA256
+`89f68b78dc39bdfab9a783bef9d46d115fe5098ed2fa892a0dff84fcde778034`.
+
+**NEXT**: `fastboot boot` this image (temporary, RAM-only, safe to repeat)
+and check the kernel console for `SWEET KEYS:` / `SWEET TOUCH:` lines (keys
+now logs `pon-ppid=... kpdpwr-bit=... resin-bit=...`; touch now logs
+`lemonadep=1` then, on a successful TCM bring-up, `TCM bring-up ok,
+mode=...`), then physically try the power/volume buttons and a swipe on the
+lock screen. Neither overlay has been tested against the real PMK8350/S3908
+silicon yet -- this is the first real signal on whether the sourced register
+map and protocol sequence actually match the hardware. If something's off,
+the boot-args can disable either independently (`sweetkeys=0` or
+`sweettouch=0`) to bisect.

@@ -2,7 +2,8 @@
 # Build the M2 boot image: first real XNU boot with the actual iOS root
 # (now flashed to userdata) mounted read-write.
 #   lemonadep/m2-boot-build.sh KERNEL [CPUS]
-# KERNEL: kernel.development.sweet (xnu-kernel-lemonadep artifact, overlay 1001+1002).
+# KERNEL: kernel.development.sweet (xnu-kernel-lemonadep artifact, overlay
+# 1001+1002+1004+1005 -- first on-device test of touch/keys together).
 #
 # ufsrw=1 rootrw=1: userdata now holds a real HFS+ iOS root (flashed from
 # lemonadep/m2-artifacts/ios16-root.simg), so the UFS driver and HFS+ mount can
@@ -24,7 +25,7 @@ export MKBOOTIMG=${MKBOOTIMG:-python3 /opt/aosp-mkbootimg/mkbootimg.py}
 BOOTARGS="debug=0xc serial=3 cpus=$CPUS keepsyms=1 -enable_kprintf_spam -noprogress"
 BOOTARGS="$BOOTARGS rd=ufsroot0 ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1"
 BOOTARGS="$BOOTARGS wdt_test=no_user_checkin launchd_unsecure_cache=1 wdt=-1"
-BOOTARGS="$BOOTARGS sweettouch=0 sweetkeys=0 sweetusb=0"
+BOOTARGS="$BOOTARGS sweettouch=1 sweetkeys=1 sweetusb=0"
 
 python3 "$REPO/tools/mkadt.py" "$OUT/m2.adt" --board lemonadep
 python3 "$REPO/tools/mkpayload.py" "$KERNEL" "$OUT/m2.adt" "$OUT/m2-payload.bin" --cmdline "$BOOTARGS"
