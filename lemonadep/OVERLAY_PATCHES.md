@@ -64,20 +64,24 @@ On lemonadep `0x9c000000` is plain DRAM. It sits between rmtfs (mainline `0x9b80
 
 **Not checked.** It has not booted (checklist M1b).
 
-### 1002-lemonadep-hypervisor-gic-rwp-and-ptimer — fixes 0004/0017 GIC init, `_enable_virtual_timer()` — **written**
+### 1002-lemonadep-hypervisor-gic-and-ptimer — fixes 0004/0017 GIC init, `_enable_virtual_timer()` — **written**
 
-Found on the device (M1a runs 1-4):
-- **GIC.** The SM8350 hypervisor gives EL1 a virtual GIC (`IIDR 0x47000070`). A redistributor write that arrives right after `IGROUPR0`/`ICENABLER0` takes a synchronous external abort.
+Found on the device (M1a shim runs 1-6):
+- **GIC.** The SM8350 hypervisor gives EL1 a virtual GIC (`IIDR 0x47000070`) that answers `GICR_IPRIORITYR` writes with a synchronous external abort.
+  - It happens unpredictably: run 6 had `SETTLE=0` but `XNU SEQ fault=0x1FE`.
+  - `GICR_CTLR.RWP` never sets, so polling it does not help.
+  - `IGROUPR0` and `ISENABLER0` writes never faulted.
 - **Timer.** `msr cntp_ctl_el0` is undefined at EL1.
 
 What 1002 changes:
-- **RWP waits:** `pe_init_fiq()` waits for `GICR_CTLR.RWP` (1 s timeout, then panic) after `IGROUPR0`, the priority writes, and `ISENABLER0`, like Linux's `gic_redist_wait_for_rwp()`.
-- **CNTP skip:** `_enable_virtual_timer()` skips the precautionary `CNTP_CTL_EL0` write when the ADT `/arm-io/gic` has `no-el1-physical-timer`. Only the lemonadep profile sets it, so sweet keeps the write; on sweet the RWP polls return at once.
+- **GIC:** `pe_init_fiq()` skips the 8 priority writes when the ADT `/arm-io/gic` has `no-gicr-priority-writes`. With `ICC_PMR_EL1 = 0xFF` the priorities don't affect delivery.
+- **Timer:** `_enable_virtual_timer()` skips the precautionary `CNTP_CTL_EL0` write when it has `no-el1-physical-timer`.
+- **sweet:** the lemonadep profile sets both flags and the sweet profile neither, so sweet's kernel behaves as before.
 
 Status:
 - Passes the apply gate.
-- CI kernel build: run 39707336535 (`bc68f13`).
-- Shim run 5 tests whether polling RWP really avoids the abort (`RWP C`/`RWP D` vs control `RWP E`).
+- CI checks that both flags' code is in the built tree.
+- Not yet booted.
 
 ### (was 1002) lemonadep-fb-kick — **not needed**: ABL keeps INTF autorefresh on (M1a)
 

@@ -70,9 +70,10 @@ BOARDS = {
         ufs=0x01d84000,                      # ufshc@1d84000 ufs_mem (vendor + mainline)
         fb=0xe4d00000, fb_size=0x2300000,    # lemonade_common.dtsi &splash_memory
         fb_geometry=None,                    # TODO(lemonadep): measured by the shim (MDSS SSPP)
-        # Measured (M1a run 3): EL1 CNTP_* writes are undefined under the
-        # SM8350 hypervisor; xnu overlay 1002 skips them when this is set.
-        gic_props=[('no-el1-physical-timer', b'')],
+        # Measured with the shim (M1a runs 3-6): EL1 CNTP_* writes are
+        # undefined, and the hypervisor's virtual GIC faults GICR_IPRIORITYR
+        # writes; xnu overlay 1002 skips both when these are set.
+        gic_props=[('no-el1-physical-timer', b''), ('no-gicr-priority-writes', b'')],
         # Live FDT on an LE2123 (8 GB): /memory = <0x80000000 0x39700000>,
         # <0xc0000000 0x1c0000000>; no reserved-memory node above 0xeaf00000
         # and /proc/iomem shows it all as System RAM. Same size as sweet's

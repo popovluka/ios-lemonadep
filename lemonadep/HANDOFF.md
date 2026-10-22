@@ -12,13 +12,14 @@ WSL distro `LemonadepLab` (aarch64 gcc, dtc, qemu-user, AOSP mkbootimg at `/opt/
   unpredictably** (test 6: SETTLE=0 but XNU SEQ fault=0x1FE: all 8 priority writes faulted, IGROUPR0 and ISENABLER0 never
   fault). RWP never sets; polling it is useless.
 
-## Next step (not done)
-1. Rewrite overlay 1002 (`lemonadep/xnu/patches/1002-*`): drop the RWP wait; when ADT `/arm-io/gic` has
-   `no-gicr-priority-writes` (add to mkadt lemonadep `gic_props`), skip the 8 IPRIORITYR writes in `pe_init_fiq()`
-   (priorities irrelevant with PMR 0xFF). Keep the CNTP_CTL skip (`no-el1-physical-timer`). Regenerate with the
-   procedure in scratch (apply series+1001 on xnu-8796.141.3, edit, `git diff`), run `lemonadep/xnu/check-overlay.sh`,
-   update the CI "Verify" grep (it greps `SWEET_GICR_WAIT_RWP` now), push with `[kernel]` in the commit message.
-2. Then M1b (GAPS.md checklist): mkadt `--board lemonadep` (dram default set), mkpayload with boot-args
+## Done since
+- Overlay 1002 rewritten: skip GICR priority writes (`no-gicr-priority-writes`) + skip CNTP_CTL (`no-el1-physical-timer`);
+  RWP wait dropped. mkadt lemonadep sets both flags. Pushed with `[kernel]` (watch the lemonadep.yml run).
+
+## Next step
+1. Kernel artifact `xnu-kernel-lemonadep` from that run: downloading needs GitHub sign-in (no `gh` here), so the user
+   downloads the zip from the run page into `D:\ios port\` (or installs `gh` and runs `gh auth login`).
+2. M1b (GAPS.md checklist): mkadt `--board lemonadep` (dram default set), mkpayload with boot-args
    `debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 sweettouch=0 sweetkeys=0 sweetusb=0
    wdt=-1 wdt_test=no_user_checkin` (NO ufsrw=1 yet), shim build with OS_VERSION=16.0.0 OS_PATCH_LEVEL=2026-08,
    `fastboot boot`, user photographs. Expect a panic at root mount (userdata still Android).
