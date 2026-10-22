@@ -64,5 +64,28 @@ for addr, size, typ, val, payoff in blocks:
             addr - ICACHE_IOVA, ICACHE_IOVA) if addr >= ICACHE_IOVA else 'UNRECOGNIZED region'
     print('  addr=0x%08x size=%6d -> %s' % (addr, size, region))
 
-print('PASS' if len(blocks) == 4 else 'UNEXPECTED block count (%d, expected 4) -- re-check by hand' %
-      len(blocks))
+ok = len(blocks) == 4
+if not ok:
+    print('UNEXPECTED block count (%d, expected 4) -- re-check by hand' % len(blocks))
+
+# Cross-check LemonadepGmuSource.h's hand-written table against this live parse: it was
+# hand-typed once already with wrong file_offset values (caught only by this check being
+# added afterwards), so never trust it un-verified again.
+src = Path(__file__).with_name('LemonadepGmuSource.h')
+if src.exists():
+    import re
+    text = src.read_text()
+    m = re.search(r'LemonadepGmuFwBlocks\[4\]\s*=\s*\{(.*?)\};', text, re.S)
+    rows = re.findall(r'\{\s*(\d+),\s*(0x[0-9a-fA-F]+)u?,\s*(\d+)u?,', m.group(1)) if m else []
+    expect = [(off, addr, size) for addr, size, typ, val, off in blocks]
+    got = [(int(o), int(a, 16), int(s)) for o, a, s in rows]
+    if got == expect:
+        print('header check: LemonadepGmuSource.h\'s LemonadepGmuFwBlocks matches this parse')
+    else:
+        ok = False
+        print('header check: LemonadepGmuSource.h\'s LemonadepGmuFwBlocks does NOT match this '
+              'parse -- fix it before trusting the driver code')
+        print('  live:   %s' % expect)
+        print('  header: %s' % got)
+print('PASS' if ok else 'FAIL')
+sys.exit(0 if ok else 1)
