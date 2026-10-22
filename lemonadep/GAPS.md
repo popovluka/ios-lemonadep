@@ -47,11 +47,11 @@ verified on a host (WSL `LemonadepLab`, Ubuntu 24.04), not on the phone.
 
 | ID | Fact | Read from (checklist step) |
 | --- | --- | --- |
-| D1 | Does ABL accept `fastboot boot` of a v3 image? | 1.2 |
+| D1 | ~~`fastboot boot` of a v3 image~~ **accepted** (2026-10-22) | done |
 | D2 | ~~Stock `os_version` / `os_patch_level`~~ **16.0.0 / 2026-08** (Evolution X boot_b, header v3) | done |
-| D3 | Entry EL, load address, live DTB | 1.4 `EL`, `DTB` |
-| D4 | Splash plane: address, w/h, stride, bpp, format | 1.4 `DISP`/`GEOM` |
-| D5 | Autorefresh takes effect | 1.4 `DISP AR`, and whether text appears |
+| D3 | ~~Entry EL, load address, DTB~~ **EL1, 0xA0080000, DTB 0xAE755000** | done |
+| D4 | ~~Splash plane~~ **0xE4D00000, 1080×2412, stride 4320, 32 bpp (VIG0+VIG1 split)** | done |
+| D5 | ~~Autorefresh~~ **already on from ABL; text visible** | done |
 | D6 | ~~DRAM banks~~ **8 GB: `0x80000000+0x39700000`, `0xc0000000+0x1c0000000`** (live FDT) | done; shim `MEM` re-checks |
 | D7 | ~~Retail panel~~ **amb670yf01 dsc cmd** (`/proc/cmdline`) | done |
 | D8 | vtimer INTID 27 delivers, SGIs, CPU_ON of 7 cores | 1.5 |
@@ -61,7 +61,7 @@ verified on a host (WSL `LemonadepLab`, Ubuntu 24.04), not on the phone.
 
 ## 2. Top risks (most likely to stop progress first)
 
-1. **Command-mode LTPO DSC panel (AMB670YF01).** sweet's panel scanned RAM by itself; this one only shows a frame when MDP sends it.
+1. ~~**Command-mode LTPO DSC panel (AMB670YF01).**~~ **Retired for the boot console (M1a, 2026-10-22):** ABL leaves INTF autorefresh on, and the shim's text was visible. Still open for later: whether XNU's present path and display power-off (0079) keep autorefresh running. sweet's panel scanned RAM by itself; this one only shows a frame when MDP sends it.
    - If autorefresh does not start and START kicks do nothing, **nothing we draw is visible**: not the shim, not XNU, not iOS.
    - Fallback: the shim still proves it ran by rebooting after about 4.5 min. Beyond that, real DSI command-mode transfers mean porting part of the SDE encoder sequence.
    - LTPO/ADFR (variable refresh, "fake frames") may also need panel commands that ABL never sent.

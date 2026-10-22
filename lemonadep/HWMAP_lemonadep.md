@@ -94,7 +94,9 @@ Risk: SM8350 runs Qualcomm's hypervisor (hyp_mem at `0x80000000`). It may protec
 | Physical size | 70 × 156 mm | same file `:24-25` | M |
 | `_o` variant | also cmd mode, 30 bpp, default `fhd_sdc_60` 1080×2412 | OP `display-devicetree/display/dsi-panel-samsung-amb670yf01-o-dsc-cmd.dtsi:3-54` | M |
 | sofef00_m variant | **video mode**, 24 bpp | OP `display-devicetree/display/dsi-panel-samsung_sofef00_m_video.dtsi:21,28` | M |
-| Splash width / height / stride / pixel format that ABL actually uses | **TODO(lemonadep)**: no DT source. Measure on device: dump the region and look for the boot logo, or read MDSS SSPP registers | none | TODO |
+| Splash plane ABL leaves running | CTL 0 → INTF_1/DSI0 (`CTL_INTF_ACTIVE=0x2`); **two pipes VIG0+VIG1** (`FETCH_PIPE_ACTIVE=0x30000`), each 540×2412 (`SRC_SIZE=0x096C021C`) from one buffer at `0xE4D00000`; `YSTRIDE0=0x10E0`; `SRC_FORMAT=0x000237FF` (4 bytes/pixel), `UNPACK=0x03020001` | **measured**: shim M1a page 1 (MDSS registers), 2026-10-22 | H (device) |
+| Framebuffer | **1080×2412, stride 4320, 32 bpp**; our a8r8g8b8 colours display correctly | same | H (device) |
+| Command-mode refresh | **ABL already enables INTF_1 autorefresh** (`INTF_TEAR_AUTOREFRESH_CONFIG=0x80000001`, tear check on): CPU writes reach the panel, no kick needed | same | H (device) |
 | MDSS base | `0xae00000` (vendor `reg <0x0ae00000 0x84000>`; mainline MDSS `0xae00000` + MDP `0xae01000`) | OP `display-devicetree/display/lahaina-sde-common.dtsi:4-6`; ML `sm8350.dtsi:2748-2784` | H |
 | DSI0 ctrl / PHY | `0xae94000` / `0xae94400` | OP `lahaina-sde-common.dtsi:281-286,361-366`; ML `:2946,3026` | H |
 
@@ -134,7 +136,9 @@ The kernel driver adopts the host ABL left running, so the base address is the o
 | CPU frequency domains | `cpufreq_hw` 0 (cpu0-3), 1 (cpu4-6), 2 (cpu7) | OP `lahaina.dtsi` `qcom,freq-domain` | M |
 | Max clock per core | **TODO(lemonadep)**: comes from the CPUFREQ-HW LUT at runtime; mkadt's clock-frequency is descriptive only | none | TODO |
 | PSCI | `arm,psci-1.0`, **`method = "smc"`** | OP `lahaina.dtsi:587-590`; ML `:321-323` | H |
-| Entry EL from ABL | **TODO(lemonadep)**: read CurrentEL in the shim | none | TODO |
+| Entry EL from ABL | **EL1**; shim image loaded at `0xA0080000`, DTB at `0xAE755000`; initrd `0xAE956000-0xAFFFE263` (vendor + boot ramdisk) | **measured**: shim M1a page 1 | H (device) |
+| PSCI version | 1.1 (`0x10001`) | measured: shim M1a page 1 | H (device) |
+| GICR access width | **byte writes abort** (synchronous external abort, ESR `0x96000010`, FAR `GICR+0x10400`); 32-bit accesses work. XNU's GIC code uses only 32-bit | measured: shim M1a page 2 | H (device) |
 | PS_HOLD / reset | **not found** in OP lahaina*.dtsi or ML sm8350.dtsi. **TODO(lemonadep)**; use PSCI SYSTEM_RESET only | none | TODO |
 | IMEM restart_reason | `0x146bf000 + 0x65c` = `0x146bf65c` | OP `lahaina.dtsi:2130-2144` | M |
 
