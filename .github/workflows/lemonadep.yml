@@ -99,7 +99,10 @@ jobs:
           if-no-files-found: warn
 
   kernel:
-    if: github.event_name == 'workflow_dispatch' && inputs.build_kernel
+    # Manual run with build_kernel, or any push whose head commit message says [kernel]
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.build_kernel) ||
+      (github.event_name == 'push' && contains(github.event.head_commit.message, '[kernel]'))
     # macos-14 still ships Xcode 15.x: its iig matches the xnu-8796 IORPC ABI
     runs-on: macos-14
     timeout-minutes: 120
@@ -136,6 +139,19 @@ jobs:
         env:
           MAKEFLAGS: ${{ inputs.keep_going == 'false' && '' || '-k' }}
         run: bash build.sh
+
+      - name: Verify lemonadep overlay is in the built tree
+        # darwin-xnu-build skips a non-applying patch with only a warning
+        if: always()
+        run: |
+          set -e
+          T=dxb/xnu
+          grep -q 'BA_VIDEO_BASE' "$T/osfmk/arm64/genassym.c"
+          grep -q 'sweet_early_setup(args)' "$T/osfmk/arm/arm_init.c"
+          if grep -n '0x9c000000' "$T/osfmk/arm64/start.s" "$T/osfmk/arm64/arm_vm_init.c" "$T/osfmk/arm64/sweet_early.c"; then
+            echo "sweet framebuffer address still present: 1001 not applied" >&2; exit 1
+          fi
+          echo "1001 applied"
 
       - name: Collect
         if: always()
