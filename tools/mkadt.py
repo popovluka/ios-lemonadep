@@ -137,6 +137,10 @@ BOARDS = {
             ('i2c-addr', struct.pack('<I', 0x4B)),
             ('reset-gpio', struct.pack('<I', 22)), ('irq-gpio', struct.pack('<I', 23)),
             ('sda-gpio', struct.pack('<I', 20)), ('scl-gpio', struct.pack('<I', 21)),
+            # panel-coords from OP devicetree/oplus/lemonadev/lemonadep-19815.dtsi
+            # (touchscreen-size-x/y in blahajcoding/op9pro-mainline-poc's node):
+            # the digitizer's own space, larger than the boot framebuffer.
+            ('panel-x', struct.pack('<I', 1440)), ('panel-y', struct.pack('<I', 3216)),
             ('pwr-gpio-2v8', struct.pack('<I', 31)), ('pwr-gpio-1v8', struct.pack('<I', 197)),
             ('se-pa', struct.pack('<I', 0x00990000)),
             ('tlmm-pa', struct.pack('<I', 0x0F100000)),

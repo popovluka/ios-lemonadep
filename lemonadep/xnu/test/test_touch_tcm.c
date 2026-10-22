@@ -16,7 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static struct { uint8_t i2c_addr; bool bitbang; } st = {0x4B, false};
+static struct { uint8_t i2c_addr; bool bitbang; bool hdr_logged; } st = {0x4B, false, false};
 
 /* ---- mock GENI transport: records TX, replays scripted RX ---- */
 #define MOCK_MAX 32

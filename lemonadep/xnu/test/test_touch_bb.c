@@ -57,6 +57,9 @@ static int fails;
 /* ---- recorded HID events ---- */
 static struct { int finger, down, x, y; } ev[32];
 static unsigned nev;
+static int ext_w, ext_h;
+void sweet_hid_touch_extents(int w, int h) { ext_w = w; ext_h = h; }
+
 void sweet_hid_touch(int finger, int down, int x, int y)
 {
 	if (nev < 32) {
@@ -72,19 +75,52 @@ void sweet_hid_touch(int finger, int down, int x, int y)
 #define PIN_RST 22
 static uint32_t cfg[256], io[256];
 static int slave_low;	/* the IC pulls SDA low */
+/*
+ * eGPIO model, as the hardware behaves (pinctrl-sm8350 .egpio_present = 11,
+ * .egpio_enable = 12; pinctrl-msm claims the pad by setting bit 12): a pad
+ * with EGPIO_PRESENT set is owned by an island subsystem and ignores the
+ * TLMM output driver entirely until the apps processor claims it. PIN_PWR
+ * models lemonadep's gpio197 (touch 1.8 V enable), which is such a pad.
+ */
+#define EGPIO_PRESENT (1u << 11)
+#define EGPIO_ENABLE  (1u << 12)
+#define PIN_PWR 197
+static int egpio_pin_claimed;
+
+/* An unclaimed eGPIO pad is not driven by the TLMM at all. */
+static int
+pad_is_ours(unsigned p)
+{
+	return !(cfg[p] & EGPIO_PRESENT) || (cfg[p] & EGPIO_ENABLE);
+}
 
 static int
 master_level(unsigned p, int idle)
 {
+	if (!pad_is_ours(p)) {
+		return 0;	/* island holds it low, as gpio197 did on hw */
+	}
 	if (cfg[p] & 0x200u) {
 		return (io[p] & 2u) ? 1 : 0;
 	}
 	return idle;	/* input: pull-up (or floating high) */
 }
 
+/* The IC runs off the 1.8 V enable pad; unpowered it clamps SDA low, which is
+ * what an unclaimed gpio197 produced on the device (reads came back 0x00, so
+ * the TCM marker check failed with ENXIO). */
+static int
+ic_powered(void)
+{
+	return pad_is_ours(PIN_PWR) && (cfg[PIN_PWR] & 0x200u) && (io[PIN_PWR] & 2u);
+}
+
 static int
 line(unsigned p)
 {
+	if (p == PIN_SDA && !ic_powered()) {
+		return 0;
+	}
 	int lvl = master_level(p, 1);
 	if (p == PIN_SDA && slave_low) {
 		lvl = 0;
@@ -347,10 +383,13 @@ mock_wr(vm_offset_t base, uint32_t off, uint32_t val)
 	}
 	if (p == PIN_RST) {
 		int lvl = master_level(PIN_RST, 1);
-		if (lvl && !rst_prev) {
+		if (lvl && !rst_prev && ic_powered()) {
 			device_reset();
 		}
 		rst_prev = lvl;
+	}
+	if (p == PIN_PWR && (cfg[p] & EGPIO_ENABLE)) {
+		egpio_pin_claimed = 1;
 	}
 }
 
@@ -366,11 +405,24 @@ main(void)
 	st.scl_gpio = PIN_SCL;
 	st.reset_gpio = PIN_RST;
 	st.irq_gpio = 23;
+	st.pwr_gpio_1v8 = PIN_PWR;
+	st.pwr_gpio_2v8 = 31;
+	st.panel_x = 1440;
+	st.panel_y = 3216;
+	/* gpio197 arrives island-owned, exactly as on the device */
+	cfg[PIN_PWR] = EGPIO_PRESENT;
 	/* as touch_thread's lemonadep branch */
+	touch_gpio(st.pwr_gpio_2v8, 0, 0, 0, true, true);
+	touch_gpio(st.pwr_gpio_1v8, 0, 0, 0, true, true);
+	CHECK(egpio_pin_claimed);
+	CHECK(ic_powered());
+	printf("egpio: gpio%d cfg=%#x claimed=%d powered=%d\n",
+	    PIN_PWR, cfg[PIN_PWR], egpio_pin_claimed, ic_powered());
 	touch_gpio(st.reset_gpio, 0, 3, 3, true, false);
 	touch_gpio(st.sda_gpio, 0, 3, 1, false, false);
 	touch_gpio(st.scl_gpio, 0, 3, 1, false, false);
 	st.bitbang = true;
+	bb_selftest();
 
 	int err = touch_tcm_bringup();
 	CHECK(err == 0);
@@ -396,12 +448,37 @@ main(void)
 	CHECK(touch_tcm_poll() == 0);
 	CHECK(nev == 0);
 
+	/*
+	 * The firmware's own layout (op9pro-mainline-poc patch 0002): 7-byte
+	 * prefix, then 12 bytes per object. One finger at (1439,3215) -- the
+	 * far corner, which the old 1079/2399 clamp in SweetHID would have
+	 * thrown away. Classification nibble 1 = finger, index 3.
+	 */
+	const uint8_t nat[7 + 12] = {
+		0, 0, 0, 0, 0, 0, 0,
+		0x13, 0x9F, 0x05, 0x8F, 0x0C, 40, 10, 0, 8, 0, 0, 0,
+	};
+	queue_msg(0x11, nat, sizeof(nat));
+	nev = 0;
+	CHECK(touch_tcm_poll() == 0);
+	CHECK(nev == 3); /* finger 3 down, plus the two earlier fingers lifting */
+	int seen = 0;
+	for (unsigned i = 0; i < nev; ++i) {
+		if (ev[i].finger == 3) {
+			seen = 1;
+			CHECK(ev[i].down == 1 && ev[i].x == 1439 && ev[i].y == 3215);
+		}
+	}
+	CHECK(seen);
+	printf("native layout: finger 3 at (1439,3215), %u events\n", nev);
+
 	/* lift: a touch report with no active objects */
 	queue_msg(0x11, NULL, 0);
 	nev = 0;
 	CHECK(touch_tcm_poll() == 0);
-	CHECK(nev == 2 && ev[0].down == 0 && ev[1].down == 0);
-	printf("lift: %u up events\n", nev);
+	/* only finger 3 is still down: the native frame above lifted 0 and 1 */
+	CHECK(nev == 1 && ev[0].finger == 3 && ev[0].down == 0);
+	printf("lift: %u up event(s)\n", nev);
 
 	printf("test_touch_bb %s (%d failures)\n", fails ? "FAILED" : "ok", fails);
 	return fails != 0;
