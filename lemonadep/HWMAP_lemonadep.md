@@ -114,7 +114,7 @@ Risk: SM8350 runs Qualcomm's hypervisor (hyp_mem at `0x80000000`). It may protec
 | Clocks | `core_clk`, `core_clk_unipro`, `core_clk_ice` at 75–300 MHz; `bus_aggr`, `iface`, `ref_clk` (CXO 19.2 MHz, `dev-ref-clk-freq = <0>`), tx/rx symbol clocks | OP `lahaina.dtsi:3094-3125` | M |
 | Rails | VCC = `pm8350_l7` (2.504–2.95 V); VCCQ = `pm8350_l9` (parent `pm8350_s12`); vdd-hba = `gcc_ufs_phy_gdsc` | OP `devicetree/qcom/lahaina-mtp.dtsi:144-161` | M |
 | Linux device path for userdata | `sysfs_path=/sys/devices/platform/soc/1d84000.ufshc`; `/dev/block/bootdevice/by-name/userdata`, f2fs + inlinecrypt (wrapped keys) | LOS-C `init/fstab.default:46` | M |
-| UFSHCI version, UFS device spec version | **TODO(lemonadep)**: read `REG_VER` (0x08) and `CAP` with the shim probe (`shim/ufs.c` already prints them) | none | TODO |
+| UFSHCI / host state after ABL | **UFSHCI 3.0** (`VER=0x300`), `CAP=0x1587031F` (64-bit DMA, 32 slots); **ABL leaves it running** (`HCE=1`, `HCS=0x10F`); our list is taken; TUR/READ CAPACITY/READ all OK; LUN 0 4 KiB blocks, userdata at LBA `0x2BE848` (102.1 GiB, metadata-encrypted) | measured: M1a run 4 page 3 | H (device) |
 | userdata LUN | **LUN 0** (`/dev/block/sda20`, 102.1 GiB); `persist` is also on LUN 0 (`sda3`) | **measured**: by-name links via adb root, 2026-10-22 | H (device) |
 
 The kernel driver adopts the host ABL left running, so the base address is the only value it needs. ICE is bypassed as long as the UTRD crypto-enable bit stays 0, which `sweet_ufs.c` already does. Android's FBE ciphertext in userdata is irrelevant: the iOS image overwrites the partition.
@@ -138,7 +138,10 @@ The kernel driver adopts the host ABL left running, so the base address is the o
 | PSCI | `arm,psci-1.0`, **`method = "smc"`** | OP `lahaina.dtsi:587-590`; ML `:321-323` | H |
 | Entry EL from ABL | **EL1**; shim image loaded at `0xA0080000`, DTB at `0xAE755000`; initrd `0xAE956000-0xAFFFE263` (vendor + boot ramdisk) | **measured**: shim M1a page 1 | H (device) |
 | PSCI version | 1.1 (`0x10001`) | measured: shim M1a page 1 | H (device) |
-| GICR access width | **byte writes abort** (synchronous external abort, ESR `0x96000010`, FAR `GICR+0x10400`); 32-bit accesses work. XNU's GIC code uses only 32-bit | measured: shim M1a page 2 | H (device) |
+| GIC seen by EL1 | the hypervisor's **virtual GIC** (`GICR_IIDR=0x47000070`, not GIC-600). A redistributor write that arrives right after `IGROUPR0`/`ICENABLER0`/`ICACTIVER0` takes a synchronous external abort (ESR `0x96000010`); the same writes a few ms later work (all 8 priority words). The run-1 "byte write" abort was this, not the width | measured: M1a runs 1-4 (`PRIO A fault=0`, `PRIO B fault=FF`) | H (device) |
+| vtimer / SGI / SMP | **INTID 27 delivers** (30 IRQs/300 ms, `HPPIR=0x1B`); SGI 1 10/10; **PSCI CPU_ON starts all 7 secondaries** (MPIDR `0x81000100`-`0x81000700`) | measured: M1a run 4 page 2 | H (device) |
+| EL1 physical timer | **`msr cntp_ctl_el0` is undefined at EL1** (EC 0x00); CNTV_* and CNTPCT work | measured: M1a run 3 | H (device) |
+| Watchdog | none bit during a full 4.5 min shim run; Linux pets a hypervisor `qcom,hh-watchdog` (SMC `0x86000005-8`, `drivers/virt/haven/hh_virt_wdt.c`) | measured run 4 + LOS kernel source | M |
 | PS_HOLD / reset | **not found** in OP lahaina*.dtsi or ML sm8350.dtsi. **TODO(lemonadep)**; use PSCI SYSTEM_RESET only | none | TODO |
 | IMEM restart_reason | `0x146bf000 + 0x65c` = `0x146bf65c` | OP `lahaina.dtsi:2130-2144` | M |
 

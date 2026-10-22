@@ -54,8 +54,8 @@ verified on a host (WSL `LemonadepLab`, Ubuntu 24.04), not on the phone.
 | D5 | ~~Autorefresh~~ **already on from ABL; text visible** | done |
 | D6 | ~~DRAM banks~~ **8 GB: `0x80000000+0x39700000`, `0xc0000000+0x1c0000000`** (live FDT) | done; shim `MEM` re-checks |
 | D7 | ~~Retail panel~~ **amb670yf01 dsc cmd** (`/proc/cmdline`) | done |
-| D8 | vtimer INTID 27 delivers, SGIs, CPU_ON of 7 cores | 1.5 |
-| D9 | UFS host state after ABL, UFSHCI version, 64-bit DMA (userdata = **LUN 0**, measured) | 1.6 |
+| D8 | ~~vtimer, SGIs, CPU_ON~~ **INTID 27 OK, SGI OK, all 7 secondaries start** | done |
+| D9 | ~~UFS state~~ **running after ABL, UFSHCI 3.0, 64-bit DMA, reads OK, userdata LUN 0** | done |
 | D10 | Recovery with adb root for the log pull. Android has Magisk root, so backups and reads work now; **once userdata holds iOS, Android won't boot**, so the M2 log pull still needs a recovery | 0.4 |
 | D11 | PON gen-3 RT status register, TLMM GPIO offsets, S3908 protocol | source work (OP-K), not device |
 
@@ -69,7 +69,7 @@ verified on a host (WSL `LemonadepLab`, Ubuntu 24.04), not on the phone.
    - The fallback is flashing the **inactive** slot's `boot`, which is destructive to that slot.
    - Wrong `os_version`/patch level can trip rollback/AVB checks.
    - The vendor ramdisk in front of ours is handled by the scan, but untested on hardware.
-3. **UFS after ABL.** The kernel driver has no PHY/clock/regulator code. It only works if ABL leaves the UFS host enabled with the link up (true on sweet).
+3. ~~**UFS after ABL.**~~ **Retired (M1a run 4):** ABL leaves the host running and reads work. Writes are still untested. The kernel driver has no PHY/clock/regulator code. It only works if ABL leaves the UFS host enabled with the link up (true on sweet).
    - If ABL powers UFS down after loading from USB, we need a real SM8350 QMP UFS PHY bring-up: large, sourceable from mainline `phy-qcom-qmp-ufs.c` and the vendor `ufs-qcom.c`.
    - Inline crypto (wrapped keys) is configured by Android, not by us. Plaintext pass-through is expected but unproven.
 4. **Memory.** No source gives the DRAM layout; Qualcomm's hypervisor may protect regions no DT lists. The kernel maps its whole RAM window cacheable, and a speculative access to a protected range is a hard fault. Mitigation: start with a 1 GiB window above 4 GiB, after D6.
@@ -78,6 +78,10 @@ verified on a host (WSL `LemonadepLab`, Ubuntu 24.04), not on the phone.
 7. **Getting logs back.** sweet used OrangeFox. lemonadep keeps recovery in `vendor_boot`, and which recovery gives `adb` root with raw `dd` of userdata is unknown. Without it, debugging is photos of the screen only.
 8. **Touch** is a different vendor/IC (Synaptics TCM, not Goodix) on a different SE: a new driver, not a port.
 9. **Pin controller base disagreement** (vendor `0x0f000000` vs mainline `0x0f100000`). It must be settled before any GPIO write (touch reset/power).
+
+### Found on the device (M1a, 2026-10-22)
+
+10. **The SM8350 hypervisor restricts EL1.** EL1 gets a virtual GIC that faults a redistributor write arriving while the previous one is pending, and the physical timer is off-limits. XNU's GIC init and `_enable_virtual_timer()` hit both. Overlay **1002** adds the RWP waits and an ADT-gated CNTP skip. Shim run 5 tests whether polling RWP is enough. Other EL1 registers XNU touches may be trapped too, and only the M1b boot will tell.
 
 ## 3. Milestones
 

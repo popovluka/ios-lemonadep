@@ -64,7 +64,22 @@ On lemonadep `0x9c000000` is plain DRAM. It sits between rmtfs (mainline `0x9b80
 
 **Not checked.** It has not booted (checklist M1b).
 
-### 1002-lemonadep-fb-kick — fixes 0003, 0046/0056, 0079 (only if needed)
+### 1002-lemonadep-hypervisor-gic-rwp-and-ptimer — fixes 0004/0017 GIC init, `_enable_virtual_timer()` — **written**
+
+Found on the device (M1a runs 1-4):
+- **GIC.** The SM8350 hypervisor gives EL1 a virtual GIC (`IIDR 0x47000070`). A redistributor write that arrives right after `IGROUPR0`/`ICENABLER0` takes a synchronous external abort.
+- **Timer.** `msr cntp_ctl_el0` is undefined at EL1.
+
+What 1002 changes:
+- **RWP waits:** `pe_init_fiq()` waits for `GICR_CTLR.RWP` (1 s timeout, then panic) after `IGROUPR0`, the priority writes, and `ISENABLER0`, like Linux's `gic_redist_wait_for_rwp()`.
+- **CNTP skip:** `_enable_virtual_timer()` skips the precautionary `CNTP_CTL_EL0` write when the ADT `/arm-io/gic` has `no-el1-physical-timer`. Only the lemonadep profile sets it, so sweet keeps the write; on sweet the RWP polls return at once.
+
+Status:
+- Passes the apply gate.
+- CI kernel build: run 39707336535 (`bc68f13`).
+- Shim run 5 tests whether polling RWP really avoids the abort (`RWP C`/`RWP D` vs control `RWP E`).
+
+### (was 1002) lemonadep-fb-kick — **not needed**: ABL keeps INTF autorefresh on (M1a)
 
 **When.** Only if the first shim boot shows `DISP AR now=` **without** bit 31 set, meaning autorefresh did not stick (see `shim/display.c`). Then the command-mode panel needs a `CTL_START` write after every frame.
 
