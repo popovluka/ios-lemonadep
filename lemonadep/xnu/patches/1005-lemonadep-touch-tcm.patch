@@ -570,3 +570,28 @@
  			if (err) {
  				if ((errors++ % 100u) == 0) {
  					printf("SWEET TOUCH: report err=%d irq=%#x\n", err, st.irq_status);
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -327,9 +327,19 @@
+ int
+ sweet_rpmh_vreg_enable(const char *res, unsigned mv)
+ {
+-	/* Board-specific helper: do not apply PMIC5-LDO policy to arbitrary resources. */
+-	if (!res || strcmp(res, "ldoc11") || mv < 2950 || mv > 3400) {
+-		printf("SWEET RPMH: expected ldoc11 and 2950..3400 mV\n");
++	/*
++	 * Board-specific helper: do not apply PMIC5-LDO policy to arbitrary
++	 * resources. rh_lookup()/rh_send() below are generic (a real cmd-db
++	 * search plus the standard PMIC5 LDO VRM write sequence), so this
++	 * gate is only an explicit allow-list of the resources that
++	 * sequence has actually been exercised against: sweet's PM6150L
++	 * L11C (touch rail) and lemonadep's PM8350C L3 (vdd_2v8-supply of
++	 * the Synaptics S3908 touch panel; qcom/lahaina-regulators.dtsi,
++	 * see HWMAP_lemonadep.md section 6).
++	 */
++	bool known = res && (!strcmp(res, "ldoc11") || !strcmp(res, "ldoc3"));
++	if (!known || mv < 2950 || mv > 3400) {
++		printf("SWEET RPMH: expected ldoc11 or ldoc3, and 2950..3400 mV\n");
+ 		return EINVAL;
+ 	}
+ 	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
