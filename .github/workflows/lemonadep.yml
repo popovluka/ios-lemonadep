@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       build_kernel:
-        description: Build XNU (macOS runner, ~1 h)
+        description: Build XNU (macOS runner, ~7 min)
         type: boolean
         default: false
       macos_version:

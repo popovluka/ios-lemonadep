@@ -60,7 +60,9 @@ On lemonadep `0x9c000000` is plain DRAM. It sits between rmtfs (mainline `0x9b80
   - occupied slot / no gap / no fb / 24 bpp all turn the console off;
   - drawing stays inside the framebuffer.
 
-**Not checked.** It has not been compiled inside the kernel build (genassym, the real headers, `-Werror`) and has not booted. That needs `lemonadep.yml` with `build_kernel: true`.
+**Kernel build.** It compiles: run [39698732689](https://github.com/popovluka/ios-sweet/actions/runs/39698732689) on `7a2c64c` (2026-10-22) built XNU with the sweet series + 1001. The step "Verify lemonadep overlay is in the built tree" passed (`BA_VIDEO_BASE` and `sweet_early_setup(args)` present, no `0x9c000000`). The `xnu-kernel-lemonadep` artifact is 59.8 MB, in line with upstream's ~60 MB. Compiler warnings in the touched files were not reviewed: the logs need GitHub sign-in.
+
+**Not checked.** It has not booted (checklist M1b).
 
 ### 1002-lemonadep-fb-kick — fixes 0003, 0046/0056, 0079 (only if needed)
 
