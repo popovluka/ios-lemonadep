@@ -4,9 +4,17 @@ The sweet series `xnu/patches/0001-0081` stays untouched. lemonadep-only changes
 in `lemonadep/xnu/patches/1NNN-lemonadep-*.patch`. `.github/workflows/lemonadep.yml`
 copies them after the sweet series, so they apply last.
 
-**Status: plan only. The overlay directory is still empty.** No overlay patch has
-been written or compiled yet. Each one needs a CI kernel build (`lemonadep.yml`,
-`build_kernel: true`), plus `tools/xnu-cc.py` single-file checks first.
+**Status:** 1001 is written and checked as far as possible without a macOS build
+(see below). All the others are plans only.
+
+**How an overlay patch is checked.** The pinned darwin-xnu-build **silently skips** any
+patch that fails `git apply --check`, so a broken overlay patch would just vanish
+from the kernel. `lemonadep/xnu/check-overlay.sh` replays the sweet series plus the
+overlay on a clean `xnu-8796.141.3` with that same rule, fails if an overlay patch
+would be skipped, and runs `lemonadep/xnu/test`. CI (`lemonadep.yml`, shim job) runs
+it on every push. The real compile is still the macOS kernel job (`build_kernel: true`).
+`tools/xnu-cc.py` could not be used here: it needs an `xnu-buildtree` artifact and the
+CI log (GitHub auth; there is no `gh` on this machine), plus Apple's clang fork.
 
 Preferred style: make a sweet constant **data-driven** (ADT or boot_args) rather
 than `#if`-ing a lemonadep value in. Then the same code path serves both boards,
@@ -14,7 +22,7 @@ and sweet behaviour stays identical because its ADT carries today's values.
 
 ## Needed before the first XNU boot on lemonadep (milestone 2)
 
-### 1001-lemonadep-early-fb-from-bootargs — fixes 0010, 0012 (blocker)
+### 1001-lemonadep-early-fb-from-bootargs — fixes 0010, 0012 (blocker) — **written**
 
 **Problem.** 0010 and 0012 hard-code the sweet splash `0x9c000000`, 1080×2400, stride 4320:
 - `start.s` writes a 64×32 marker band to `0x9c000000 + 2368*4320` with the MMU off.
@@ -31,6 +39,28 @@ On lemonadep `0x9c000000` is plain DRAM. It sits between rmtfs (mainline `0x9b80
 - `sweet_early.c`: `EARLY_WIDTH/HEIGHT/STRIDE` from boot_args.
 
 **sweet check.** The shim already passes 1080/2400/4320/`0x9c000000`, so the behaviour is identical.
+
+**As written** (`lemonadep/xnu/patches/1001-lemonadep-early-fb-from-bootargs.patch`):
+- `genassym.c`: `BA_VIDEO_BASE/ROWBYTES/HEIGHT`. `sweet_early.c` `_Static_assert`s the offsets 40/56/72.
+- `start.s` stage 0: the band at `Video.v_baseAddr + (v_height-32)*v_rowBytes`; skipped when there is no fb.
+- `start.s` V=P: one Normal-NC block per 32 MiB the visible rows touch. Scratch x6/x7/x9-x13 only; lr is live.
+- `arm_vm_init.c` `sweet_early_map_final(args)`: TTBR1 alias of those blocks. It keeps the in-block offset and returns 0 (early console off, no assert) if they don't fit below `gVirtBase` or a slot is taken.
+- `sweet_early.c`: geometry from `sweet_early_setup(args)`, called first in `arm_init`. The console stays off unless `v_depth == 32`, the width is ≥ 1008 (21 stage bands × 48 px) and the pitch is sane. `sweet_early_relocate(0)` turns it off.
+
+**Checked** (`check-overlay.sh`):
+- It applies after 0001-0081. Only 0031/0041 skip, and only because they need CI's HFS staging.
+- No `0x9c000000` remains.
+- Both `start.s` blocks, extracted verbatim:
+  - assemble for arm64 Mach-O;
+  - under qemu, draw exactly 64×32 px at the bottom (sweet 1080×2400, lemonadep 1080×2412 / 1440×3216) and nothing else;
+  - map exactly the expected L2 blocks: sweet one block at `0x9c000000` (as before), two across a 32 MiB boundary, none without a fb.
+- `sweet_early.c` (verbatim on aarch64; under ASan on x86) and `sweet_early_map_final()`:
+  - sweet maps the same single block at the same VA as before;
+  - the lemonadep offset `0xd00000` is preserved;
+  - occupied slot / no gap / no fb / 24 bpp all turn the console off;
+  - drawing stays inside the framebuffer.
+
+**Not checked.** It has not been compiled inside the kernel build (genassym, the real headers, `-Werror`) and has not booted. That needs `lemonadep.yml` with `build_kernel: true`.
 
 ### 1002-lemonadep-fb-kick — fixes 0003, 0046/0056, 0079 (only if needed)
 

@@ -33,8 +33,8 @@ verified on a host (WSL `LemonadepLab`, Ubuntu 24.04), not on the phone.
 
 | Area | State |
 | --- | --- |
-| Kernel overlay patches | **none written** (`lemonadep/xnu/patches/` empty). Plan: `OVERLAY_PATCHES.md` |
-| Early kernel framebuffer (0010/0012) | sweet addresses, **unsafe on lemonadep**: needs 1001 before any kernel boot |
+| Kernel overlay patches | 1001 written and host-checked (not yet compiled by the macOS kernel job); 1002-1006 plans (`OVERLAY_PATCHES.md`) |
+| Early kernel framebuffer (0010/0012) | fixed by 1001: geometry from `boot_args->Video` (CI kernel build pending) |
 | Touch (Synaptics S3908) | no driver; `sweettouch=0` |
 | Buttons (PMK8350 PON / PM8350 GPIO6) | no driver; `sweetkeys=0` |
 | USB networking | off; `sweetusb=0` (sweet default is ON) |
@@ -73,7 +73,7 @@ verified on a host (WSL `LemonadepLab`, Ubuntu 24.04), not on the phone.
    - If ABL powers UFS down after loading from USB, we need a real SM8350 QMP UFS PHY bring-up: large, sourceable from mainline `phy-qcom-qmp-ufs.c` and the vendor `ufs-qcom.c`.
    - Inline crypto (wrapped keys) is configured by Android, not by us. Plaintext pass-through is expected but unproven.
 4. **Memory.** No source gives the DRAM layout; Qualcomm's hypervisor may protect regions no DT lists. The kernel maps its whole RAM window cacheable, and a speculative access to a protected range is a hard fault. Mitigation: start with a 1 GiB window above 4 GiB, after D6.
-5. **Kernel early writes (0010/0012) to `0x9c000000`.** On lemonadep that is ordinary DRAM, so they corrupt memory and show nothing. **Blocker** for the first XNU boot until overlay 1001 exists.
+5. **Kernel early writes (0010/0012) to `0x9c000000`.** On lemonadep that is ordinary DRAM. Overlay 1001 removes them; it is host-checked but still needs the macOS kernel build to prove it compiles.
 6. **Heterogeneous SMP (A55 + A78 + X1) as one cluster.** It works on sweet's A55 + A76, but cache geometry differs per core type. Bring up `cpus=1`, then 4, then 8.
 7. **Getting logs back.** sweet used OrangeFox. lemonadep keeps recovery in `vendor_boot`, and which recovery gives `adb` root with raw `dd` of userdata is unknown. Without it, debugging is photos of the screen only.
 8. **Touch** is a different vendor/IC (Synaptics TCM, not Goodix) on a different SE: a new driver, not a port.

@@ -15,7 +15,7 @@ Work in progress. Sweet stays the default everywhere. Read in order:
 | ADT | `tools/mkadt.py OUT --board lemonadep --dram BASE SIZE` (the sweet output is byte-identical to before) |
 | Shim | `BOARD=lemonadep shim/build.sh` → `shim/out/lemonadep/` (`shim/board.h`, `shim/display.c`) |
 | Boot image | header v3; `OS_VERSION`/`OS_PATCH_LEVEL` must be copied from the stock boot.img |
-| Kernel | sweet series + `lemonadep/xnu/patches/` overlay (empty so far) |
+| Kernel | sweet series + `lemonadep/xnu/patches/` overlay (1001 so far; check with `lemonadep/xnu/check-overlay.sh`) |
 | CI | `.github/workflows/lemonadep.yml` (shim + host tests on push; kernel on dispatch) |
 | Host tests | `shim/host_tests.sh` (payload scan, FDT walk, ADT patch; ASan/UBSan) |
 

@@ -33,6 +33,7 @@ on:
       - "tools/mkadt.py"
       - "tools/adt.py"
       - "lemonadep/**"
+      - "xnu/patches/**"
       - ".github/workflows/lemonadep.yml"
 
 concurrency:
@@ -58,13 +59,16 @@ jobs:
       - name: Deps
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu device-tree-compiler cpio
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu device-tree-compiler cpio clang qemu-user
           git init -q "$RUNNER_TEMP/mkbootimg"
           git -C "$RUNNER_TEMP/mkbootimg" fetch -q --depth 1 "$MKBOOTIMG_REPO" "$MKBOOTIMG_SHA"
           git -C "$RUNNER_TEMP/mkbootimg" checkout -q FETCH_HEAD
 
       - name: Host tests (payload scan, FDT walk, ADT patch)
         run: bash shim/host_tests.sh
+
+      - name: Overlay gate (applies after the sweet series) + 1001 tests
+        run: bash lemonadep/xnu/check-overlay.sh "$RUNNER_TEMP/lemonadep-xnu"
 
       - name: Build lemonadep shim
         env:
