@@ -71,4 +71,15 @@ sed 's/__asm__ volatile("dsb ishst" ::: "memory");/__asm__ volatile("" ::: "memo
 clang -O1 -g -Wall -Wextra -fsanitize=address,undefined -fno-sanitize-recover=all -I"$W/x86" $INC \
 	-o "$W/test_c" "$T/test_c.c" "$W/x86/sweet_early.c"
 for c in $CASES; do "$W/test_c" "$c"; done
+
+echo "== overlay 1005 (touch) TCM framing: host ASan/UBSan + aarch64 (qemu-user)"
+python3 "$T/gen_touch.py" "$X" "$W"
+cp "$T/test_touch_tcm.c" "$W/"
+clang -O1 -g -Wall -Wextra -fsanitize=address,undefined -fno-sanitize-recover=all -I"$W" \
+	-o "$W/test_touch_tcm" "$W/test_touch_tcm.c"
+"$W/test_touch_tcm"
+aarch64-linux-gnu-gcc -O1 -g -Wall -Wextra -fsanitize=undefined -fsanitize-undefined-trap-on-error -I"$W" \
+	-static -o "$W/test_touch_tcm_arm64" "$W/test_touch_tcm.c"
+qemu-aarch64 "$W/test_touch_tcm_arm64"
+
 echo "overlay check: ok"
