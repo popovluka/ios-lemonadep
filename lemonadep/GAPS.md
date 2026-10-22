@@ -1,6 +1,6 @@
 # lemonadep port: honesty report (STEP 4)
 
-State at commit `9894674` (local branch `lemonadep`, not pushed).
+State as of 2026-10-22 (branch `lemonadep`, pushed to `popovluka/ios-sweet`) (local branch `lemonadep`, not pushed).
 **Nothing has run on a OnePlus 9 Pro yet.** Everything below "verified" was
 verified on a host (WSL `LemonadepLab`, Ubuntu 24.04), not on the phone.
 
@@ -48,15 +48,15 @@ verified on a host (WSL `LemonadepLab`, Ubuntu 24.04), not on the phone.
 | ID | Fact | Read from (checklist step) |
 | --- | --- | --- |
 | D1 | Does ABL accept `fastboot boot` of a v3 image? | 1.2 |
-| D2 | Stock `os_version` / `os_patch_level` | 0.3 |
+| D2 | ~~Stock `os_version` / `os_patch_level`~~ **16.0.0 / 2026-08** (Evolution X boot_b, header v3) | done |
 | D3 | Entry EL, load address, live DTB | 1.4 `EL`, `DTB` |
 | D4 | Splash plane: address, w/h, stride, bpp, format | 1.4 `DISP`/`GEOM` |
 | D5 | Autorefresh takes effect | 1.4 `DISP AR`, and whether text appears |
-| D6 | DRAM banks (8 GB vs 12 GB) | 1.4 `MEM` |
-| D7 | Retail panel (`msm_drm.dsi_display0=`) | 1.4 `PANEL` |
+| D6 | ~~DRAM banks~~ **8 GB: `0x80000000+0x39700000`, `0xc0000000+0x1c0000000`** (live FDT) | done; shim `MEM` re-checks |
+| D7 | ~~Retail panel~~ **amb670yf01 dsc cmd** (`/proc/cmdline`) | done |
 | D8 | vtimer INTID 27 delivers, SGIs, CPU_ON of 7 cores | 1.5 |
-| D9 | UFS host state after ABL, UFSHCI version, 64-bit DMA, userdata LUN | 1.6 |
-| D10 | Recovery with adb root for the log pull | 0.4 |
+| D9 | UFS host state after ABL, UFSHCI version, 64-bit DMA (userdata = **LUN 0**, measured) | 1.6 |
+| D10 | Recovery with adb root for the log pull. Android has Magisk root, so backups and reads work now; **once userdata holds iOS, Android won't boot**, so the M2 log pull still needs a recovery | 0.4 |
 | D11 | PON gen-3 RT status register, TLMM GPIO offsets, S3908 protocol | source work (OP-K), not device |
 
 ## 2. Top risks (most likely to stop progress first)

@@ -36,7 +36,9 @@ Confidence:
 | Component | Value | Source | Conf |
 | --- | --- | --- | --- |
 | `/memory` reg | **placeholder `<0 0 0 0>`; ABL fills it in at boot** | OP `devicetree/qcom/lahaina.dtsi:40`; ML `sm8350.dtsi:300` (`memory@80000000 reg = <0x0 0x80000000 0x0 0x0>`) | H |
-| DRAM banks per SKU (8 GB LE2121/2123/2125 and 12 GB) | **TODO(lemonadep)**: read `/memory` from the live FDT (the shim gets it in `x0`; `fdt.c` must learn to read `/memory`) | none in source | TODO |
+| DRAM banks, 8 GB LE2123 (EU) | `<0x80000000 0x39700000>`, `<0xc0000000 0x1c0000000>` (top `0x2_8000_0000`) | **measured**: live `/sys/firmware/fdt` `/memory` via adb root, 2026-10-22; matches `/proc/iomem` System RAM | H (device) |
+| Kernel RAM window chosen | `0x1_0000_0000 + 0xfcc00000` (sweet's proven size) | inside bank 2; no live reserved-memory node above `0xeaf00000` | H (device) |
+| DRAM banks, 12 GB SKU | **TODO(lemonadep)**, but the window above fits any larger bank 2 | none | TODO |
 | Hot-pluggable ranges (hint only) | `<0x1 0x40000000 0x0 0x40000000>`, `<0x1 0xc0000000 0x0 0x80000000>`, `<0x2 0xc0000000 0x1 0x40000000>` | OP `qcom/lahaina.dtsi:43-50` `mem-offline/offline-sizes` | L (these are offline-able sizes, not the bank map) |
 
 ### Fixed carve-outs (no-map unless noted), final values after the lemonadep overlay
@@ -83,9 +85,9 @@ Risk: SM8350 runs Qualcomm's hypervisor (hyp_mem at `0x80000000`). It may protec
 
 | Component | Value | Source | Conf |
 | --- | --- | --- | --- |
-| Splash region | `0xe4d00000`, size `0x2300000` | OP `oplus/lemonadev/lemonade_common.dtsi:218-222` | M (DT tells Linux where ABL's splash is; confirm by reading the live FDT) |
+| Splash region | `0xe4d00000`, size `0x2300000` | OP `oplus/lemonadev/lemonade_common.dtsi:218-222`; **confirmed** in the live FDT (`splash_region`, label `cont_splash_region`) | H (device) |
 | Panel candidates (ABL picks one at runtime and puts it on the kernel cmdline) | `samsung amb670yf01 dsc cmd`, `..._o_dsc_cmd`, `samsung sofef00_m video` | OP `devicetree/oplus/lemonadev/lemonadep-19815.dtsi:52-57` (touch `platform_support_project_commandline` / `panel`) | M |
-| Retail panel | **TODO(lemonadep)**: read `msm_drm.dsi_display0=` from `/proc/cmdline` on stock | none | TODO |
+| Retail panel | **`qcom,mdss_dsi_samsung_amb670yf01_dsc_cmd`** (command mode); touch `synaptics-s3908` | **measured**: `/proc/cmdline` (`msm_drm.dsi_display0=`, `oplus_bsp_tp_custom.dsi_display0=`) on the LE2123, 2026-10-22 | H (device) |
 | amb670yf01 mode | **`dsi_cmd_mode`**, DSC, `bpp 30` (10 bpc), 4 lanes, TE pin 1, `wr-mem-start 0x2c` | OP `display-devicetree/display/dsi-panel-samsung-amb670yf01-dsc-cmd.dtsi:3-31` | M |
 | amb670yf01 default timing | `timing@fhd_sdc_60` (`qcom,mdss-dsi-timing-default`): **1080×2412 @ 60 Hz**, DSC slice 540×36 | same file `:957-1171` | M |
 | amb670yf01 other timings | FHD 1080×2412 at 60/72/90/120; WQHD **1440×3216** at 60/72/90/120; `wqhd_memc_60` | same file (`timing@*`) | M |
@@ -111,7 +113,7 @@ Risk: SM8350 runs Qualcomm's hypervisor (hyp_mem at `0x80000000`). It may protec
 | Rails | VCC = `pm8350_l7` (2.504–2.95 V); VCCQ = `pm8350_l9` (parent `pm8350_s12`); vdd-hba = `gcc_ufs_phy_gdsc` | OP `devicetree/qcom/lahaina-mtp.dtsi:144-161` | M |
 | Linux device path for userdata | `sysfs_path=/sys/devices/platform/soc/1d84000.ufshc`; `/dev/block/bootdevice/by-name/userdata`, f2fs + inlinecrypt (wrapped keys) | LOS-C `init/fstab.default:46` | M |
 | UFSHCI version, UFS device spec version | **TODO(lemonadep)**: read `REG_VER` (0x08) and `CAP` with the shim probe (`shim/ufs.c` already prints them) | none | TODO |
-| userdata LUN | **TODO(lemonadep)**: shim probe lists the GPT per LUN | none | TODO |
+| userdata LUN | **LUN 0** (`/dev/block/sda20`, 102.1 GiB); `persist` is also on LUN 0 (`sda3`) | **measured**: by-name links via adb root, 2026-10-22 | H (device) |
 
 The kernel driver adopts the host ABL left running, so the base address is the only value it needs. ICE is bypassed as long as the UTRD crypto-enable bit stays 0, which `sweet_ufs.c` already does. Android's FBE ciphertext in userdata is irrelevant: the iOS image overwrites the partition.
 

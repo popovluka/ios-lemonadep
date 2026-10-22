@@ -69,7 +69,11 @@ BOARDS = {
         ufs=0x01d84000,                      # ufshc@1d84000 ufs_mem (vendor + mainline)
         fb=0xe4d00000, fb_size=0x2300000,    # lemonade_common.dtsi &splash_memory
         fb_geometry=None,                    # TODO(lemonadep): measured by the shim (MDSS SSPP)
-        dram=None,                           # TODO(lemonadep): live FDT /memory
+        # Live FDT on an LE2123 (8 GB): /memory = <0x80000000 0x39700000>,
+        # <0xc0000000 0x1c0000000>; no reserved-memory node above 0xeaf00000
+        # and /proc/iomem shows it all as System RAM. Same size as sweet's
+        # proven --highmem window, inside bank 2 (also on 12 GB phones).
+        dram=(0x100000000, 0xfcc00000),
         # cpu@0..@300 Cortex-A55, @400..@600 A78, @700 X1 (sm8350.dtsi cpus).
         # 'qcom,kryo470' is the IONameMatch of SweetCPU (xnu patch 0018), not
         # a claim about the core. No clock-frequency: TODO(lemonadep), it
@@ -120,7 +124,7 @@ def build(seed=None, qemu=False, highmem=False, board='sweet', dram=None, fb_geo
     if dram is None:
         dram = b['dram']
     if dram is None and board != 'sweet':
-        raise SystemExit(f'{board}: --dram BASE SIZE is required (TODO: read the live FDT /memory, see GAPS.md)')
+        raise SystemExit(f'{board}: --dram BASE SIZE is required')
     if fb_geometry is None:
         fb_geometry = b['fb_geometry']
     if fb_geometry is None:
