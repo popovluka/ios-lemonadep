@@ -108,6 +108,34 @@ BOARDS = {
             ('pon-kpdpwr-bit', struct.pack('<I', 1 << 7)), ('pon-resin-bit', struct.pack('<I', 1 << 6)),
             ('vol-down-gpio-ppid', struct.pack('<I', 0x18D)),
         ],
+        # Touch: Synaptics S3908 (synaptics-s3908), TCM protocol, on QUPv3
+        # wrap0 SE4 I2C (sweet's touch is GENI SE7/Goodix GT9896; same GENI
+        # SE IP, different wrapper/SE index and protocol). Sources (see
+        # HWMAP_lemonadep.md section 6 for the full citation list):
+        #   i2c-addr/reset/irq/power gpios: OP devicetree/oplus/lemonadev/
+        #     lemonadep-19815.dtsi (touch node + &tlmm tp_irq_active/tp_rst_active)
+        #   sda/scl gpios: OP devicetree/qcom/lahaina-pinctrl.dtsi
+        #     qupv3_se4_i2c_active (gpio20/21, function qup4 = mux select 1
+        #     per pinctrl-lahaina.c PINGROUP(20/21, qup4, ...))
+        #   se-pa: OP devicetree/qcom/lahaina-qupv3.dtsi i2c@990000
+        #   tlmm-pa: OP lahaina.dtsi pinctrl@f000000 (0x0F000000) + driver's
+        #     own REG_BASE 0x100000 pin-array offset (pinctrl-lahaina.c) =
+        #     0x0F100000 (matches mainline sm8350.dtsi's pre-folded base)
+        #   gcc-vote/halt/rcg: drivers/clk/qcom/gcc-lahaina.c
+        #     gcc_qupv3_wrap0_s4_clk(_src), _core(_2x)_clk, _m/s_ahb_clk
+        touch_props=[
+            ('protocol', b'tcm\0'),
+            ('i2c-addr', struct.pack('<I', 0x4B)),
+            ('reset-gpio', struct.pack('<I', 22)), ('irq-gpio', struct.pack('<I', 23)),
+            ('sda-gpio', struct.pack('<I', 20)), ('scl-gpio', struct.pack('<I', 21)),
+            ('pwr-gpio-2v8', struct.pack('<I', 31)), ('pwr-gpio-1v8', struct.pack('<I', 197)),
+            ('se-pa', struct.pack('<I', 0x00990000)),
+            ('tlmm-pa', struct.pack('<I', 0x0F100000)),
+            ('gcc-vote-reg', struct.pack('<I', 0x52008)), ('gcc-vote-mask', struct.pack('<I', 0x43C0)),
+            ('gcc-halt-core', struct.pack('<I', 0x23000)), ('gcc-halt-core2x', struct.pack('<I', 0x23008)),
+            ('gcc-halt-m-ahb', struct.pack('<I', 0x17004)), ('gcc-halt-s-ahb', struct.pack('<I', 0x17008)),
+            ('gcc-halt-se', struct.pack('<I', 0x174cc)), ('gcc-rcg', struct.pack('<I', 0x174d0)),
+        ],
     ),
 }
 
@@ -308,6 +336,11 @@ def build(seed=None, qemu=False, highmem=False, board='sweet', dram=None, fb_geo
         ('opposed-power-vol-buttons', u32(1)),
     ] + b.get('button_props', []))
 
+    # Touch overrides (lemonadep: Synaptics S3908/TCM on a different GENI SE
+    # wrapper+index than sweet's SE7/Goodix). Absent for sweet (no touch_props
+    # key), so sweet's ADT gains no /touch node and is unaffected.
+    touch = [node('touch', [ph()] + b['touch_props'])] if b.get('touch_props') else []
+
     product_props = d22ap_product()
     product = [node('product', [ph()] + product_props)] if product_props else []
 
@@ -327,7 +360,7 @@ def build(seed=None, qemu=False, highmem=False, board='sweet', dram=None, fb_geo
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + product + ([] if qemu else [ufs]))
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + touch + product + ([] if qemu else [ufs]))
 
 
 if __name__ == '__main__':

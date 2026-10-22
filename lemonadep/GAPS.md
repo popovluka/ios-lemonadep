@@ -90,8 +90,8 @@ verified on a host (WSL `LemonadepLab`, Ubuntu 24.04), not on the phone.
 | M1 | ~~**Boot + framebuffer**~~ **DONE 2026-10-22**: shim text visible, XNU kernel console visible, boots to BSD root-mount retry loop | shim done; overlay 1001+1002 done, kernel boots | `fastboot boot` only, no |
 | M2 | ~~**UFS mounts the iOS root**~~ **DONE 2026-10-22**: iOS root built (lemonadep/m2-build-macbook.sh), flashed to `userdata` | sweet UFS/HFS patches, unchanged, worked as-is | flash iOS root to `userdata`: **done, erased Android data** |
 | M3 | ~~**Lock screen**~~ **DONE 2026-10-22**: boots through to the rendered lock screen (time, status bar, slide bar, home indicator) | fixed boot-args (`unentitled_ios_sim_launch=1 ignition_level=1`); overlay 1003 turned out **not needed**, native FHD geometry rendered correctly as-is | no |
-| M4 | **Touch** | overlay 1005 (S3908), TLMM offsets, RPMh `ldoc3` -- not written | no |
-| M5 | **Home screen** (unlock, swipe, keys) | overlay 1004 (keys) -- not written | no |
+| M4 | **Touch** | overlay 1005 (S3908 TCM on SE4) written and passes `check-overlay.sh`; keys CI build pending; **not yet booted on-device** | no |
+| M5 | **Home screen** (unlock, swipe, keys) | overlay 1004 (keys, PMK8350 PON + PM8350 GPIO6) written and passes `check-overlay.sh`; CI kernel build in progress; **not yet booted on-device** | no |
 
 ## 4. On-device checklist
 
@@ -240,8 +240,10 @@ Rules for every step:
 
 ### M4: touch
 
-1. Boot with overlay 1005 and its enable boot-arg (named when written).
-2. Expect: `TOUCH`/S3908 log lines (chip ID, report rate).
+1. Boot with overlay 1005, `sweettouch=1` (the existing boot-arg; overlay 1005
+   adds no new one -- it reuses sweet's `sweettouch`/`sweettouchdelay`/
+   `sweettouchirq`, switching protocol via the ADT /touch node instead).
+2. Expect: `SWEET TOUCH` log lines (`lemonadep=1`, TCM bring-up ok, mode).
 3. Swipe up on the lock screen. Expect: unlock.
 4. Pull the log either way.
 
