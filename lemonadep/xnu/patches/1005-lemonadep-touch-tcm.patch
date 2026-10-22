@@ -14,15 +14,20 @@
   */
  #if defined(ARM64_BOARD_CONFIG_SWEET)
  #include <sys/param.h>
-@@ -14,6 +21,7 @@
+@@ -14,7 +21,12 @@
  #include <kern/sched_prim.h>
  #include <machine/machine_routines.h>
  #include <pexpert/pexpert.h>
 +#include <pexpert/device_tree.h>
++#include <arm/caches_internal.h>
++#include <vm/pmap.h>
++#include <vm/vm_kern.h>
  
++extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
  extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
  /* Mach MIG declaration is not included by BSD's exported thread.h. */
-@@ -32,12 +40,55 @@
+ extern kern_return_t thread_terminate(thread_t);
+@@ -32,12 +44,55 @@
  #define TOUCH_MAX        10u
  #define TOUCH_GOODIX     1
  #define TOUCH_FTS        2
@@ -78,7 +83,35 @@
  #define SE_STATUS       0x040u
  #define SE_MCLK         0x048u
  #define SE_FW           0x068u
-@@ -78,6 +129,14 @@
+@@ -70,6 +125,27 @@
+  * MSB-to-LSB, length 8, STOP only on vector 3. FIFO bytes remain LSB first. */
+ #define SE_PACK0        0x0007f8feu
+ #define SE_PACK1        0x000ffefeu
++/* SE DMA engine (non-GSI), offsets from the vendor msm-geni-se / qcom-geni-se */
++#define SE_DMA_TX_PTR_L     0xc30u
++#define SE_DMA_TX_PTR_H     0xc34u
++#define SE_DMA_TX_ATTR      0xc38u
++#define SE_DMA_TX_LEN       0xc3cu
++#define SE_DMA_TX_IRQ_STAT  0xc40u
++#define SE_DMA_TX_IRQ_CLR   0xc44u
++#define SE_DMA_TX_IRQ_EN_SET 0xc4cu
++#define SE_DMA_TX_FSM_RST   0xc58u
++#define SE_DMA_RX_PTR_L     0xd30u
++#define SE_DMA_RX_PTR_H     0xd34u
++#define SE_DMA_RX_ATTR      0xd38u
++#define SE_DMA_RX_LEN       0xd3cu
++#define SE_DMA_RX_IRQ_STAT  0xd40u
++#define SE_DMA_RX_IRQ_CLR   0xd44u
++#define SE_DMA_RX_IRQ_EN_SET 0xd4cu
++#define SE_DMA_RX_FSM_RST   0xd58u
++#define SE_DMA_DONE_EN      (1u << 0)
++#define SE_DMA_EOT_EN       (1u << 1)
++#define SE_DMA_AHB_ERR_EN   (1u << 2)
++#define SE_DMA_TX_EOT_BUF   (1u << 0)
+ 
+ static struct {
+ 	vm_offset_t se, gcc, gpio;
+@@ -78,6 +154,21 @@
  	uint32_t irq_status, irq_last, active;
  	unsigned sent, got;
  	int x[TOUCH_MAX], y[TOUCH_MAX];
@@ -90,10 +123,17 @@
 +	uint32_t gcc_halt[5]; /* core, core_2x, m_ahb, s_ahb, se (in that order) */
 +	uint8_t i2c_addr, reset_gpio, irq_gpio, sda_gpio, scl_gpio;
 +	uint8_t pwr_gpio_2v8, pwr_gpio_1v8;
++	/* lemonadep SE4 has its FIFO interface disabled by design (the vendor
++	 * dtsi gives it dmas = <&gpi_dma0 ...>; FIFO_IF_DISABLE reads 1), so
++	 * transfers go through the SE's own DMA engine instead. */
++	bool dma;
++	uint8_t *dma_va;
++	uint64_t dma_pa;
++	unsigned dma_errs;
  } st;
  static int touch_sleep_chan;
  
-@@ -133,19 +192,69 @@
+@@ -133,19 +224,69 @@
  	touch_wr(st.gpio, off, cfg);
  }
  
@@ -170,7 +210,7 @@
  		if ((cfg & 0x371fu) != 1u) {
  			printf("SWEET TOUCH: DFS level0=%#x is not XO/1; need clock integration\n", cfg);
  			return false;
-@@ -153,13 +262,33 @@
+@@ -153,13 +294,33 @@
  	} else {
  		/* XO parent 0, HID divider 1 => 19.2 MHz. No PLL or voltage change. */
  		cfg = (cfg & ~(0x371fu | (1u << 20))) | 1u;
@@ -207,7 +247,110 @@
  	const uint32_t branches[] = {0x18004, 0x18008, 0x1800c, 0x18010, 0x18144};
  	for (unsigned i = 0; i < sizeof(branches) / sizeof(branches[0]); ++i) {
  		if (!touch_wait_clear(st.gcc, branches[i], 1u << 31)) {
-@@ -487,22 +616,240 @@
+@@ -288,13 +449,101 @@
+ 	return err;
+ }
+ 
++/*
++ * One I2C message through the SE DMA engine (GENI_DMA_MODE_EN=1), following
++ * the vendor driver's DMA path (i2c-qcom-geni.c geni_i2c_{tx,rx}_one_msg with
++ * qcom-geni-se.c geni_se_{tx,rx}_dma_prep): program the M command first, then
++ * the DMA pointer/attr/length. Polled; completion = M_CMD_DONE plus the
++ * direction's DMA_DONE.
++ */
++static int
++touch_msg_dma(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
++    unsigned nr, bool stretch)
++{
++	if (st.dead || !st.dma_va || nt > 64 || nr > 90 || (nt && nr) || (!nt && !nr)) {
++		return EIO;
++	}
++	if (!touch_wait_clear(st.se, SE_STATUS, 1u)) {
++		st.dead = true;
++		return EBUSY;
++	}
++	unsigned len = nt ? nt : nr;
++	uint32_t dstat_off = nt ? SE_DMA_TX_IRQ_STAT : SE_DMA_RX_IRQ_STAT;
++	touch_wr(st.se, SE_IRQ_CLR, 0xffffffffu);
++	touch_wr(st.se, SE_DMA_TX_IRQ_CLR, 0xffffffffu);
++	touch_wr(st.se, SE_DMA_RX_IRQ_CLR, 0xffffffffu);
++	touch_wr(st.se, SE_DMA, 1u); /* GENI_DMA_MODE_EN */
++	if (nt) {
++		memcpy(st.dma_va, tx, nt);
++	} else {
++		memset(st.dma_va, 0xa5, nr);
++	}
++	flush_dcache64((addr64_t)st.dma_pa, len, TRUE);
++	touch_wr(st.se, nr ? SE_RX_LEN : SE_TX_LEN, len);
++	touch_wr(st.se, SE_CMD, ((nr ? 2u : 1u) << 27) |
++	    ((uint32_t)addr << 9) | (stretch ? 4u : 0u));
++	if (nt) {
++		touch_wr(st.se, SE_DMA_TX_IRQ_EN_SET, SE_DMA_DONE_EN | SE_DMA_EOT_EN | SE_DMA_AHB_ERR_EN);
++		touch_wr(st.se, SE_DMA_TX_PTR_L, (uint32_t)st.dma_pa);
++		touch_wr(st.se, SE_DMA_TX_PTR_H, (uint32_t)(st.dma_pa >> 32));
++		touch_wr(st.se, SE_DMA_TX_ATTR, SE_DMA_TX_EOT_BUF);
++		touch_wr(st.se, SE_DMA_TX_LEN, len);
++	} else {
++		touch_wr(st.se, SE_DMA_RX_IRQ_EN_SET, SE_DMA_DONE_EN | SE_DMA_EOT_EN | SE_DMA_AHB_ERR_EN);
++		touch_wr(st.se, SE_DMA_RX_PTR_L, (uint32_t)st.dma_pa);
++		touch_wr(st.se, SE_DMA_RX_PTR_H, (uint32_t)(st.dma_pa >> 32));
++		touch_wr(st.se, SE_DMA_RX_ATTR, 0);
++		touch_wr(st.se, SE_DMA_RX_LEN, len);
++	}
++	int err = ETIMEDOUT;
++	uint32_t irq = 0, dstat = 0;
++	for (unsigned i = 0; i < 20000; ++i) {
++		irq = touch_irq();
++		dstat = touch_rd(st.se, dstat_off);
++		if (irq & SE_ERRORS) {
++			err = (irq & SE_NACK) ? ENXIO : EIO;
++			for (unsigned j = 0; j < 5000 && !(irq & SE_DONE); ++j) {
++				delay(1);
++				irq = touch_irq();
++			}
++			break;
++		}
++		if ((irq & SE_DONE) && (dstat & SE_DMA_DONE_EN)) {
++			err = 0;
++			break;
++		}
++		delay(1);
++	}
++	if (err == 0 && nr) {
++		flush_dcache64((addr64_t)st.dma_pa, len, TRUE);
++		memcpy(rx, st.dma_va, nr);
++		st.got = nr;
++	}
++	if (err) {
++		if (st.dma_errs++ < 6) {
++			printf("SWEET TOUCH: dma xfer addr=%#x %s len=%u err=%d irq=%#x dma=%#x status=%#x len_in=%#x fifo_dis=%#x\n",
++			    addr, nr ? "read" : "write", len, err, irq, dstat,
++			    touch_rd(st.se, SE_STATUS),
++			    touch_rd(st.se, nt ? 0xc54u : 0xd54u), touch_rd(st.se, 0x64));
++		}
++		touch_wr(st.se, SE_DMA_TX_FSM_RST, 1u);
++		touch_wr(st.se, SE_DMA_RX_FSM_RST, 1u);
++		touch_abort();
++	}
++	touch_wr(st.se, SE_IRQ_CLR, 0xffffffffu);
++	touch_wr(st.se, SE_DMA_TX_IRQ_CLR, 0xffffffffu);
++	touch_wr(st.se, SE_DMA_RX_IRQ_CLR, 0xffffffffu);
++	return err;
++}
++
+ static int
+ touch_msg(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
+     unsigned nr, bool stretch)
+ {
+ 	st.irq_status = st.irq_last = 0;
+ 	st.sent = st.got = 0;
+-	int err = touch_msg_run(addr, tx, nt, rx, nr, stretch);
++	int err = st.dma ? touch_msg_dma(addr, tx, nt, rx, nr, stretch) :
++	    touch_msg_run(addr, tx, nt, rx, nr, stretch);
+ 	if (st.probing) {
+ 		printf("SWEET TOUCH: probe xfer addr=%#x %s len=%u stretch=%u err=%d irq=%#x seen=%#x tx=%u rx=%u status=%#x\n",
+ 		    addr, nr ? "read" : "write", nr ? nr : nt, stretch ? 1u : 0u,
+@@ -487,22 +736,240 @@
  	return 0;
  }
  
@@ -452,7 +595,7 @@
  		return false;
  	}
  	touch_wr(st.se, 0xe18, 0); /* no GSI events */
-@@ -551,17 +898,18 @@
+@@ -551,17 +1018,18 @@
  	unsigned delay_s = 45;
  	(void)arg;
  	(void)result;
@@ -475,7 +618,7 @@
  	if (!st.gcc || !st.gpio || !st.se) {
  		printf("SWEET TOUCH: MMIO mapping failed\n");
  		goto out;
-@@ -569,53 +917,85 @@
+@@ -569,53 +1037,97 @@
  	if (!touch_clocks() || !touch_se_init()) {
  		goto out;
  	}
@@ -537,6 +680,18 @@
 +		touch_wait(10); /* conservative rail settling; not a DT timing value */
 +		touch_gpio(st.sda_gpio, 1, 3, 0, false, false); /* qup4 SDA/SCL, 2 mA, bias-pull-up */
 +		touch_gpio(st.scl_gpio, 1, 3, 0, false, false);
++		vm_offset_t dma_va = 0;
++		if (kmem_alloc_contig(kernel_map, &dma_va, PAGE_SIZE, PAGE_MASK, 0, 0,
++		    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) == KERN_SUCCESS) {
++			ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)dma_va);
++			if (pn) {
++				st.dma_va = (uint8_t *)dma_va;
++				st.dma_pa = ptoa_64(pn);
++				st.dma = true;
++			}
++		}
++		printf("SWEET TOUCH: SE4 transfers via %s (dma pa=%#llx)\n",
++		    st.dma ? "SE DMA" : "FIFO", (unsigned long long)st.dma_pa);
 +		int err = touch_tcm_bringup();
 +		if (err) {
 +			printf("SWEET TOUCH: no S3908 (err=%d); stopping\n", err);
