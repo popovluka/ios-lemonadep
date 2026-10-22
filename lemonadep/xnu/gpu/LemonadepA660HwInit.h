@@ -195,4 +195,33 @@ static const uint32_t LemonadepA660RscSeqMicrocode[5]={
 #define LEMONADEP_A660_RSCC_VAL_PDC_MATCH_VALUE_LO 0x4510u
 #define LEMONADEP_A660_RSCC_VAL_PDC_MATCH_VALUE_HI 0x4514u
 #define LEMONADEP_A660_PDC_VAL_GPU_ENABLE_PDC 0x80000001u
+
+/* Rest of a6xx_gmu_fw_start() (Core window): HFI table pointer, AHB fence
+ * range, CM3 config, chip ID + log buffer registration, GBIF QoS. A660 is NOT
+ * adreno_is_a7xx()/a8xx(), so it takes the plain-a6xx branches, which genuinely
+ * differ from ShengGmu.c's A740 values in two places -- confirmed against the
+ * real a6xx_gmu_fw_start(), not assumed:
+ *   - fence range is (upper=0xa,lower=0xa0), NOT A7XX/A8XX's (0x32,0x8a0/0x8c0)
+ *     the exact value ShengGmu.c writes for the A740.
+ *   - chip ID and the log buffer IOVA go to GMU_HFI_SFR_ADDR and
+ *     GPU_GMU_CX_GMU_PWR_COL_CP_MSG, NOT GMU_GENERAL_10/GMU_GENERAL_8 (those
+ *     are the A7XX/A8XX-only registers ShengGmu.c uses). */
+#define A660_GMU_CM3_FW_INIT_RESULT 0x07e070
+#define A660_GMU_CM3_BOOT_CONFIG 0x07e004
+#define A660_GMU_HFI_QTBL_ADDR 0x07e614
+#define A660_GMU_HFI_QTBL_INFO 0x07e610
+#define A660_GMU_AHB_FENCE_RANGE_0 0x08ec44
+#define A660_GMU_CM3_CFG 0x07e0b4
+#define A660_GMU_HFI_SFR_ADDR 0x07e608
+#define A660_GPU_GMU_CX_GMU_PWR_COL_CP_MSG 0x07e400
+#define A660_GBIF_QSB_SIDE0 0x00f00c
+#define LEMONADEP_A660_FENCE_RANGE_UPPER 0xau
+#define LEMONADEP_A660_FENCE_RANGE_LOWER 0xa0u
+/* AHB_FENCE_RANGE_0 = BIT(31) | upper<<18 | lower, per the real FIELD_PREP calls. */
+#define LEMONADEP_A660_RSCC_VAL_CM3_CFG 0x4052u  /* avoids the snapshot/NMI jump */
+#define LEMONADEP_A660_VAL_HFI_QTBL_INFO 1u
+#define LEMONADEP_A660_VAL_CM3_BOOT_CONFIG 2u
+/* a640_gbif (shared by A660, confirmed in a6xx_catalog.c): write this same value
+ * to GBIF_QSB_SIDE0..SIDE3 (consecutive dwords, +1 each). */
+#define LEMONADEP_A660_GBIF_QSB_VALUE 0x00071620u
 #endif

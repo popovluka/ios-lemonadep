@@ -88,6 +88,15 @@ RSCC = ['GPU_RSCC_RSC_STATUS0_DRV0', 'RSCC_PDC_SLAVE_ID_DRV0', 'RSCC_HIDDEN_TCS_
 # REG_A6XX_PDC_GPU_ENABLE_PDC etc. by concatenating the domain name with the register name.
 PDC = ['GPU_ENABLE_PDC', 'GPU_SEQ_START_ADDR']
 
+# Rest of a6xx_gmu_fw_start(): HFI table pointer, the AHB fence range, CM3 config, chip ID and
+# log-buffer registration, and the shared GBIF QoS writes. All traced for A660's real path (not
+# ShengGmu.c's A7XX one, which gets two of these genuinely wrong for A660 -- see the emitted
+# comment below for what and why).
+GMU_FW_START = ['GMU_CM3_FW_INIT_RESULT', 'GMU_CM3_BOOT_CONFIG', 'GMU_HFI_QTBL_ADDR',
+                'GMU_HFI_QTBL_INFO', 'GMU_AHB_FENCE_RANGE_0', 'GMU_CM3_CFG', 'GMU_HFI_SFR_ADDR',
+                'GPU_GMU_CX_GMU_PWR_COL_CP_MSG']
+GBIF_CX = ['GBIF_QSB_SIDE0']  # a640_gbif writes SIDE0..SIDE3 at +1 each, all the same value
+
 
 def main():
     catalog = CATALOG.read_text()
@@ -97,6 +106,8 @@ def main():
     gmu_core_rsc = [(n, resolve(n, ['a6xx_gmu.xml'])) for n in GMU_CORE_RSC]
     rscc = [(n, resolve(n, ['a6xx_gmu.xml'])) for n in RSCC]
     pdc = [(n, resolve(n, ['a6xx.xml'])) for n in PDC]
+    fw_start = [(n, resolve(n, ['a6xx_gmu.xml'])) for n in GMU_FW_START]
+    gbif_cx = [(n, resolve(n, ['a6xx.xml'])) for n in GBIF_CX]
 
     block = re.search(r'a660_hwcg\[\]\s*=\s*\{(.*?)\{\},\s*\};', catalog, re.S).group(1)
     hwcg = []
@@ -174,9 +185,34 @@ def main():
     lines.append('#define LEMONADEP_A660_RSCC_VAL_PDC_MATCH_VALUE_LO 0x4510u')
     lines.append('#define LEMONADEP_A660_RSCC_VAL_PDC_MATCH_VALUE_HI 0x4514u')
     lines.append('#define LEMONADEP_A660_PDC_VAL_GPU_ENABLE_PDC 0x80000001u')
+
+    lines.append('')
+    lines.append('/* Rest of a6xx_gmu_fw_start() (Core window): HFI table pointer, AHB fence')
+    lines.append(' * range, CM3 config, chip ID + log buffer registration, GBIF QoS. A660 is NOT')
+    lines.append(' * adreno_is_a7xx()/a8xx(), so it takes the plain-a6xx branches, which genuinely')
+    lines.append(' * differ from ShengGmu.c\'s A740 values in two places -- confirmed against the')
+    lines.append(' * real a6xx_gmu_fw_start(), not assumed:')
+    lines.append(' *   - fence range is (upper=0xa,lower=0xa0), NOT A7XX/A8XX\'s (0x32,0x8a0/0x8c0)')
+    lines.append(' *     the exact value ShengGmu.c writes for the A740.')
+    lines.append(' *   - chip ID and the log buffer IOVA go to GMU_HFI_SFR_ADDR and')
+    lines.append(' *     GPU_GMU_CX_GMU_PWR_COL_CP_MSG, NOT GMU_GENERAL_10/GMU_GENERAL_8 (those')
+    lines.append(' *     are the A7XX/A8XX-only registers ShengGmu.c uses). */')
+    for n, o in fw_start:
+        lines.append('#define A660_%s 0x%06x' % (n, o * 4))
+    for n, o in gbif_cx:
+        lines.append('#define A660_%s 0x%06x' % (n, o * 4))
+    lines.append('#define LEMONADEP_A660_FENCE_RANGE_UPPER 0xau')
+    lines.append('#define LEMONADEP_A660_FENCE_RANGE_LOWER 0xa0u')
+    lines.append('/* AHB_FENCE_RANGE_0 = BIT(31) | upper<<18 | lower, per the real FIELD_PREP calls. */')
+    lines.append('#define LEMONADEP_A660_RSCC_VAL_CM3_CFG 0x4052u  /* avoids the snapshot/NMI jump */')
+    lines.append('#define LEMONADEP_A660_VAL_HFI_QTBL_INFO 1u')
+    lines.append('#define LEMONADEP_A660_VAL_CM3_BOOT_CONFIG 2u')
+    lines.append('/* a640_gbif (shared by A660, confirmed in a6xx_catalog.c): write this same value')
+    lines.append(' * to GBIF_QSB_SIDE0..SIDE3 (consecutive dwords, +1 each). */')
+    lines.append('#define LEMONADEP_A660_GBIF_QSB_VALUE 0x00071620u')
     lines.append('#endif')
     text = '\n'.join(lines) + '\n'
-    gmu_seq_count = len(gmu_core_rsc) + len(rscc) + len(pdc)
+    gmu_seq_count = len(gmu_core_rsc) + len(rscc) + len(pdc) + len(fw_start) + len(gbif_cx)
     if '--check' in sys.argv[3:]:
         if OUT.read_text() != text:
             raise SystemExit('LemonadepA660HwInit.h is stale')
