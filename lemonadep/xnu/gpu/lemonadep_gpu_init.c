@@ -173,4 +173,11 @@ lemonadep_gpu_init(void)
 		printf("SWEET GPU: GMU reports ready. Stopping before CP ring/CP_ME_INIT "
 		    "(needs SMMU context + real IOVA-backed memory, not yet wired)\n");
 	}
+	/*
+	 * Pause here so these lines are readable on screen before boot
+	 * continues and scrolls them away (wdt=-1/wdt_test=no_user_checkin
+	 * already make the watchdog never fire, so this is safe).
+	 */
+	printf("SWEET GPU: pausing 8s so the lines above are readable\n");
+	delay(8 * 1000 * 1000);
 }
