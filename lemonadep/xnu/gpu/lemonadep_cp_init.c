@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: MIT */
 /*
  * lemonadep: the real A660 CP_ME_INIT sequence. UniXNU/NativeAdreno's own
  * vendored NativeAdrenoCpInit.cpp implements a7xx_cp_init() (its own
@@ -15,34 +14,35 @@
  * NativeAdrenoCpInit.cpp builds. See lemonadep/HANDOFF.md "GPU, Phase 5"
  * for the full citation (a6xx_gpu.c:895-920 vs 924-968).
  *
- * This file is new, lemonadep-specific logic -- not a vendored or adapted
- * file -- but reuses NativeAdrenoRing::submit() (confirmed chip-generic:
- * the a7xx/a6xx dispatch is only in what packet gets submitted, not in how
- * submission/fencing works) and AdrenoPM4Type7() (confirmed generic:
- * CP_ME_INIT = 0x48, untagged in adreno_pm4.xml, shared across every a6xx
- * generation) from the vendored libraries.
+ * New, lemonadep-specific logic, built on lemonadep_ring.c (this
+ * project's own real A660 ring, not NativeAdrenoRing -- see HANDOFF.md
+ * for why that one isn't usable here either) and AdrenoPM4Type7()
+ * (confirmed generic: CP_ME_INIT = 0x48, untagged in adreno_pm4.xml,
+ * shared across every a6xx generation).
  */
-#include "NativeAdrenoRing.h"
-#include "AdrenoPM4.h"
+#include <stdint.h>
 
-enum : uint32_t { LemonadepCpMeInitOpcode = 0x48, LemonadepCpMeInitWords = 9 /* 1 header + 8 payload */ };
+#include "AdrenoPM4.h"
+#include "lemonadep_ring.c"
+
+enum { LemonadepCpMeInitOpcode = 0x48, LemonadepCpMeInitWords = 9 /* 1 header + 8 payload */ };
 
 /*
  * Runs the real a6xx (non-A7XX) CP_ME_INIT and waits for its fence.
- * Precondition, same as NativeAdrenoCpInit::run(): CP_SQE_INSTR_BASE
- * already programmed/verified by the caller, ring already attached.
+ * Precondition: CP_SQE_INSTR_BASE already programmed by the caller, ring
+ * already attached.
  */
-extern "C" IOReturn
-lemonadep_a6xx_cp_init(NativeAdrenoRing *ring, const NativeAdrenoRingClock *clock,
-    uint32_t timeout_us, uint32_t *fence)
+lemonadep_ring_status
+lemonadep_a6xx_cp_init(const lemonadep_ring_io *io, lemonadep_ring *ring, uint32_t timeout_us,
+    uint32_t *fence)
 {
-	if (!ring || !fence) {
-		return kIOReturnBadArgument;
+	if (!io || !ring || !fence) {
+		return LemonadepRingBadArg;
 	}
 	*fence = 0;
 	uint32_t words[LemonadepCpMeInitWords] = {0};
 	if (AdrenoPM4Type7(LemonadepCpMeInitOpcode, 8, &words[0]) != AdrenoPM4Success) {
-		return kIOReturnInternalError;
+		return LemonadepRingBadArg;
 	}
 	/* The real a6xx_cp_init() payload, OUT_RING for OUT_RING
 	 * (a6xx_gpu.c:895-920) -- not the a7xx mask/layout. */
@@ -56,14 +56,14 @@ lemonadep_a6xx_cp_init(NativeAdrenoRing *ring, const NativeAdrenoRingClock *cloc
 	words[8] = 0x00000000u; /* pad */
 
 	uint32_t value = 0;
-	IOReturn status = ring->submit(words, LemonadepCpMeInitWords, &value);
-	if (status) {
+	lemonadep_ring_status status = lemonadep_ring_submit(io, ring, words, LemonadepCpMeInitWords, &value);
+	if (status != LemonadepRingOk) {
 		return status;
 	}
-	NativeAdrenoRingFence result = ring->wait(value, clock, timeout_us, nullptr);
-	if (result != NativeAdrenoRingFenceComplete) {
-		return result == NativeAdrenoRingFenceTimeout ? kIOReturnTimeout : kIOReturnIOError;
+	status = lemonadep_ring_wait(io, ring, value, timeout_us);
+	if (status != LemonadepRingOk) {
+		return status;
 	}
 	*fence = value;
-	return kIOReturnSuccess;
+	return LemonadepRingOk;
 }
