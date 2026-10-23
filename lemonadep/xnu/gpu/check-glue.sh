@@ -9,10 +9,11 @@ trap 'rm -rf "$S"' EXIT
 mkdir -p "$S/sys" "$S/kern" "$S/machine" "$S/pexpert" "$S/lemonadep"
 printf '#include <stdint.h>\n#include <stddef.h>\ntypedef uintptr_t vm_offset_t;\ntypedef unsigned long vm_size_t;\n' > "$S/sys/param.h"
 printf '#include <stdio.h>\n' > "$S/sys/systm.h"
-printf '#include <stdint.h>\nstatic inline uint64_t mach_absolute_time(void) { return 0; }\nstatic inline void absolutetime_to_nanoseconds(uint64_t a, uint64_t *o) { *o = a; }\n' > "$S/kern/clock.h"
+# kern/clock.h is where XNU declares delay() (sweet_rpmh.c relies on that).
+printf '#include <stdint.h>\nstatic inline uint64_t mach_absolute_time(void) { return 0; }\nstatic inline void absolutetime_to_nanoseconds(uint64_t a, uint64_t *o) { *o = a; }\nvoid delay(int usec);\n' > "$S/kern/clock.h"
 : > "$S/kern/thread.h"
 : > "$S/machine/machine_routines.h"
-printf 'static inline void delay(int us) { (void)us; }\n' > "$S/kern/sched_prim.h"
+: > "$S/kern/sched_prim.h"
 printf '#include <string.h>\n#include <stdint.h>\nstatic inline int PE_parse_boot_argn(const char *n, void *v, int sz) { (void)n; memset(v, 0, sz); return 0; }\n' > "$S/pexpert/pexpert.h"
 cp "$G"/LemonadepGmuSource.h "$G"/LemonadepA660HwInit.h "$G"/lemonadep_gpu_reserve.c \
 	"$G"/lemonadep_gmu_coldstart.c "$G"/lemonadep_gpu_smmu_map.c "$G"/lemonadep_gpu_smmu_map.h \
@@ -24,4 +25,15 @@ aarch64-linux-gnu-gcc -std=gnu11 -fsyntax-only -Wall -Wextra -Wno-format -I. lem
 for f in Live Program Context Streams Mmio; do
 	aarch64-linux-gnu-gcc -std=gnu11 -fsyntax-only -Wall -Wextra "lemonadep/vendor/ArmSmmu4K/ArmSmmu4K$f.c"
 done
-echo "glue syntax check: ok"
+echo "gpu glue syntax check: ok"
+
+# Wi-Fi stage 1: bsd/dev/lemonadep_wlan.c and the edited sweet_rpmh.c.
+W="$G/../wlan"
+mkdir -p "$S/lemonadep/wlan"
+cp "$W"/lemonadep_wlan_pcie.c "$W"/LemonadepWlanSource.h "$W"/LemonadepPcie0Phy.h "$S/lemonadep/wlan/"
+cp "$W/lemonadep_wlan_init.c" "$S/lemonadep_wlan.c"
+printf '#include <errno.h>\n' > "$S/sys/errno.h"
+aarch64-linux-gnu-gcc -std=gnu11 -fsyntax-only -Wall -Wextra -Wno-format -I. lemonadep_wlan.c
+aarch64-linux-gnu-gcc -std=gnu11 -fsyntax-only -Wall -Wextra -Wno-format -DARM64_BOARD_CONFIG_SWEET \
+	-include string.h -include stdbool.h -I. "$W/sweet_rpmh.c"
+echo "wlan glue syntax check: ok"
