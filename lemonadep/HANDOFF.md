@@ -603,6 +603,31 @@ is unchanged. Still can't be syntax-checked locally (Apple SDK sysroot),
 same limitation as every other IOKit C++ file in this project; the plain-C
 mapping logic it calls into is fully host-tested above.
 
+## GPU, Phase 7: top-level boot sequencing written and host-verified end to end (2026-10-23)
+
+**`lemonadep_gpu_boot.c`** (new): sequences the plain-C pieces already
+written and unit-tested individually -- `lemonadep_gpu_reserve()` (power/
+clocks) -> `lemonadep_gmu_cold_start()` (GMU firmware up) ->
+`lemonadep_ring_attach()` -> `lemonadep_a6xx_cp_init()` (the real
+CP_ME_INIT) -- via direct `#include` of each, the same convention
+`lemonadep_cp_init.c` already uses for `lemonadep_ring.c`. No new
+hardware logic: this file is sequencing, not reinvention. SMMU context
+setup and buffer allocation (`lemonadep_gpu_memory.cpp`, C++/IOKit) and
+the real MMIO io-struct wiring are one layer up, in the not-yet-written
+IOKit service; this function takes them already built.
+
+**`test_gpu_boot.c`** (new): combines the three existing per-domain mocks
+(`test_gpu_reserve.c`'s power/clock bank, `test_gmu_coldstart.c`'s GMU
+register bank, `test_cp_init.c`'s ring mock that actually executes
+submitted packets) and drives the *entire* sequence under ASan/UBSan.
+Result: `status=LemonadepBootOk fence=1` -- a submitted CP_ME_INIT
+command reaches a real completed fence through the exact call order a
+device boot will use. This is the host-verifiable form of the milestone
+the user asked for back in Phase 0 ("at least working GPU/acceleration
+ASAP"); the remaining gap to an on-device log line is wiring real MMIO/
+SMMU/memory instead of mocks (the not-yet-written IOKit service, boot-arg
+gate and CI build -- see the open plan in this session).
+
 Branch `lemonadep`, pushed to `fork` = github.com/popovluka/ios-sweet. Phone: LE2123 8 GB, Evolution X 16 + Magisk, slot b,
 `fastboot boot` of our v3 shim works. Backups in `backup/partitions` (23, SHA-256 verified). Tools: `C:\platform-tools`,
 WSL distro `LemonadepLab` (aarch64 gcc, dtc, qemu-user, AOSP mkbootimg at `/opt/aosp-mkbootimg`).
