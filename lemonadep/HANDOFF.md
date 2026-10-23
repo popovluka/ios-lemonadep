@@ -291,6 +291,51 @@ published as `IOAcceleratorES`, the GMU cold-start state machine, CP ring,
 submit/fence), then the Apple cross-toolchain build of Turnip + the
 frontend bridge -- both need real CI time.
 
+## GPU, Phase 3: the GMU cold-start driver is written and host-tested (2026-10-23)
+
+`lemonadep/xnu/gpu/lemonadep_gmu_coldstart.c`: real code, not a sketch --
+reset/idle checks, the RSC/PDC handshake, firmware load, `fw_start`,
+`power_config`, and the real CM3 reset toggle, built entirely from
+`LemonadepA660HwInit.h`/`LemonadepGmuSource.h`. No XNU headers (injected
+I/O, same host-testable shape as `sweet_touch.c`'s own tests).
+
+Adapting `UniXNU-sheng`'s real `ShengGmu.c` turned out to need more than
+substituting register values -- writing this surfaced two further real
+divergences, found and fixed, not shipped blind:
+
+1. **`GMU_BYTE_OFFSET`'s `mmio_offset` correction, missed entirely at
+   first.** The real `a6xx_gmu.c` subtracts `(GMU core base -
+   kgsl_3d0_reg_memory base)` from every plain `gmu_write()`/`gmu_read()`
+   offset. `RSCC`/`PDC` don't need it (confirmed: they use their own
+   mapped base directly). This affected every Core-window register,
+   including three (`GPU_GMU_AO_GMU_CGC_*`) that were in the very first
+   `LemonadepA660HwInit.h` derivation and had been silently wrong since
+   then. **Found by the host test's mock register bank crashing on an
+   out-of-window array index** -- not by inspection. `derive-a660-hwinit.py`
+   now applies this correction with one helper that also asserts every
+   offset actually falls inside the real window, so it fails loudly
+   instead of shipping wrong a second time.
+2. **A missing step**: `a6xx_gmu_power_config()`'s RPMH_CTRL GPU-client
+   vote enable and `a6xx_gmu_start()`'s real CM3 reset toggle, found only
+   by continuing to trace past where an earlier draft of this file
+   stopped.
+
+`test_gmu_coldstart.c`: a mock register bank (not a stub that always
+succeeds) runs the real function against the real `a660_gmu.bin` already
+on the phone. Clean under ASan/UBSan, verifying specific sourced values
+actually land on the wire and that the firmware payload reaches the right
+ITCM/DTCM offsets.
+
+**Not yet written**: CX GDSC/clock enable (the real algorithm is sourced --
+see `LemonadepGmuSource.h` -- just not wired up), SMMU context programming
+(no new sourcing needed here: `ArmSmmu4K`, a real MIT-licensed library
+already used in production on `UniXNU-sheng`, plus the exact bank/stream-ID
+values already in our own pinned device tree), the CP ring and submit/fence
+(`NativeAdrenoRing`/`NativeAdrenoCpInit`, also real and reusable), and the
+IOKit user client implementing `NativeAdrenoABI.h`. Then, separately, the
+Apple cross-toolchain build of Turnip + the Metal frontend bridge -- both
+need real CI time this repo hasn't spent yet.
+
 Branch `lemonadep`, pushed to `fork` = github.com/popovluka/ios-sweet. Phone: LE2123 8 GB, Evolution X 16 + Magisk, slot b,
 `fastboot boot` of our v3 shim works. Backups in `backup/partitions` (23, SHA-256 verified). Tools: `C:\platform-tools`,
 WSL distro `LemonadepLab` (aarch64 gcc, dtc, qemu-user, AOSP mkbootimg at `/opt/aosp-mkbootimg`).
