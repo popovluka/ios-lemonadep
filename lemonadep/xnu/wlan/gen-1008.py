@@ -23,6 +23,8 @@ NEW = [
     ('bsd/dev/lemonadep/wlan/lemonadep_wlan_pcie.c', 'lemonadep_wlan_pcie.c'),
     ('bsd/dev/lemonadep/wlan/LemonadepWlanSource.h', 'LemonadepWlanSource.h'),
     ('bsd/dev/lemonadep/wlan/LemonadepPcie0Phy.h', 'LemonadepPcie0Phy.h'),
+    ('bsd/dev/lemonadep/wlan/lemonadep_wlan_mhi.c', 'lemonadep_wlan_mhi.c'),
+    ('bsd/dev/lemonadep/wlan/LemonadepMhiSource.h', 'LemonadepMhiSource.h'),
 ]
 
 

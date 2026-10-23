@@ -24,6 +24,8 @@
 
 enum {
 	WlanWinTlmm, WlanWinGcc, WlanWinParf, WlanWinPhy, WlanWinDbi, WlanWinIatu, WlanWinConf,
+	/* stage 2 (lemonadep_wlan_mhi.c): the RC's memory window, apps SMMU GR0 */
+	WlanWinMem, WlanWinSmmu,
 	WlanWinCount,
 };
 

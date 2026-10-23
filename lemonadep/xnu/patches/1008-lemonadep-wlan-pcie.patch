@@ -219,7 +219,7 @@
  	if (error) {
 --- /dev/null
 +++ b/bsd/dev/lemonadep_wlan.c
-@@ -0,0 +1,105 @@
+@@ -0,0 +1,150 @@
 +/*
 + * lemonadep Wi-Fi, stage 1 kernel glue: maps the windows, routes rail votes
 + * to sweet_rpmh.c, runs lemonadep_wlan_pcie_up() (host-tested in
@@ -229,8 +229,14 @@
 + * Off by default. sweetwlan=N stops cleanly after step N (no rebuild between
 + * steps, same scheme as sweetgpu):
 + *   1 rails  2 WLAN_EN  3 PCIe PHY rails  4 GDSC  5 clocks  6 resets
-+ *   7 PARF   8 PHY ready  9 PERST released  10 link up  11+ read config ID
-+ * See lemonadep/HANDOFF.md "Wi-Fi, stage 1".
++ *   7 PARF   8 PHY ready  9 PERST released  10 link up  11 read config ID
++ * stage 2 (lemonadep_wlan_mhi.c), after a full stage 1:
++ *   12 BAR0 assigned  13 MHI/BHI registers + apps SMMU probe (read only)
++ *   14 SBL over BHI   15+ MHI READY
++ * Steps 14+ need the firmware as payload blobs (mkpayload --extra-blob
++ * wlanfw1:amss.bin --extra-blob wlanfw2:amss20.bin, lemonadep/fw-wlan/,
++ * never committed); the chip DMAs straight from where the blob sits.
++ * See lemonadep/HANDOFF.md "Wi-Fi, stage 1" and "Wi-Fi, stage 2".
 + */
 +#include <sys/param.h>
 +#include <sys/systm.h>
@@ -242,6 +248,7 @@
 +extern int sweet_rpmh_vreg_vote(const char *res, unsigned mv, int hpm);
 +
 +#include "lemonadep/wlan/lemonadep_wlan_pcie.c"
++#include "lemonadep/wlan/lemonadep_wlan_mhi.c"
 +
 +static vm_offset_t wlan_win[WlanWinCount];
 +
@@ -299,6 +306,8 @@
 +		[WlanWinDbi] = {LEMONADEP_PCIE0_DBI_PA, 0x1000u}, /* dm_core + elbi */
 +		[WlanWinIatu] = {LEMONADEP_PCIE0_IATU_PA, 0x1000u},
 +		[WlanWinConf] = {LEMONADEP_PCIE0_CONF_PA, 0x1000u},
++		[WlanWinMem] = {LEMONADEP_PCIE0_MEM_PA, LEMONADEP_PCIE0_MEM_MAP},
++		[WlanWinSmmu] = {LEMONADEP_APPS_SMMU_PA, 0x1000u},   /* GR0: SMR/S2CR end at 0xe00 */
 +	};
 +	for (unsigned i = 0; i < WlanWinCount; ++i) {
 +		if (!wlan_win[i]) {
@@ -324,10 +333,46 @@
 +		printf("SWEET WLAN: config id=%#x (vendor %#x device %#x) class/rev=%#x\n", r.id,
 +		    r.id & 0xffffu, r.id >> 16, r.class_rev);
 +	}
++	if (st != LemonadepWlanOk || r.phase != LemonadepWlanPhaseDone || stage < LemonadepMhiPhaseBar) {
++		return;
++	}
++
++	/* Stage 2. Firmware blobs: wlanfw1 = amss.bin, wlanfw2 = amss20.bin. */
++	lemonadep_mhi_params p = {{0, 0}, {0, 0}};
++	(void)PE_parse_boot_argn("wlanfw1_pa", &p.fw_v1.pa, sizeof(p.fw_v1.pa));
++	(void)PE_parse_boot_argn("wlanfw1_bytes", &p.fw_v1.bytes, sizeof(p.fw_v1.bytes));
++	(void)PE_parse_boot_argn("wlanfw2_pa", &p.fw_v2.pa, sizeof(p.fw_v2.pa));
++	(void)PE_parse_boot_argn("wlanfw2_bytes", &p.fw_v2.bytes, sizeof(p.fw_v2.bytes));
++	printf("SWEET WLAN: firmware amss.bin pa=%#llx bytes=%#x, amss20.bin pa=%#llx bytes=%#x\n",
++	    p.fw_v1.pa, p.fw_v1.bytes, p.fw_v2.pa, p.fw_v2.bytes);
++	const lemonadep_mhi_phase mstop =
++	    stage < LemonadepMhiPhaseDone ? (lemonadep_mhi_phase)stage : LemonadepMhiPhaseNone;
++	lemonadep_mhi_result m;
++	lemonadep_mhi_status ms = lemonadep_wlan_mhi_up(&io, &p, &m, mstop);
++	printf("SWEET WLAN: mhi status=%d phase=%d\n", ms, m.phase);
++	printf("SWEET WLAN: bar0 pa=%#x size=%#x rc_cmd=%#x ep_cmd=%#x\n", m.bar_pa, m.bar_size, m.rc_cmd, m.ep_cmd);
++	if (m.phase >= LemonadepMhiPhaseRegs) {
++		printf("SWEET WLAN: mhi reglen=%#x ver=%#x cfg=%#x bhioff=%#x bhieoff=%#x ctrl=%#x status=%#x "
++		    "soc_hw_version=%#x (major %u) ee=%u bhi_status=%#x\n", m.reglen, m.ver, m.cfg, m.bhioff,
++		    m.bhieoff, m.ctrl, m.status, m.soc_hw_version, (m.soc_hw_version >> 8) & 0xfu, m.ee,
++		    m.bhi_status0);
++		printf("SWEET WLAN: smmu scr0=%#x id0=%#x sgfsr=%#x sid %#x: smr[%d]=%#x s2cr=%#x -> %s\n",
++		    m.scr0, m.id0, m.sgfsr, LEMONADEP_WLAN_SID, m.smr_index, m.smr, m.s2cr,
++		    m.smmu_bypass ? "bypass" : "NOT bypass");
++	}
++	if (m.phase >= LemonadepMhiPhaseBhi && m.fw_name) {
++		printf("SWEET WLAN: bhi %s pa=%#llx sbl=%#x status=%#x after %u ms errcode=%#x dbg=%#x/%#x/%#x\n",
++		    m.fw_name, m.fw_pa, m.sbl_bytes, m.bhi_status, m.bhi_ms, m.bhi_errcode,
++		    m.bhi_errdbg[0], m.bhi_errdbg[1], m.bhi_errdbg[2]);
++	}
++	if (m.phase >= LemonadepMhiPhaseReady) {
++		printf("SWEET WLAN: ready ctrl=%#x status=%#x ee=%u after %u ms\n", m.ready_ctrl, m.ready_status,
++		    m.ready_ee, m.ready_ms);
++	}
 +}
 --- /dev/null
 +++ b/bsd/dev/lemonadep/wlan/lemonadep_wlan_pcie.c
-@@ -0,0 +1,332 @@
+@@ -0,0 +1,334 @@
 +/* SPDX-License-Identifier: MIT */
 +/*
 + * lemonadep Wi-Fi, stage 1: power the QCA6490, bring up PCIe root complex 0,
@@ -354,6 +399,8 @@
 +
 +enum {
 +	WlanWinTlmm, WlanWinGcc, WlanWinParf, WlanWinPhy, WlanWinDbi, WlanWinIatu, WlanWinConf,
++	/* stage 2 (lemonadep_wlan_mhi.c): the RC's memory window, apps SMMU GR0 */
++	WlanWinMem, WlanWinSmmu,
 +	WlanWinCount,
 +};
 +
@@ -895,4 +942,370 @@
 +	{0x0200u, 0x00u, 0u},
 +	{0x0244u, 0x03u, 0u},
 +};
++#endif
+--- /dev/null
++++ b/bsd/dev/lemonadep/wlan/lemonadep_wlan_mhi.c
+@@ -0,0 +1,263 @@
++/* SPDX-License-Identifier: MIT */
++/*
++ * lemonadep Wi-Fi, stage 2: after lemonadep_wlan_pcie_up() has the link up,
++ * give the QCA6490 its BAR0, read its MHI/BHI registers, look at how the apps
++ * SMMU treats its DMA, then hand its boot ROM (PBL) the first 512 KiB of the
++ * firmware (the SBL) over BHI and wait for MHI READY. Plain C with injected
++ * I/O like stage 1, host-tested by test_wlan_mhi.c.
++ *
++ * The order is the vendor kernel's (LOS-K, see LemonadepMhiSource.h):
++ * pci_assign_resource + pci_enable_device + pci_set_master (cnss_pci_enable_bus;
++ * pci-msm.c sets memory + bus master on the root port), the MHI version read in
++ * of_register_mhi_controller (mhi_init.c), mhi_async_power_up (BHIOFF/BHIEOFF
++ * range checks, BHI_INTVEC = 0, EE must be PBL or AMSS), mhi_fw_load_handler +
++ * mhi_fw_load_bhi (STATUS = 0, IMGADDR high/low, IMGSIZE, IMGTXDB, poll
++ * STATUS) and mhi_ready_state_transition (RESET clear and READY set).
++ *
++ * Not here yet: the MHI context/rings, M0, BHIe (the rest of the image) and
++ * interrupts -- everything is polled. The BHI step only runs when the apps
++ * SMMU lets the chip's stream through untranslated (bypass), so the chip DMAs
++ * from the physical address the firmware blob sits at; anything else is
++ * logged and stopped (no stream table is touched here).
++ */
++#include <stdbool.h>
++#include <stdint.h>
++
++#include "LemonadepMhiSource.h"
++
++typedef enum {
++	LemonadepMhiPhaseNone,
++	LemonadepMhiPhaseBar = 12,    /* bridge window, BAR0 sized + assigned, mem + master */
++	LemonadepMhiPhaseRegs,        /* MHI/BHI registers, chip version, SMMU probe */
++	LemonadepMhiPhaseBhi,         /* SBL over BHI */
++	LemonadepMhiPhaseReady,       /* MHI READY */
++	LemonadepMhiPhaseDone,
++} lemonadep_mhi_phase;
++
++typedef enum {
++	LemonadepMhiOk,
++	LemonadepMhiBadArg,
++	LemonadepMhiIoError,
++	LemonadepMhiBadBar,           /* BAR0 not 64-bit memory, or too big for the window */
++	LemonadepMhiBadRegs,          /* BHI/BHIE offset outside BAR0, or all-ones */
++	LemonadepMhiBadEe,            /* not in PBL (or AMSS) at power-up */
++	LemonadepMhiNoFirmware,
++	LemonadepMhiSmmuNotBypass,    /* stream 0x1c01 would be translated or faulted */
++	LemonadepMhiBhiError,         /* BHI_STATUS = error */
++	LemonadepMhiBhiTimeout,
++	LemonadepMhiReadyTimeout,
++	LemonadepMhiSysErr,
++} lemonadep_mhi_status;
++
++typedef struct {
++	uint64_t pa;                  /* physical address the chip reads the image from */
++	uint32_t bytes;
++} lemonadep_mhi_fw;
++
++typedef struct {
++	lemonadep_mhi_fw fw_v1, fw_v2;   /* amss.bin, amss20.bin (absent: bytes 0) */
++} lemonadep_mhi_params;
++
++typedef struct {
++	lemonadep_mhi_phase phase;
++	/* BAR */
++	uint32_t bar_size, bar_pa, rc_cmd, ep_cmd;
++	/* MHI/BHI */
++	uint32_t reglen, ver, cfg, bhioff, bhieoff, ctrl, status, soc_hw_version, ee, bhi_status0;
++	/* SMMU (read-only) */
++	uint32_t scr0, id0, sgfsr, smr, s2cr;
++	int smr_index;                /* -1: no SMR matches the stream */
++	bool smmu_bypass;
++	/* BHI */
++	const char *fw_name;
++	uint64_t fw_pa;
++	uint32_t sbl_bytes, bhi_status, bhi_errcode, bhi_errdbg[3];
++	unsigned bhi_ms;
++	/* READY */
++	uint32_t ready_ctrl, ready_status, ready_ee;
++	unsigned ready_ms;
++} lemonadep_mhi_result;
++
++#define MTRY(expr) do { if (expr) return LemonadepMhiIoError; } while (0)
++#define MPHASE(from, to) do { \
++		if (stop_after != LemonadepMhiPhaseNone && stop_after == (from)) { return LemonadepMhiOk; } \
++		r->phase = (to); \
++	} while (0)
++
++/* BAR0 lives in WlanWinMem at bar_pa - LEMONADEP_PCIE0_MEM_PA. */
++static int
++bar_rd(const lemonadep_wlan_io *io, const lemonadep_mhi_result *r, uint32_t off, uint32_t *v)
++{
++	return io->read32(io->cookie, WlanWinMem, r->bar_pa - LEMONADEP_PCIE0_MEM_PA + off, v);
++}
++static int
++bar_wr(const lemonadep_wlan_io *io, const lemonadep_mhi_result *r, uint32_t off, uint32_t v)
++{
++	return io->write32(io->cookie, WlanWinMem, r->bar_pa - LEMONADEP_PCIE0_MEM_PA + off, v);
++}
++
++/* Does SMR n match stream sid? arm-smmu.c arm_smmu_find_sme() semantics:
++ * equal outside the mask. Without EXIDS the ID/MASK fields are 15 bits and
++ * VALID is SMR bit 31; with EXIDS VALID moves to S2CR (EXIDVALID). */
++static bool
++smr_matches(uint32_t smr, uint32_t s2cr, bool exids, uint32_t sid)
++{
++	uint32_t id = smr & 0xffffu, mask = smr >> 16;
++	if (exids) {
++		if (!(s2cr & SMMU_S2CR_EXIDVALID)) {
++			return false;
++		}
++	} else {
++		if (!(smr & SMMU_SMR_VALID)) {
++			return false;
++		}
++		id &= 0x7fffu;
++		mask &= 0x7fffu;
++	}
++	return ((id ^ sid) & ~mask & (exids ? 0xffffu : 0x7fffu)) == 0;
++}
++
++lemonadep_mhi_status
++lemonadep_wlan_mhi_up(const lemonadep_wlan_io *io, const lemonadep_mhi_params *p,
++    lemonadep_mhi_result *r, lemonadep_mhi_phase stop_after)
++{
++	if (!io || !p || !r || !io->read32 || !io->write32 || !io->delay_us) {
++		return LemonadepMhiBadArg;
++	}
++	*r = (lemonadep_mhi_result){0};
++	r->smr_index = -1;
++
++	/* pci_assign_resource(): size BAR0 (all-ones, read back), place it at the
++	 * window's first aligned address. QCA6490's BAR0 is 64-bit memory. */
++	MPHASE(LemonadepMhiPhaseNone, LemonadepMhiPhaseBar);
++	uint32_t lo, hi;
++	MTRY(wr(io, WlanWinConf, PCI_BAR0, 0xffffffffu));
++	MTRY(wr(io, WlanWinConf, PCI_BAR1, 0xffffffffu));
++	MTRY(rd(io, WlanWinConf, PCI_BAR0, &lo));
++	MTRY(rd(io, WlanWinConf, PCI_BAR1, &hi));
++	if ((lo & 0x7u) != PCI_BAR_MEM64 || hi != 0xffffffffu || !(lo & ~0xfu)) {
++		r->bar_size = lo;
++		return LemonadepMhiBadBar;
++	}
++	r->bar_size = ~(lo & ~0xfu) + 1u;
++	if (r->bar_size > LEMONADEP_MHI_BAR_MAX || (r->bar_size & (r->bar_size - 1u))) {
++		return LemonadepMhiBadBar;
++	}
++	r->bar_pa = (LEMONADEP_PCIE0_MEM_PA + r->bar_size - 1u) & ~(r->bar_size - 1u);
++	MTRY(wr(io, WlanWinConf, PCI_BAR0, r->bar_pa));
++	MTRY(wr(io, WlanWinConf, PCI_BAR1, 0));
++	/* The root port as Linux leaves it: bus 0 -> 1..1, its memory window over
++	 * BAR0 (1 MiB granular), memory + bus master on both ends. */
++	MTRY(wr(io, WlanWinDbi, PCI_BRIDGE_BUSES, 0x00010100u));
++	MTRY(wr(io, WlanWinDbi, PCI_BRIDGE_MEM_WINDOW,
++	    ((r->bar_pa + r->bar_size - 1u) & 0xfff00000u) | ((r->bar_pa >> 16) & 0xfff0u)));
++	MTRY(rmw(io, WlanWinDbi, PCI_CMD_STATUS, 0, PCI_CMD_MEMORY | PCI_CMD_MASTER));
++	MTRY(rmw(io, WlanWinConf, PCI_CMD_STATUS, 0, PCI_CMD_MEMORY | PCI_CMD_MASTER));
++	MTRY(rd(io, WlanWinDbi, PCI_CMD_STATUS, &r->rc_cmd));
++	MTRY(rd(io, WlanWinConf, PCI_CMD_STATUS, &r->ep_cmd));
++
++	/* MHI registers (all-ones = the BAR does not decode), the chip version,
++	 * the BHI block. Then the apps SMMU's stream mapping, read only. */
++	MPHASE(LemonadepMhiPhaseBar, LemonadepMhiPhaseRegs);
++	MTRY(bar_rd(io, r, MHI_REGLEN, &r->reglen));
++	MTRY(bar_rd(io, r, MHI_VER, &r->ver));
++	MTRY(bar_rd(io, r, MHI_CFG, &r->cfg));
++	MTRY(bar_rd(io, r, MHI_BHIOFF, &r->bhioff));
++	MTRY(bar_rd(io, r, MHI_BHIEOFF, &r->bhieoff));
++	MTRY(bar_rd(io, r, MHI_CTRL, &r->ctrl));
++	MTRY(bar_rd(io, r, MHI_STATUS, &r->status));
++	MTRY(bar_rd(io, r, MHI_SOC_HW_VERSION, &r->soc_hw_version));
++	if (r->ver == 0xffffffffu || r->bhioff >= r->bar_size || r->bhieoff >= r->bar_size ||
++	    r->bhioff + BHI_ERRDBG3 + 4u > r->bar_size) {
++		return LemonadepMhiBadRegs;
++	}
++	MTRY(bar_rd(io, r, r->bhioff + BHI_EXECENV, &r->ee));
++	MTRY(bar_rd(io, r, r->bhioff + BHI_STATUS, &r->bhi_status0));
++
++	MTRY(rd(io, WlanWinSmmu, SMMU_sCR0, &r->scr0));
++	MTRY(rd(io, WlanWinSmmu, SMMU_ID0, &r->id0));
++	MTRY(rd(io, WlanWinSmmu, SMMU_sGFSR, &r->sgfsr));
++	const bool exids = (r->scr0 & SMMU_sCR0_EXIDENABLE) != 0;
++	for (unsigned n = 0; n < (r->id0 & 0xffu); ++n) {
++		uint32_t smr, s2cr;
++		MTRY(rd(io, WlanWinSmmu, SMMU_SMR(n), &smr));
++		MTRY(rd(io, WlanWinSmmu, SMMU_S2CR(n), &s2cr));
++		if (smr_matches(smr, s2cr, exids, LEMONADEP_WLAN_SID)) {
++			r->smr_index = (int)n;
++			r->smr = smr;
++			r->s2cr = s2cr;
++			break;
++		}
++	}
++	/* Bypass: client port disabled, or the matching S2CR says bypass, or no
++	 * match while unmatched streams pass (USFCFG = 0). */
++	r->smmu_bypass = (r->scr0 & SMMU_sCR0_CLIENTPD) ||
++	    (r->smr_index >= 0 ? SMMU_S2CR_TYPE(r->s2cr) == SMMU_S2CR_BYPASS : !(r->scr0 & SMMU_sCR0_USFCFG));
++
++	/* mhi_async_power_up(): BHI_INTVEC = 0, the device must be in PBL (or
++	 * already AMSS). mhi_fw_load_handler(): the image's first sbl_size bytes
++	 * over BHI. */
++	MPHASE(LemonadepMhiPhaseRegs, LemonadepMhiPhaseBhi);
++	if (r->ee != MHI_EE_PBL) {
++		return LemonadepMhiBadEe;
++	}
++	const unsigned major = (r->soc_hw_version >> 8) & 0xfu;
++	const lemonadep_mhi_fw *fw = major == LEMONADEP_MHI_FW_V2 ? &p->fw_v2 : &p->fw_v1;
++	r->fw_name = major == LEMONADEP_MHI_FW_V2 ? "amss20.bin" : "amss.bin";
++	r->fw_pa = fw->pa;
++	if (!fw->bytes || !fw->pa || fw->pa + fw->bytes > LEMONADEP_MHI_DMA_LIMIT) {
++		return LemonadepMhiNoFirmware;
++	}
++	if (!r->smmu_bypass) {
++		return LemonadepMhiSmmuNotBypass;
++	}
++	r->sbl_bytes = fw->bytes < LEMONADEP_MHI_SBL_BYTES ? fw->bytes : LEMONADEP_MHI_SBL_BYTES;
++	MTRY(bar_wr(io, r, r->bhioff + BHI_INTVEC, 0));
++	MTRY(bar_wr(io, r, r->bhioff + BHI_STATUS, 0));
++	MTRY(bar_wr(io, r, r->bhioff + BHI_IMGADDR_HIGH, (uint32_t)(fw->pa >> 32)));
++	MTRY(bar_wr(io, r, r->bhioff + BHI_IMGADDR_LOW, (uint32_t)fw->pa));
++	MTRY(bar_wr(io, r, r->bhioff + BHI_IMGSIZE, r->sbl_bytes));
++	/* Session id: Linux uses a random non-zero value; any non-zero one does. */
++	MTRY(bar_wr(io, r, r->bhioff + BHI_IMGTXDB, 0x1c0ffee & BHI_TXDB_SEQ_MASK));
++	for (r->bhi_ms = 0;; ++r->bhi_ms) {
++		MTRY(bar_rd(io, r, r->bhioff + BHI_STATUS, &r->bhi_status));
++		const uint32_t s = r->bhi_status >> 30;
++		if (s == BHI_STATUS_SUCCESS) {
++			break;
++		}
++		if (s == BHI_STATUS_ERROR) {
++			MTRY(bar_rd(io, r, r->bhioff + BHI_ERRCODE, &r->bhi_errcode));
++			for (unsigned i = 0; i < 3; ++i) {
++				MTRY(bar_rd(io, r, r->bhioff + BHI_ERRDBG1 + 4u * i, &r->bhi_errdbg[i]));
++			}
++			return LemonadepMhiBhiError;
++		}
++		if (r->bhi_ms >= LEMONADEP_MHI_TIMEOUT_MS) {
++			return LemonadepMhiBhiTimeout;
++		}
++		io->delay_us(io->cookie, 1000);
++	}
++
++	/* mhi_ready_state_transition(): wait for MHICTRL.RESET clear and
++	 * MHISTATUS.READY set; SYSERR ends it early. */
++	MPHASE(LemonadepMhiPhaseBhi, LemonadepMhiPhaseReady);
++	for (r->ready_ms = 0;; ++r->ready_ms) {
++		MTRY(bar_rd(io, r, MHI_CTRL, &r->ready_ctrl));
++		MTRY(bar_rd(io, r, MHI_STATUS, &r->ready_status));
++		if (r->ready_status & MHI_STATUS_SYSERR) {
++			MTRY(bar_rd(io, r, r->bhioff + BHI_EXECENV, &r->ready_ee));
++			return LemonadepMhiSysErr;
++		}
++		if (!(r->ready_ctrl & MHI_CTRL_RESET) && (r->ready_status & MHI_STATUS_READY)) {
++			break;
++		}
++		if (r->ready_ms >= LEMONADEP_MHI_TIMEOUT_MS) {
++			MTRY(bar_rd(io, r, r->bhioff + BHI_EXECENV, &r->ready_ee));
++			return LemonadepMhiReadyTimeout;
++		}
++		io->delay_us(io->cookie, 1000);
++	}
++	MTRY(bar_rd(io, r, r->bhioff + BHI_EXECENV, &r->ready_ee));
++	MPHASE(LemonadepMhiPhaseReady, LemonadepMhiPhaseDone);
++	return LemonadepMhiOk;
++}
+--- /dev/null
++++ b/bsd/dev/lemonadep/wlan/LemonadepMhiSource.h
+@@ -0,0 +1,97 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef LEMONADEP_MHI_SOURCE_H
++#define LEMONADEP_MHI_SOURCE_H
++/*
++ * Hardware facts for lemonadep's Wi-Fi, stage 2: BAR0, MHI/BHI registers,
++ * the first (BHI) firmware download. Every value is cited. Sources:
++ *   LIVE  the phone's own DT (see LemonadepWlanSource.h)
++ *   LOS-K LineageOS/android_kernel_oneplus_sm8350 @ 187d13c:
++ *         drivers/bus/mhi/core/{mhi_internal.h,mhi_init.c,mhi_boot.c,mhi_pm.c},
++ *         include/linux/mhi.h, drivers/net/wireless/cnss2/pci.c,
++ *         drivers/pci/controller/pci-msm.c, drivers/iommu/arm-smmu.h
++ */
++#include <stdint.h>
++
++/* ---- PCIe0 memory window (LIVE qcom,pcie@1c00000 ranges, the 0x2000000 =
++ * non-prefetchable memory entry): CPU address == PCI address, untranslated.
++ * pci-msm.c only programs iATU region 0 (config cycles, msm_pcie_cfg_bdf);
++ * memory requests outside it go out as-is. ---- */
++#define LEMONADEP_PCIE0_MEM_PA     0x60300000u
++#define LEMONADEP_PCIE0_MEM_BYTES  0x03d00000u
++/* What the kernel maps of it: enough for a BAR0 of up to 4 MiB placed at the
++ * first aligned address (worst case 0x60400000 + 4 MiB). */
++#define LEMONADEP_PCIE0_MEM_MAP    0x00800000u
++#define LEMONADEP_MHI_BAR_MAX      0x00400000u
++
++/* Type 0/1 config header (PCI spec; pci-msm.c PCIE20_COMMAND_STATUS = 0x04) */
++#define PCI_CMD_STATUS        0x04u
++#define PCI_CMD_MEMORY        (1u << 1)
++#define PCI_CMD_MASTER        (1u << 2)
++#define PCI_BAR0              0x10u
++#define PCI_BAR1              0x14u
++#define PCI_BAR_MEM64         0x4u       /* BAR type [2:1] = 2 */
++#define PCI_BRIDGE_BUSES      0x18u      /* primary | secondary << 8 | subordinate << 16 */
++#define PCI_BRIDGE_MEM_WINDOW 0x20u      /* base [15:4] = addr[31:20], limit [31:20] */
++
++/* ---- MHI (mhi_internal.h); regs = BAR0 (cnss2 PCI_BAR_NUM 0) ---- */
++#define MHI_REGLEN      0x00u
++#define MHI_VER         0x08u
++#define MHI_CFG         0x10u
++#define MHI_BHIOFF      0x28u
++#define MHI_BHIEOFF     0x2cu
++#define MHI_CTRL        0x38u      /* RESET bit 1, MHISTATE [15:8] */
++#define MHI_CTRL_RESET  (1u << 1)
++#define MHI_STATUS      0x48u      /* READY bit 0, SYSERR bit 2, MHISTATE [15:8] */
++#define MHI_STATUS_READY  (1u << 0)
++#define MHI_STATUS_SYSERR (1u << 2)
++#define MHI_SOC_HW_VERSION 0x224u  /* mhi_init.c: read from regs; major [15:8] */
++/* BHI, at regs + BHIOFF */
++#define BHI_IMGADDR_LOW   0x08u
++#define BHI_IMGADDR_HIGH  0x0cu
++#define BHI_IMGSIZE       0x10u
++#define BHI_IMGTXDB       0x18u
++#define BHI_TXDB_SEQ_MASK 0x3fffffffu
++#define BHI_INTVEC        0x20u
++#define BHI_EXECENV       0x28u
++#define BHI_STATUS        0x2cu      /* [31:30]: 0 reset, 2 success, 3 error */
++#define BHI_ERRCODE       0x30u
++#define BHI_ERRDBG1       0x34u
++#define BHI_ERRDBG2       0x38u
++#define BHI_ERRDBG3       0x3cu
++#define BHI_STATUS_SUCCESS 2u
++#define BHI_STATUS_ERROR   3u
++/* enum mhi_ee (include/linux/mhi.h) */
++#define MHI_EE_PBL   0u
++#define MHI_EE_SBL   1u
++#define MHI_EE_AMSS  2u
++#define MHI_EE_PTHRU 5u
++#define MHI_EE_EDL   6u
++
++/* cnss2/pci.c cnss_pci_register_mhi(): fbc_download, sbl_size = seg_len = 512K;
++ * cnss_pci_update_fw_name(): QCA6490 major version 2 -> amss20.bin, else amss.bin
++ * (major keeps only its low 4 bits, DEVICE_MAJOR_VERSION_MASK). */
++#define LEMONADEP_MHI_SBL_BYTES  0x80000u
++#define LEMONADEP_MHI_FW_V2      2u
++/* cnss2/pci.c: QCA6490 DMA mask is 36 bits. */
++#define LEMONADEP_MHI_DMA_LIMIT  (1ull << 36)
++/* LIVE cnss node mhi,timeout = <10000> ms (polled here, 1 ms apart). */
++#define LEMONADEP_MHI_TIMEOUT_MS 10000u
++
++/* ---- apps SMMU (LIVE apps-smmu@15000000, qcom,skip-init: the bootloader's
++ * stream mapping is kept). PCIe0's endpoint (RID 0x100) is stream 0x1c01
++ * (LIVE iommu-map = <0x100 &apps_smmu 0x1c01 1>). arm-smmu.h, GR0 page. ---- */
++#define LEMONADEP_APPS_SMMU_PA  0x15000000u
++#define LEMONADEP_WLAN_SID      0x1c01u
++#define SMMU_sCR0               0x000u
++#define SMMU_sCR0_CLIENTPD      (1u << 0)
++#define SMMU_sCR0_EXIDENABLE    (1u << 3)
++#define SMMU_sCR0_USFCFG        (1u << 10)   /* 1: unmatched streams fault */
++#define SMMU_ID0                0x020u       /* NUMSMRG [7:0] */
++#define SMMU_sGFSR              0x048u
++#define SMMU_SMR(n)             (0x800u + 4u * (n))
++#define SMMU_S2CR(n)            (0xc00u + 4u * (n))
++#define SMMU_SMR_VALID          (1u << 31)   /* without EXIDS */
++#define SMMU_S2CR_EXIDVALID     (1u << 10)   /* with EXIDS */
++#define SMMU_S2CR_TYPE(v)       (((v) >> 16) & 3u)   /* 0 trans, 1 bypass, 2 fault */
++#define SMMU_S2CR_BYPASS        1u
 +#endif

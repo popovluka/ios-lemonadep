@@ -964,6 +964,47 @@ Read the `SWEET WLAN:` lines from the TWRP log pull.
 
 Next: MHI and firmware download (the firmware stays on the phone and is never committed), then QMI, WMI and en0.
 
+## Wi-Fi, stage 2: BAR0, MHI registers, SMMU probe, SBL over BHI (2026-10-23, host-tested)
+
+**Prior art.**
+- ios-sailfish 0170 (QCA6174, ath10k: no MHI): BAR0 at a fixed address in the RC memory window, raw-PA DMA, an SMMU register dump, firmware via the DT. Their SoC's PCIe SMMU let the DMA through untranslated.
+- Here, the apps SMMU (`qcom,skip-init`, behind the hypervisor) is probed first, not assumed.
+
+**Sequence.** It follows LOS-K step by step:
+- `cnss_pci_enable_bus`
+- pci-msm `msm_pcie_enumerate`: memory and bus master on the RP. iATU region 0 for config only; memory requests go out untranslated.
+- `mhi_async_power_up`
+- `mhi_fw_load_handler` / `mhi_fw_load_bhi`: STATUS=0, IMGADDR, IMGSIZE, TXDB, then poll.
+- `mhi_ready_state_transition`
+
+**Facts.** Each one is cited in `lemonadep/xnu/wlan/LemonadepMhiSource.h`:
+- Firmware selection, cnss2 `cnss_pci_update_fw_name`: SOC_HW_VERSION (BAR0+0x224) major 2 → amss20.bin, otherwise amss.bin.
+- From `cnss_pci_register_mhi`: SBL = the first 512 KiB, `fbc_download`.
+- DMA mask: 36 bits.
+- Live DT: `mhi,timeout` 10 s. The SMMU stream is 0x1c01, from `iommu-map`.
+- The firmware lives in the modem partition under `image/`: amss.bin (5,178,848 B), amss20.bin (5,169,152 B), m3.bin.
+  - Pulled with `lemonadep/tools/pull-wlan-fw.sh` into `lemonadep/fw-wlan/`, which is gitignored and never committed.
+  - mkpayload embeds both as `wlanfw1`/`wlanfw2`. The chip DMAs directly from that physical address.
+
+**Stages.** sweetwlan=N, continuing stage 1's numbering:
+- 12: BAR0 sized and assigned (first aligned address in 0x60300000+), RP bus numbers and memory window set, memory and bus master on both ends.
+- 13: read MHI/BHI registers, SOC version and EE, plus a read-only SMMU probe (sCR0, then SMR/S2CR matching 0x1c01).
+- 14: SBL over BHI. **This only runs if the SMMU passes 0x1c01 untranslated:**
+  - CLIENTPD set, or
+  - the matching S2CR is bypass, or
+  - nothing matches and USFCFG=0.
+  Otherwise it stops with `SmmuNotBypass`. No stream table is ever written.
+- 15+: wait for MHI READY, log the EE (expect SBL).
+
+`test_wlan_mhi.c` passes under ASan/UBSan. The mock chip cooperates only when the sequence is right. It covers:
+- full run; picking amss vs amss20
+- stopping after the register read
+- SMR translate vs bypass, and USFCFG fault
+- no blob; wrong EE
+- BHI error; BHI timeout
+
+Not done yet: MHI context and rings, M0, BHIe (rest of the image), interrupts, the PCIe→DDR interconnect vote. If BHI times out with the SMMU in bypass, that vote is the first suspect.
+
 ## Overlay 1009: four UI fixes from PixeliOS (2026-10-23)
 
 PixeliOS ([PixOS-Project/pixelios-kernel](https://github.com/PixOS-Project/pixelios-kernel)) is iOS 16 on the Pixel 6a, built on the same ios-sweet base. The four patches below touch files that are byte-identical to ours, so `lemonadep/xnu/gen-1009.sh` applies them unchanged at their commit 41198ee. check-overlay: ok.

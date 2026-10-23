@@ -30,7 +30,8 @@ echo "gpu glue syntax check: ok"
 # Wi-Fi stage 1: bsd/dev/lemonadep_wlan.c and the edited sweet_rpmh.c.
 W="$G/../wlan"
 mkdir -p "$S/lemonadep/wlan"
-cp "$W"/lemonadep_wlan_pcie.c "$W"/LemonadepWlanSource.h "$W"/LemonadepPcie0Phy.h "$S/lemonadep/wlan/"
+cp "$W"/lemonadep_wlan_pcie.c "$W"/LemonadepWlanSource.h "$W"/LemonadepPcie0Phy.h \
+	"$W"/lemonadep_wlan_mhi.c "$W"/LemonadepMhiSource.h "$S/lemonadep/wlan/"
 cp "$W/lemonadep_wlan_init.c" "$S/lemonadep_wlan.c"
 printf '#include <errno.h>\n' > "$S/sys/errno.h"
 aarch64-linux-gnu-gcc -std=gnu11 -fsyntax-only -Wall -Wextra -Wno-format -I. lemonadep_wlan.c
