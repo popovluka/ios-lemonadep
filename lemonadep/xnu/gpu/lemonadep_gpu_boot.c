@@ -45,7 +45,7 @@ lemonadep_gpu_boot(const lemonadep_pwr_io *pwr_io, const lemonadep_gmu_io *gmu_i
     const lemonadep_gmu_firmware *fw, uint64_t hfi_iova, uint64_t log_iova, uint32_t log_size_bytes,
     const lemonadep_ring_io *ring_io, lemonadep_ring *ring, volatile uint32_t *ring_mem,
     uint32_t ring_dwords, uint64_t ring_iova, volatile uint32_t *fence_word, uint64_t fence_iova,
-    uint32_t cp_init_timeout_us, uint32_t *fence_out)
+    uint32_t cp_init_timeout_us, uint32_t *fence_out, lemonadep_gmu_phase *gmu_phase)
 {
 	if (!pwr_io || !gmu_io || !fw || !ring_io || !ring || !fence_out) {
 		return LemonadepBootBadArg;
@@ -54,7 +54,7 @@ lemonadep_gpu_boot(const lemonadep_pwr_io *pwr_io, const lemonadep_gmu_io *gmu_i
 	if (lemonadep_gpu_reserve(pwr_io) != LemonadepPwrOk) {
 		return LemonadepBootPowerFailed;
 	}
-	if (lemonadep_gmu_cold_start(gmu_io, fw, hfi_iova, log_iova, log_size_bytes) != LemonadepGmuOk) {
+	if (lemonadep_gmu_cold_start(gmu_io, fw, hfi_iova, log_iova, log_size_bytes, gmu_phase) != LemonadepGmuOk) {
 		return LemonadepBootGmuFailed;
 	}
 	if (lemonadep_ring_attach(ring_io, ring, ring_mem, ring_dwords, ring_iova, fence_word, fence_iova)

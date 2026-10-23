@@ -59,6 +59,25 @@ typedef enum {
 	LemonadepGmuFirmwareError,
 } lemonadep_gmu_status;
 
+/* Added for on-device debugging (lemonadep/HANDOFF.md "GPU, Phase 8
+ * continued"): lemonadep_gmu_cold_start()'s status alone doesn't say
+ * which of several real timeout-capable polls failed. *phase (optional,
+ * caller may pass NULL) is set just before each one is attempted, so a
+ * LemonadepGmuTimeout status pairs with exactly where it happened. */
+typedef enum {
+	LemonadepGmuPhaseNone,
+	LemonadepGmuPhasePrecheck,
+	LemonadepGmuPhaseRscWakeAck,
+	LemonadepGmuPhaseRscSeqIdle,
+	LemonadepGmuPhasePdcHandshake,
+	LemonadepGmuPhaseFirmwareLoad,
+	LemonadepGmuPhaseFwStart,
+	LemonadepGmuPhasePowerConfig,
+	LemonadepGmuPhaseStartProbe,
+	LemonadepGmuPhaseStartReady,
+	LemonadepGmuPhaseDone,
+} lemonadep_gmu_phase;
+
 /* Real on-phone firmware, already pulled and parsed; see
  * verify-gmu-firmware.py and LemonadepGmuSource.h's LemonadepGmuFwBlocks. */
 typedef struct {
@@ -119,13 +138,19 @@ poll_core(const lemonadep_gmu_io *io, uint32_t byte_off, uint32_t mask, uint32_t
 /* ---- RSC/PDC handshake: a6xx_rpmh_start() + a6xx_gmu_rpmh_init(),
  * A660's real "PDC configured in AOP" path. ---- */
 static lemonadep_gmu_status
-rsc_pdc_handshake(const lemonadep_gmu_io *io)
+rsc_pdc_handshake(const lemonadep_gmu_io *io, lemonadep_gmu_phase *phase)
 {
 	uint32_t val;
 	/* a6xx_rpmh_start: wake the RSC if it was asleep. */
 	TRY(io_write(io, LemonadepGmuWindowCore, A660_GMU_RSCC_CONTROL_REQ, 1u << 1));
+	if (phase) {
+		*phase = LemonadepGmuPhaseRscWakeAck;
+	}
 	TRY(poll_core(io, A660_GMU_RSCC_CONTROL_ACK, 1u << 1, 1u << 1, 1000, &val));
 	/* RSCC_SEQ_BUSY_DRV0 == 0 means the sequencer is idle (Rscc window). */
+	if (phase) {
+		*phase = LemonadepGmuPhaseRscSeqIdle;
+	}
 	for (unsigned i = 0; i < 1000; ++i) {
 		TRY(io_read(io, LemonadepGmuWindowRscc, A660_RSCC_SEQ_BUSY_DRV0, &val));
 		if (!val) {
@@ -139,6 +164,9 @@ rsc_pdc_handshake(const lemonadep_gmu_io *io)
 		}
 	}
 	TRY(io_write(io, LemonadepGmuWindowCore, A660_GMU_RSCC_CONTROL_REQ, 0));
+	if (phase) {
+		*phase = LemonadepGmuPhasePdcHandshake;
+	}
 
 	/* a6xx_gmu_rpmh_init: disable SDE clock gating, then the PDC handshake
 	 * setup. A660 is pdc_in_aop (adreno_is_a650_family()), so only the RSC
@@ -224,19 +252,31 @@ load_firmware(const lemonadep_gmu_io *io, const lemonadep_gmu_firmware *fw)
  */
 lemonadep_gmu_status
 lemonadep_gmu_cold_start(const lemonadep_gmu_io *io, const lemonadep_gmu_firmware *fw,
-    uint64_t hfi_iova, uint64_t log_iova, uint32_t log_size_bytes)
+    uint64_t hfi_iova, uint64_t log_iova, uint32_t log_size_bytes, lemonadep_gmu_phase *phase)
 {
 	uint32_t value;
+	if (phase) {
+		*phase = LemonadepGmuPhaseNone;
+	}
 	if (!io || !io->read32 || !io->write32 || !io->barrier || !io->now_us || !io->wait_us) {
 		return LemonadepGmuBadArg;
+	}
+	if (phase) {
+		*phase = LemonadepGmuPhasePrecheck;
 	}
 	/* Reset/idle precondition checks (ShengGmu.c's validate() shape). */
 	TRY(io_read(io, LemonadepGmuWindowCore, A660_GMU_CM3_FW_INIT_RESULT, &value));
 	/* TCM retention: A660 writes GMU_GENERAL_7, NOT CX_MISC_TCM_RET_CNTL
 	 * (that register does not exist pre-A7XX; see HANDOFF.md). */
 	TRY(io_write(io, LemonadepGmuWindowCore, A660_GMU_GENERAL_7, 1));
-	TRY(rsc_pdc_handshake(io));
+	TRY(rsc_pdc_handshake(io, phase));
+	if (phase) {
+		*phase = LemonadepGmuPhaseFirmwareLoad;
+	}
 	TRY(load_firmware(io, fw));
+	if (phase) {
+		*phase = LemonadepGmuPhaseFwStart;
+	}
 	/* fw_start(): HFI table pointer, A660's real fence range (0xa/0xa0, not
 	 * the A7XX/A8XX values), CM3 config, chip ID + log buffer (A660's real
 	 * registers -- HFI_SFR_ADDR + PWR_COL_CP_MSG, not GENERAL_10/_8), GBIF
@@ -258,6 +298,9 @@ lemonadep_gmu_cold_start(const lemonadep_gmu_io *io, const lemonadep_gmu_firmwar
 		    LEMONADEP_A660_GBIF_QSB_VALUE));
 	}
 
+	if (phase) {
+		*phase = LemonadepGmuPhasePowerConfig;
+	}
 	/* a6xx_gmu_power_config(): disable the GMU WB/RB buffer, then -- A660 is
 	 * not a7xx/a8xx, so this part is not skipped -- enable the RPMh GPU
 	 * client vote (unconditional, not gated on an idle level we are not
@@ -280,6 +323,9 @@ lemonadep_gmu_cold_start(const lemonadep_gmu_io *io, const lemonadep_gmu_firmwar
 	 * 1 then 0, write the log-wptr-index register (A660's real one,
 	 * PWR_COL_CP_RESP -- not GMU_GENERAL_9, the A7XX/A8XX-only register),
 	 * then poll FW_INIT_RESULT for the pattern the probe selected. */
+	if (phase) {
+		*phase = LemonadepGmuPhaseStartProbe;
+	}
 	TRY(io_read(io, LemonadepGmuWindowCore,
 	    A660_GMU_CM3_DTCM_START + LEMONADEP_A660_GMU_START_PROBE_OFFSET, &value));
 	uint32_t ready_mask = value <= LEMONADEP_A660_GMU_START_PROBE_THRESHOLD ?
@@ -289,7 +335,13 @@ lemonadep_gmu_cold_start(const lemonadep_gmu_io *io, const lemonadep_gmu_firmwar
 	TRY(io_write(io, LemonadepGmuWindowCore, A660_GMU_CM3_SYSRESET, 1));
 	TRY(io_write(io, LemonadepGmuWindowCore, A660_GPU_GMU_CX_GMU_PWR_COL_CP_RESP, 0));
 	TRY(io_write(io, LemonadepGmuWindowCore, A660_GMU_CM3_SYSRESET, 0));
+	if (phase) {
+		*phase = LemonadepGmuPhaseStartReady;
+	}
 	TRY(poll_core(io, A660_GMU_CM3_FW_INIT_RESULT, ready_mask, ready_val, 2000, &value));
+	if (phase) {
+		*phase = LemonadepGmuPhaseDone;
+	}
 	/* HFI table is already armed (QTBL_INFO=1 was written in fw_start above);
 	 * the caller now runs a6xx_hfi_start()'s message sequence (perf_table,
 	 * bw_table -- LemonadepA660BwTable_ --, core_fw_start, send_start; ACD

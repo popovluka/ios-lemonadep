@@ -22,6 +22,12 @@ mkdir -p "$OUT"
 export OS_VERSION=${OS_VERSION:-16.0.0} OS_PATCH_LEVEL=${OS_PATCH_LEVEL:-2026-08}
 export MKBOOTIMG=${MKBOOTIMG:-python3 /opt/aosp-mkbootimg/mkbootimg.py}
 BOOTARGS="debug=0xc serial=3 cpus=$CPUS keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0"
+# unentitled_ios_sim_launch=1 + ignition_level=1: the documented fix for the
+# namespace-9/code-0xe launchd panic every full boot hits without it (a
+# macOS-vs-iOS-platform mismatch, unrelated to GPU work -- NOTES.md:171,
+# lemonadep/m2-boot-build.sh). Without this, boot panics at launchd before
+# the console shows enough to read live.
+BOOTARGS="$BOOTARGS unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1"
 BOOTARGS="$BOOTARGS sweettouch=0 sweetkeys=0 sweetusb=0 sweetgpu=1 wdt=-1 wdt_test=no_user_checkin"
 
 python3 "$REPO/tools/mkadt.py" "$OUT/m3.adt" --board lemonadep

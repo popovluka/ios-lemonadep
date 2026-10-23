@@ -708,6 +708,50 @@ host-tested this session, to avoid transcription mistakes in a ~1100-line patch.
   xnu tree) -- the same limitation every other IOKit/BSD-adjacent file in this project has always had;
   real compilation happens on the next CI kernel build.
 
+## GPU, Phase 8 continued: booted on real hardware -- power/clock reserve succeeded, GMU cold start timed out (2026-10-23)
+
+**First real on-device result.** Built `shim/out/lemonadep/m3-gpu-boot.img` (via new `lemonadep/m3-gpu-build.sh`,
+mirroring `m1b-build.sh`) with `sweetgpu=1` and the real `a660_gmu.bin` placed via `--extra-blob`, and
+`fastboot boot`ed it (temporary, nothing flashed). Needed `unentitled_ios_sim_launch=1 ignition_level=1
+launchd_unsecure_cache=1` too -- without them boot panics at `launchd` before the console shows enough to
+read (a real, pre-existing, fully unrelated issue: `NOTES.md:171`, from 2026-10-15, long before any GPU
+code existed -- `namespace 9 code 0xe` = `EXEC_EXIT_REASON_WRONG_PLATFORM`).
+
+Read the actual console output by extracting frames from a screen-recording video (`ffmpeg -vf fps=2`,
+then scanned the frames) rather than trying to time a photo -- the relevant lines scroll past in under a
+second among everything else IOKit matching prints:
+
+```
+SWEET GPU: firmware at pa=0x1024d0000 bytes=0xd7d8
+SWEET GPU: power/clock reserve status=0
+SWEET GPU: GMU cold start status=3
+```
+
+`status=0` on power/clock reserve is a real success: CX GDSC enable + all 7 clock branches
+(`lemonadep_gpu_reserve.c`) actually came up on real Adreno 660 silicon -- the first real GPU-adjacent
+hardware success in this project. `status=3` (`LemonadepGmuTimeout`) on GMU cold start is a genuine,
+well-defined failure (not a crash, not a corrupted kernel, not a hang) somewhere inside
+`lemonadep_gmu_cold_start()`'s several real timeout-capable polls -- but the single status code alone
+couldn't say which one.
+
+**Added per-phase tracking** (`lemonadep_gmu_phase`, new enum in `lemonadep_gmu_coldstart.c`): an
+optional `lemonadep_gmu_phase *phase` out-parameter, set just before each of the real timeout-capable
+steps (RSC wake-ack poll, RSC sequencer-idle loop, PDC handshake writes, firmware load, fw_start
+register writes, power_config, the GMU-start probe read, and the final FW_INIT_RESULT ready-poll), so a
+future `LemonadepGmuTimeout` pairs with exactly where it happened instead of requiring another guess.
+Threaded through `lemonadep_gpu_boot()` and the `bsd/dev/lemonadep_gpu.c` glue (now logs
+`phase=N` alongside `status=N`); `test_gmu_coldstart.c`/`test_gpu_boot.c` updated and re-passing
+(`phase=10` = `LemonadepGmuPhaseDone` on the real firmware, both host tests still green). Non-functional
+otherwise -- no register write or poll logic changed, only which step is recorded as "current" when a
+`TRY()` returns early.
+
+The `mount[3] exited ... handshake structure not initialized` panic later in boot is confirmed the same
+pre-existing, unrelated `NOTES.md:171` issue (reaching a userspace `mount` process at all means kernel-
+level root mount -- and `lemonadep_gpu_init()`, called from that exact same `sweet_ufs_rootdev()` hook --
+already completed without corrupting anything).
+
+Next: rebuild with this patch, boot again, read which phase the timeout happened at.
+
 Branch `lemonadep`, pushed to `fork` = github.com/popovluka/ios-sweet. Phone: LE2123 8 GB, Evolution X 16 + Magisk, slot b,
 `fastboot boot` of our v3 shim works. Backups in `backup/partitions` (23, SHA-256 verified). Tools: `C:\platform-tools`,
 WSL distro `LemonadepLab` (aarch64 gcc, dtc, qemu-user, AOSP mkbootimg at `/opt/aosp-mkbootimg`).

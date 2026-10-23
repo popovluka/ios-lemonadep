@@ -155,14 +155,16 @@ main(void)
 	lemonadep_ring ring;
 
 	uint32_t fence = 0;
+	lemonadep_gmu_phase gmu_phase = LemonadepGmuPhaseNone;
 	lemonadep_boot_status status = lemonadep_gpu_boot(&pwr_io, &gmu_io, &fw,
 	    /*hfi_iova=*/0x1230000, /*log_iova=*/0x4560000, /*log_size_bytes=*/0x4000,
 	    &ring_io, &ring, ring_mem, 8192, 0x100000000ull,
 	    (volatile uint32_t *)&ring_fence_word, 0x200000000ull,
-	    /*cp_init_timeout_us=*/10000, &fence);
-	printf("lemonadep_gpu_boot: status=%d fence=%u\n", status, fence);
+	    /*cp_init_timeout_us=*/10000, &fence, &gmu_phase);
+	printf("lemonadep_gpu_boot: status=%d fence=%u gmu_phase=%d\n", status, fence, gmu_phase);
 	CHECK(status == LemonadepBootOk);
 	CHECK(fence == 1);
+	CHECK(gmu_phase == LemonadepGmuPhaseDone);
 
 	/* Every stage actually ran, not just that the top-level call returned
 	 * OK: power really came up, the GMU really reports ready, and the

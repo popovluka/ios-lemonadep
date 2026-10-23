@@ -166,9 +166,10 @@ lemonadep_gpu_init(void)
 	 */
 	const uint64_t log_iova = LEMONADEP_GMU_DEBUG_IOVA + LEMONADEP_GMU_DEBUG_BYTES;
 	const uint64_t hfi_iova = log_iova + LEMONADEP_GMU_LOG_BYTES;
+	lemonadep_gmu_phase gmu_phase = LemonadepGmuPhaseNone;
 	lemonadep_gmu_status gmu_status = lemonadep_gmu_cold_start(&gmu_io, &fw, hfi_iova, log_iova,
-	    LEMONADEP_GMU_LOG_BYTES);
-	printf("SWEET GPU: GMU cold start status=%d\n", gmu_status);
+	    LEMONADEP_GMU_LOG_BYTES, &gmu_phase);
+	printf("SWEET GPU: GMU cold start status=%d phase=%d\n", gmu_status, gmu_phase);
 	if (gmu_status == LemonadepGmuOk) {
 		printf("SWEET GPU: GMU reports ready. Stopping before CP ring/CP_ME_INIT "
 		    "(needs SMMU context + real IOVA-backed memory, not yet wired)\n");

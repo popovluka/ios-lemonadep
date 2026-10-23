@@ -98,9 +98,11 @@ main(void)
 	CHECK(got == LEMONADEP_GMU_FW_BYTES);
 	lemonadep_gmu_firmware fw = {.bytes = fw_bytes, .length = (uint32_t)got};
 
-	lemonadep_gmu_status status = lemonadep_gmu_cold_start(&io, &fw, 0x1230000, 0x4560000, 0x4000);
+	lemonadep_gmu_phase phase = LemonadepGmuPhaseNone;
+	lemonadep_gmu_status status = lemonadep_gmu_cold_start(&io, &fw, 0x1230000, 0x4560000, 0x4000, &phase);
 	CHECK(status == LemonadepGmuOk);
-	printf("cold_start: status=%d, %u register writes logged\n", status, n_writes);
+	CHECK(phase == LemonadepGmuPhaseDone);
+	printf("cold_start: status=%d phase=%d, %u register writes logged\n", status, phase, n_writes);
 
 	/* Spot-check real, sourced values actually landed on the wire. */
 	CHECK(written(LemonadepGmuWindowCore, A660_GMU_GENERAL_7) == 1);
