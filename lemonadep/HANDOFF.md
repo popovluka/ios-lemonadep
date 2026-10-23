@@ -533,6 +533,76 @@ IDA-style `sub_0x...` names, and its doc links are local
 `file:///Users/.../Desktop/...` paths). No shortcut was missed; the
 low-level work in this project is genuinely new.
 
+## GPU, Phase 6 continued: GMU region mapping completed via ArmSmmu4K Live update (2026-10-23)
+
+**The TODO from Phase 6 was more than "map 4 more regions" -- the GMU
+context's `prepare()` call itself was wrong.** `ArmSmmu4KLive`'s tables are
+a fixed topology: `prepare()`'s `iova`/`bytes` span is reserved once and
+nothing outside it can ever be mapped later, no matter how much table
+budget is left (confirmed by reading `ArmSmmu4KLive.c`'s `layout()`/`walk()`,
+not assumed from the header comment alone). The Phase 6 draft called
+`prepare()` with only icache's own range (`[0x4000, 0x1000000)`), so
+`dummy`/`debug`/`log`/`hfi` -- clustered past `0x60000000` -- were outside
+the prepared aperture and could never have been mapped there, TODO or not.
+Fixed by widening the aperture to span all five regions at once
+(`LEMONADEP_GMU_APERTURE_IOVA`/`_BYTES`, `LemonadepGmuSource.h`, derived
+from the real IOVAs/sizes already in that file, not hand-typed -- this
+project has twice already shipped a hand-typed-wrong constant this exact
+way).
+
+**The aperture/table-budget math was verified empirically, not hand-computed.**
+Widening the aperture to ~1.5 GiB (icache near 0 to hfi's end past
+`0x60400000`) changes `ArmSmmu4KLive`'s required intermediate+leaf table
+page count and the minimum `leaf_budget` (its `layout()` rejects a budget
+smaller than the whole aperture's page count, not just the mapped
+portion) -- both nontrivial LPAE-level arithmetic. Rather than trust hand
+arithmetic (the class of mistake this project already caught twice: the
+GMU `mmio_offset` correction, the firmware segment `file_offset` typos),
+`test_gpu_memory.c` calls the real `ArmSmmu4KLivePrepare()` with a
+generous trial budget and asserts the actual required page count: 774
+pages, confirmed by the test run, comfortably under the chosen 1024-page
+`LEMONADEP_GMU_TABLE_BUDGET_PAGES`. `LEMONADEP_GMU_LEAF_BUDGET` is a
+derived macro (`APERTURE_BYTES/4096 + margin`), correct by construction
+rather than guessed.
+
+**`lemonadep_gpu_smmu_map.c`** (new, plain C, no IOKit -- host-testable
+like `lemonadep_gpu_smmu.c`): `lemonadep_gmu_map_regions()` calls the real
+vendored `ArmSmmu4KLiveUpdate()` once per region, growing the "before"
+list each time exactly as that function's own contract requires. No new
+mapping logic was written -- this is sequencing around the real vendored
+call, the "translation layer vs. real work" line the user asked about
+back in Phase 4 still holds here: there is no existing XNU SMMU driver to
+sit this on top of, so this sequencing *is* the needed code.
+
+**`test_gpu_memory.c`** (new): drives the *real* `ArmSmmu4KLivePrepare` ->
+`ArmSmmu4KLiveAudit` -> `ArmSmmu4KProgramDisabledContext` ->
+`ArmSmmu4KAttachStreams` -> `lemonadep_gmu_map_regions` (5x
+`ArmSmmu4KLiveUpdate`) -> `ArmSmmu4KLiveAudit` sequence end to end against
+a mock SMMU-500 register file, under ASan/UBSan. The mock only reports
+enabled/attached once the real sequence actually wrote the right bits (not
+a stub that always succeeds) -- same discipline as `test_gpu_reserve.c`'s
+GDSC mock. One real hardware-semantics bug caught by the test itself: the
+mock's first draft stored writes to the context bank's fault-status
+register (FSR, `cb+0x58`) verbatim; real hardware clears fault bits
+written as 1 (W1C), and `ArmSmmu4KProgramDisabledContext`'s own
+UINT32_MAX "clear any stale fault" write depends on exactly that
+semantics -- a verbatim-store mock made the function spuriously see a
+fault and fail. Fixed in the mock, not the real driver.
+
+**`NativeAdrenoSmmuContext.h`**: added three accessors
+(`bank()`/`pollBudget()`/`visibilityHandle()`), alongside the
+`arenaHandle()`/`stateHandle()`/`configuration()`/`ioHandle()` it already
+had -- non-functional, no logic changed, just exposing state the class
+already stores so `lemonadep_gpu_smmu_program()` can drive
+`ArmSmmu4KLiveUpdate()` directly after `attach()`.
+
+**`lemonadep_gpu_memory.cpp`**: `lemonadep_gpu_smmu_program()` now widens
+the GMU `prepare()` call to the full aperture and maps all five regions
+via `lemonadep_gmu_map_regions()`. GPU ring/fence context (stream IDs 0/1)
+is unchanged. Still can't be syntax-checked locally (Apple SDK sysroot),
+same limitation as every other IOKit C++ file in this project; the plain-C
+mapping logic it calls into is fully host-tested above.
+
 Branch `lemonadep`, pushed to `fork` = github.com/popovluka/ios-sweet. Phone: LE2123 8 GB, Evolution X 16 + Magisk, slot b,
 `fastboot boot` of our v3 shim works. Backups in `backup/partitions` (23, SHA-256 verified). Tools: `C:\platform-tools`,
 WSL distro `LemonadepLab` (aarch64 gcc, dtc, qemu-user, AOSP mkbootimg at `/opt/aosp-mkbootimg`).

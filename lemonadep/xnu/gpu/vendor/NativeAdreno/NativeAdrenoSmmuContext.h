@@ -52,6 +52,14 @@ public:
     const ArmSmmu4KLiveArena *arena() const {return &arena_;}
     /* Handles for a NativeAdrenoVm that will map buffers through this bank. */
     ArmSmmu4KLiveArena *arenaHandle() {return &arena_;}
+    /* Added for lemonadep: the real vendored ArmSmmu4KLiveUpdate() needs
+     * these alongside arenaHandle()/stateHandle()/configHandle() to
+     * incrementally map more ranges into an already-attached context
+     * (see lemonadep/HANDOFF.md "GPU, Phase 6 continued"). Non-functional:
+     * exposes state this class already stores, no logic changed. */
+    unsigned bank() const {return bank_;}
+    unsigned pollBudget() const {return poll_budget_;}
+    const ArmSmmu4KLiveVisibility *visibilityHandle() const {return &visibility_;}
     /* Scratch the kit's physical-alias checks sort in (ArmSmmu4KLiveArena::alias_scratch), owned by the caller for this context's
      * lifetime; without it those checks compare pairwise. Only after prepare. */
     void setAliasScratch(uint32_t *entries,size_t count) {arena_.alias_scratch=entries;arena_.alias_scratch_entries=entries?count:0;}

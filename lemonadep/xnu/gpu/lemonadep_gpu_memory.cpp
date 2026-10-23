@@ -19,6 +19,7 @@
 #include "NativeAdrenoMemory.h"
 #include "NativeAdrenoSmmuContext.h"
 #include "LemonadepGmuSource.h"
+#include "lemonadep_gpu_smmu_map.h"
 
 struct LemonadepGpuMemory {
 	NativeAdrenoMemory icache, dummy, debug, log, hfi;
@@ -39,12 +40,14 @@ struct LemonadepGpuMemory {
 #define LEMONADEP_FENCE_IOVA 0x80010000ull
 #define LEMONADEP_FENCE_BYTES 0x1000u /* one page; only the first dword is used */
 
-/* Table-pool budget: generous enough for the GMU's ~16.5 MiB mapped span
- * (icache alone is 0xffc000) and the GPU's small ring/fence span, at 4 KiB
- * leaves -- conservative, not yet tuned against a real device. */
-#define LEMONADEP_GMU_TABLE_BUDGET (256u * 1024u)
+/* GMU table-pool budget: LEMONADEP_GMU_TABLE_BUDGET_PAGES/LEMONADEP_GMU_LEAF_BUDGET
+ * (LemonadepGmuSource.h) are sized for the widened aperture prepare() now uses
+ * (all five GMU regions, not just icache -- see that header's own comment and
+ * test_gpu_memory.c, which verified the real required page count is 774). */
+#define LEMONADEP_GMU_TABLE_BUDGET (LEMONADEP_GMU_TABLE_BUDGET_PAGES * 4096u)
+/* GPU ring/fence span is tiny by comparison; conservative, not yet tuned
+ * against a real device. */
 #define LEMONADEP_GPU_TABLE_BUDGET (64u * 1024u)
-#define LEMONADEP_GMU_LEAF_BUDGET 4096u
 #define LEMONADEP_GPU_LEAF_BUDGET 64u
 
 static IOReturn
@@ -84,32 +87,43 @@ lemonadep_gpu_smmu_program(LemonadepGpuMemory *m, const ArmSmmu4KIo *gmuIo, cons
 {
 	IOReturn status;
 
-	/* GMU context: one region at a time, each its own fixed IOVA. */
-	struct { NativeAdrenoMemory *mem; uint64_t iova; uint64_t bytes; } gmuRegions[] = {
-		{&m->icache, LEMONADEP_GMU_ICACHE_IOVA, LEMONADEP_GMU_ICACHE_BYTES},
-		{&m->dummy, LEMONADEP_GMU_DUMMY_IOVA, LEMONADEP_GMU_DUMMY_BYTES},
-		{&m->debug, LEMONADEP_GMU_DEBUG_IOVA, LEMONADEP_GMU_DEBUG_BYTES},
+	/* GMU context: one region at a time, each its own fixed IOVA, sorted
+	 * ascending (ArmSmmu4KLiveUpdate requires this order for its "before"
+	 * list -- see lemonadep_gpu_smmu_map.c). */
+	lemonadep_gmu_region gmuRegions[] = {
+		{LEMONADEP_GMU_ICACHE_IOVA, m->icache.spans()[0].physical, LEMONADEP_GMU_ICACHE_BYTES},
+		{LEMONADEP_GMU_DUMMY_IOVA, m->dummy.spans()[0].physical, LEMONADEP_GMU_DUMMY_BYTES},
+		{LEMONADEP_GMU_DEBUG_IOVA, m->debug.spans()[0].physical, LEMONADEP_GMU_DEBUG_BYTES},
 		/* log/hfi: no fixed IOVA in the real source -- placed just past
 		 * debug's fixed range, the simplest available choice. */
-		{&m->log, LEMONADEP_GMU_DEBUG_IOVA + LEMONADEP_GMU_DEBUG_BYTES, LEMONADEP_GMU_LOG_BYTES},
-		{&m->hfi, LEMONADEP_GMU_DEBUG_IOVA + LEMONADEP_GMU_DEBUG_BYTES + LEMONADEP_GMU_LOG_BYTES,
-		    LEMONADEP_GMU_HFI_BYTES},
+		{LEMONADEP_GMU_DEBUG_IOVA + LEMONADEP_GMU_DEBUG_BYTES, m->log.spans()[0].physical, LEMONADEP_GMU_LOG_BYTES},
+		{LEMONADEP_GMU_DEBUG_IOVA + LEMONADEP_GMU_DEBUG_BYTES + LEMONADEP_GMU_LOG_BYTES,
+		    m->hfi.spans()[0].physical, LEMONADEP_GMU_HFI_BYTES},
 	};
 	if ((status = allocFixed(&m->gmuTables, LEMONADEP_GMU_TABLE_BUDGET, outputBits))) return status;
-	/* prepare() takes one iova/bytes span; the five GMU regions are not
-	 * contiguous with each other (fixed gaps between icache/dummy/debug),
-	 * so prepare the full addressable span once and let each region's
-	 * own allocation be mapped into it via the Live update path -- NOT
-	 * yet implemented below (see the TODO). For now this call covers only
-	 * the single largest, fixed-address region (icache) as the first
-	 * real milestone; dummy/debug/log/hfi mapping is the next piece. */
-	if ((status = m->gmuContext.prepare(&m->gmuTables, /*upper=*/0, LEMONADEP_GMU_ICACHE_IOVA,
-	    LEMONADEP_GMU_ICACHE_BYTES, LEMONADEP_GMU_LEAF_BUDGET, bankGmu, /*asid=*/0,
+	/* prepare()'s aperture must span ALL FIVE regions at once -- icache
+	 * near 0x4000 and dummy/debug/log/hfi clustered past 0x60000000 --
+	 * not just icache's own small range: ArmSmmu4KLive's fixed topology
+	 * only reserves tables within the span prepare() was given, so a
+	 * region outside it could never be mapped later no matter how much
+	 * table budget remained (see LemonadepGmuSource.h's own comment and
+	 * HANDOFF.md "GPU, Phase 6 continued"). */
+	if ((status = m->gmuContext.prepare(&m->gmuTables, /*upper=*/0, LEMONADEP_GMU_APERTURE_IOVA,
+	    LEMONADEP_GMU_APERTURE_BYTES, LEMONADEP_GMU_LEAF_BUDGET, bankGmu, /*asid=*/0,
 	    /*poll_budget=*/1000, outputBits))) return status;
 	if ((status = m->gmuContext.program(gmuIo))) return status;
 	ArmSmmu4KStream gmuStream = {0, LEMONADEP_SMMU_SID_GMU};
 	if ((status = m->gmuContext.attach(&gmuStream, 1))) return status;
-	(void)gmuRegions; /* TODO: map dummy/debug/log/hfi via the Live update API */
+	/* Map all five regions via the real vendored ArmSmmu4KLiveUpdate
+	 * (test_gpu_memory.c exercises this exact prepare/program/attach/map
+	 * sequence end to end against a mock SMMU-500, plus a final
+	 * whole-region audit this production path doesn't need to repeat). */
+	ArmSmmu4KRange gmuMapped[5];
+	if (lemonadep_gmu_map_regions(m->gmuContext.arenaHandle(), m->gmuContext.stateHandle(),
+	    m->gmuContext.ioHandle(), m->gmuContext.bank(), m->gmuContext.configuration(),
+	    m->gmuContext.visibilityHandle(), gmuRegions, 5, gmuMapped,
+	    m->gmuContext.pollBudget()) != ArmSmmu4KSuccess)
+		return kIOReturnIOError;
 
 	/* GPU context: ring + fence, this driver's own chosen IOVAs. */
 	if ((status = allocFixed(&m->gpuTables, LEMONADEP_GPU_TABLE_BUDGET, outputBits))) return status;

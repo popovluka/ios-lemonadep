@@ -115,6 +115,29 @@
 #define LEMONADEP_GMU_LOG_BYTES 0x4000u       /* SZ_16K */
 #define LEMONADEP_GMU_HFI_BYTES 0x4000u       /* SZ_16K */
 
+/* The GMU SMMU context's prepare() aperture must span all five regions at
+ * once (icache near 0x4000, dummy/debug/log/hfi clustered past
+ * 0x60000000) -- ArmSmmu4KLive's fixed topology only reserves
+ * intermediate/leaf tables within the span prepare() was given, so a
+ * region outside that span can never be mapped later no matter how much
+ * table budget is left (see lemonadep/HANDOFF.md "GPU, Phase 6
+ * continued"). Derived from the real IOVAs/sizes above, not hand-typed,
+ * to avoid repeating the mmio_offset/firmware-offset class of mistake
+ * this project already caught twice. */
+#define LEMONADEP_GMU_APERTURE_IOVA 0ull
+#define LEMONADEP_GMU_APERTURE_BYTES \
+	(LEMONADEP_GMU_DEBUG_IOVA + LEMONADEP_GMU_DEBUG_BYTES + LEMONADEP_GMU_LOG_BYTES + LEMONADEP_GMU_HFI_BYTES)
+/* Must be >= APERTURE_BYTES/4096 (ArmSmmu4KLive's layout() rejects a
+ * smaller budget outright, treating it as the ceiling on how much of the
+ * aperture could ever be mapped) and <= NativeAdrenoSmmuContext::MaxLeaves
+ * (524288); margin added, not tuned to the exact minimum. */
+#define LEMONADEP_GMU_LEAF_BUDGET ((unsigned)(LEMONADEP_GMU_APERTURE_BYTES / 4096u) + 16u)
+/* Table-pool page budget for that aperture. The exact page count
+ * ArmSmmu4KLive's layout() needs (774) is verified empirically by
+ * test_gpu_memory.c, not hand-computed from the LPAE level formula --
+ * this is a generous multiple of it, not the tuned minimum. */
+#define LEMONADEP_GMU_TABLE_BUDGET_PAGES 1024u
+
 #define LEMONADEP_GMU_FW_BYTES 55256u
 #define LEMONADEP_GMU_FW_SHA256_HEX \
 	"6bb9360a1601253a86ee3ae1b9b916f5f1832a72d55e9b8573567f1740c94e2b"
