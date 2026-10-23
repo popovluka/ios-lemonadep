@@ -953,6 +953,21 @@ gitignored) and LineageOS kernel sources at commit 187d13c (`lemonadep/tools/fet
 
 Read the `SWEET WLAN:` lines from the TWRP log pull. Next, once the ID reads back: MHI and firmware download (the firmware stays on the phone and is never committed), then QMI, WMI and en0.
 
+## Overlay 1009: four UI fixes from PixeliOS (2026-10-23)
+
+PixeliOS ([PixOS-Project/pixelios-kernel](https://github.com/PixOS-Project/pixelios-kernel)) is iOS 16 on the Pixel 6a, built on the same ios-sweet base. The four patches below touch files that are byte-identical to ours, so `lemonadep/xnu/gen-1009.sh` applies them unchanged at their commit 41198ee. check-overlay: ok.
+
+| Their patch | What it fixes |
+|---|---|
+| 0099 | A stand-in for `IONetworkStack`. configd's InterfaceNamer waits 300 s for it. **This is our Settings → About freeze.** Wi-Fi/en0 needs it as well. |
+| 0084 | Removes the IOKit busy hold that waits for kernelmanagerd (which iOS doesn't have), and adds an empty `IOAcceleratorES` so QuartzCore stops polling for 30 s per backboardd start. `sweetaccel=0` turns the stand-in off; check it against the collaborator's Metal work. |
+| 0085 | Sandbox op 4 returns a container path for app extensions. Without it, PlugInKit aborts every `.appex`. |
+| 0101 | Vsync now reports the refresh period, which was 0, so CoreAnimation saw every frame deadline as already missed. |
+
+They observed all four on hardware. On our phone they are not yet observed.
+
+PixeliOS's Wi-Fi (BCM4389, Broadcom) and GPU (Mali) don't carry over to our Qualcomm parts. Their USB CDC-ECM live log (UDP) is worth porting later as a faster log channel.
+
 Branch `lemonadep`, pushed to `fork` = github.com/popovluka/ios-sweet. Phone: LE2123 8 GB, Evolution X 16 + Magisk, slot b,
 `fastboot boot` of our v3 shim works. Backups in `backup/partitions` (23, SHA-256 verified). Tools: `C:\platform-tools`,
 WSL distro `LemonadepLab` (aarch64 gcc, dtc, qemu-user, AOSP mkbootimg at `/opt/aosp-mkbootimg`).

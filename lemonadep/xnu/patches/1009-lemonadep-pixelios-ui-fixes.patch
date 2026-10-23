@@ -1,0 +1,205 @@
+--- a/iokit/Kernel/IOStartIOKit.cpp
++++ b/iokit/Kernel/IOStartIOKit.cpp
+@@ -188,7 +188,17 @@
+ 	}
+ 
+ #if !NO_KEXTD
++	/*
++	 * SWEET: iOS has no IOKit daemon (kernelmanagerd) to report its launch, so
++	 * this hold kept the registry root busy for good: IOKit never quiesced
++	 * (IOKitWaitQuiet callers, configd's InterfaceNamer). Idea from the
++	 * ios-topaz fork (0128).
++	 */
++#if !defined(ARM64_BOARD_CONFIG_SWEET)
+ 	if (OSKext::iokitDaemonAvailable()) {
++#else
++	if (false) {
++#endif
+ 		/* Add a busy count to keep the registry busy until the IOKit daemon has
+ 		 * completely finished launching. This is decremented when the IOKit daemon
+ 		 * messages the kernel after the in-kernel linker has been
+--- a/iokit/Kernel/IOService.cpp
++++ b/iokit/Kernel/IOService.cpp
+@@ -1200,7 +1200,9 @@
+ 	}
+ 	IOServiceTrace(IOSERVICE_KEXTD_READY, 0, 0, 0, 0);
+ 	startDeferredMatches();
++#if !defined(ARM64_BOARD_CONFIG_SWEET)                  /* no hold taken (IOStartIOKit.cpp) */
+ 	getServiceRoot()->adjustBusy(-1);
++#endif
+ 	IOService::publishUserResource(gIOResourceIOKitKey);
+ #endif /* !NO_KEXTD */
+ }
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -126,6 +126,59 @@
+ 
+ OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
+ 
++/*
++ * The GPU's service class as QuartzCore looks for it: CAMetalContextCreate polls IOServiceMatching("IOAcceleratorES")
++ * 300 times, 100 ms apart, in every process that sets up CA rendering (30 s per backboardd start). One without
++ * MetalPluginName is found and then passed over by Metal, so the renderers stay as they were. Boot-arg sweetaccel=0
++ * leaves it out. Idea from the ios-topaz / ios-sailfish forks (topaz 0138, sailfish 0166).
++ */
++class IOAcceleratorES : public IOService {
++	OSDeclareDefaultStructors(IOAcceleratorES);
++};
++
++OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
++
++/*
++ * configd's InterfaceNamer (the "network stack" part of SCNetworkInterfaceCopyAll, which Settings -> About calls on the main
++ * thread) matches IOServiceMatching("IONetworkStack"), IOServiceOpen()s it and keeps the connection in a flag (configd
++ * disassembly: first-match callback 0x100018894, flag 0x100071b38). When IOKit goes quiet and the flag is 0 it only logs
++ * "No network stack object" and publishes nothing (callback 0x100018468 -> 0x100018634), so the waiters in Preferences run
++ * into InterfaceNamer's 300 s timer. The class lives in the IONetworkingFamily kext, which this kernel does not have. This
++ * stand-in only has to match and open; its user client refuses every call (no interface needs naming: there is no network
++ * hardware behind it yet).
++ */
++class IONetworkStack : public IOService {
++	OSDeclareDefaultStructors(IONetworkStack);
++};
++
++OSDefineMetaClassAndStructors(IONetworkStack, IOService);
++
++class IONetworkStackUserClient : public IOUserClient {
++	OSDeclareDefaultStructors(IONetworkStackUserClient);
++
++public:
++	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
++	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++	    IOExternalMethodDispatch *dispatch, OSObject *target,
++	    void *reference) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(IONetworkStackUserClient, IOUserClient);
++
++IOReturn
++IONetworkStackUserClient::clientClose(void)
++{
++	terminate();
++	return kIOReturnSuccess;
++}
++
++IOReturn
++IONetworkStackUserClient::externalMethod(uint32_t selector __unused, IOExternalMethodArguments *args __unused,
++    IOExternalMethodDispatch *dispatch __unused, OSObject *target __unused, void *reference __unused)
++{
++	return kIOReturnUnsupported;
++}
++
+ class IOMobileFramebufferUserClient : public IOUserClient {
+ 	OSDeclareDefaultStructors(IOMobileFramebufferUserClient);
+ 
+@@ -201,6 +254,19 @@
+ 	setProperty("external", false);
+ 	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
+ 	registerService();
++	int accel = 1;
++	PE_parse_boot_argn("sweetaccel", &accel, sizeof(accel));
++	IOAcceleratorES *es = accel ? OSTypeAlloc(IOAcceleratorES) : NULL;
++	if (es != NULL && es->init() && es->attach(this)) {
++		es->registerService();
++	}
++	OSSafeReleaseNULL(es);
++	IONetworkStack *ns = OSTypeAlloc(IONetworkStack);
++	if (ns != NULL && ns->init() && ns->attach(IOService::getServiceRoot())) {
++		ns->setProperty(kIOUserClientClassKey, "IONetworkStackUserClient");
++		ns->registerService();
++	}
++	OSSafeReleaseNULL(ns);
+ 	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
+ 	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
+ 	return true;
+@@ -212,10 +278,17 @@
+ 	AppleCLCD *fb = (AppleCLCD *)owner;
+ 	uint64_t now = mach_absolute_time();
+ 	uint64_t count = ++fb->fVsyncCount;
++	/*
++	 * CA::WindowServer::IOMFBServer::vsync_callback(fb, a1, a2, a3, refcon): a2 is the vsync's host time and
++	 * a2 + a3 the next one (a3 = the refresh period). a3 was 0, so CA saw every frame deadline as already past
++	 * (ios-flame 0121: 15.8 -> 21 fps on their swipe benchmark; read from their source, unmeasured here).
++	 */
++	uint64_t period;
++	nanoseconds_to_absolutetime((uint64_t)SWEET_FB_VSYNC_US * 1000, &period);
+ 	uint64_t values[6] = {
+ 		(uint32_t)count, (uint32_t)(count >> 32),
+ 		(uint32_t)now, (uint32_t)(now >> 32),
+-		0, 0,
++		(uint32_t)period, (uint32_t)(period >> 32),
+ 	};
+ 
+ 	IOLockLock(fb->fLock);
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -28,6 +28,7 @@
+ #include <libkern/amfi/amfi.h>
+ #include <mach/kern_return.h>
+ #include <sys/codesign.h>
++#include <sys/kauth.h>
+ #include <sys/mount.h>
+ #include <sys/priv.h>
+ #include <sys/proc.h>
+@@ -285,8 +286,50 @@
+  */
+ static uint64_t sweet_sandbox_seen;
+ 
++/*
++ * Op 4, container path of a pid: arg -> {int64 pid; 0; char *buf; u64 len; 0}.
++ * PlugInKit's checkEnvironment aborts every app extension ("plugin has
++ * invalid sandbox or container: error 2") without one (speech synthesizer
++ * AUs crash-looped, boot 0109b). App extensions (executable inside a
++ * .appex) running as mobile get the mobile home; everything else still gets
++ * ENOENT, like an uncontainerized process on iOS.
++ */
++static int
++sweet_sandbox_container_path(user_addr_t arg)
++{
++	uint64_t a[5];
++	char path[MAXPATHLEN];
++	int len = sizeof(path), err = ENOENT;
++	static const char home[] = "/private/var/mobile";
++	proc_t p;
++	kauth_cred_t cred;
++	uid_t uid;
++	vnode_t vp;
++
++	if (copyin(arg, a, sizeof(a)) != 0 || a[2] == 0 || a[3] < sizeof(home)) {
++		return ENOENT;
++	}
++	p = proc_find((int)a[0]);
++	if (p == NULL) {
++		return ESRCH;
++	}
++	cred = kauth_cred_proc_ref(p);
++	uid = kauth_cred_getuid(cred);
++	kauth_cred_unref(&cred);
++	vp = proc_getexecutablevnode(p);
++	proc_rele(p);
++	if (vp == NULLVP) {
++		return ENOENT;
++	}
++	if (uid == 501 && vn_getpath(vp, path, &len) == 0 && strnstr(path, ".appex/", sizeof(path)) != NULL) {
++		err = copyout(home, (user_addr_t)a[2], sizeof(home));
++	}
++	vnode_put(vp);
++	return err;
++}
++
+ static int
+-sweet_sandbox_syscall(struct proc *p, int call, __unused user_addr_t arg)
++sweet_sandbox_syscall(struct proc *p, int call, user_addr_t arg)
+ {
+ 	if (call >= 0 && call < 64 && !(sweet_sandbox_seen & (1ULL << call))) {
+ 		sweet_sandbox_seen |= 1ULL << call;
+@@ -295,7 +338,8 @@
+ 		printf("SWEET Sandbox: %s op %d\n", name, call);
+ 	}
+ 	switch (call) {
+-	case 4:         /* container path (audit token / pid) */
++	case 4:         /* container path (pid) */
++		return sweet_sandbox_container_path(arg);
+ 	case 5:         /* extension issue */
+ 	case 6:         /* extension consume */
+ 	case 0x43:      /* container expected */
