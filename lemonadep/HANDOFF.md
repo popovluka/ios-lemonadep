@@ -628,6 +628,42 @@ ASAP"); the remaining gap to an on-device log line is wiring real MMIO/
 SMMU/memory instead of mocks (the not-yet-written IOKit service, boot-arg
 gate and CI build -- see the open plan in this session).
 
+## GPU, Phase 7 continued: GMU firmware delivery solved via the existing payload-segment mechanism (2026-10-23)
+
+**Real blocker found before writing the IOKit service**: `lemonadep_gmu_cold_start()` needs the real
+`a660_gmu.bin` bytes (pulled from the phone, gitignored, never touches CI) in kernel memory before
+`load_firmware()` runs -- and IOKit matching happens well before UFS root is mounted, so there was no
+existing way to get it there. Asked the user; chose "shim places it at a fixed PA, kernel reads via
+boot-arg" (the same shape as `xnu/patches/1001`'s early framebuffer, which the real ABL-populated
+`boot_args->Video` struct carries -- there is no equivalent ABI field for an arbitrary blob, so this
+uses the free-text cmdline instead).
+
+**No shim changes needed.** `tools/mkpayload.py`'s existing `--ramdisk` option already does exactly
+this shape of thing: append an arbitrary blob as one more payload segment right after the kernel,
+advance `kernel_end` past it, compute its real physical address from the kernel's own `virt_base`/
+`phys_base` -- the loader (`shim/loader.c`) copies every segment generically, so a new segment needs
+zero loader code. Generalized it as `--extra-blob NAME:FILE` (repeatable): same placement, but instead
+of an ADT `RAMDisk` entry, appends `{NAME}_pa=0x.. {NAME}_bytes=0x..` to the cmdline boot-args for the
+kernel driver to `PE_parse_boot_argn` and `ml_io_map`.
+
+**Verified against a real downloaded kernel binary** (`lemonadep/m2-artifacts/kernel-bitbang/kernel.development.sweet`,
+from an earlier CI run), not just read for plausibility: a 55256-byte test blob placed with
+`--extra-blob gmufw:FILE` landed at PA `0x1024cc000` -- inside the documented kernel RAM window
+(`0x1_00000000` + `0xfcc00000`, HWMAP_lemonadep.md section "DRAM banks"), right after the kernel's own
+last segment, exactly the same "behind the kernel, below topOfKernelData" region the loader already
+treats as its own scratch space for the ADT and `boot_args`. Not a new, unverified carve-out: the PA is
+computed at build time from the real kernel image, not hand-picked. Confirmed the packed cmdline
+actually contains `gmufw_pa=0x1024cc000 gmufw_bytes=0xd7d8`.
+
+Also tightened `mkpayload.py`'s cmdline packing: it used to silently truncate a cmdline longer than
+`BOOT_LINE_LENGTH` (608 bytes); now it asserts instead, since a silently-truncated boot-arg string
+(now that `--extra-blob` tokens are appended automatically) would be a much harder bug to notice than a
+build-time failure.
+
+Next: the boot-build script for this milestone will need
+`--extra-blob gmufw:lemonadep/fw-gpu/a660_gmu.bin` added to its `mkpayload.py` invocation, and
+`SweetAccelerator.cpp` reads `gmufw_pa`/`gmufw_bytes` via `PE_parse_boot_argn`.
+
 Branch `lemonadep`, pushed to `fork` = github.com/popovluka/ios-sweet. Phone: LE2123 8 GB, Evolution X 16 + Magisk, slot b,
 `fastboot boot` of our v3 shim works. Backups in `backup/partitions` (23, SHA-256 verified). Tools: `C:\platform-tools`,
 WSL distro `LemonadepLab` (aarch64 gcc, dtc, qemu-user, AOSP mkbootimg at `/opt/aosp-mkbootimg`).

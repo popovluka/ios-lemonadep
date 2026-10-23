@@ -25,6 +25,19 @@ kernel_end past it, so the shim needs no changes: the image lands below the
 ADT and boot_args, inside topOfKernelData (never handed to the VM), and the
 ADT gets /chosen/memory-map "RAMDisk" = <phys, size> for IOFindBSDRoot to
 turn into md0 (boot with rd=md0).
+
+--extra-blob NAME:FILE appends FILE the same way (one more segment right
+after whatever came before it, kernel_end moved past it, never handed to
+the VM) but, instead of an ADT entry, reports its placement to the kernel
+as two boot-args: "{NAME}_pa=0x.." and "{NAME}_bytes=0x..". Repeatable.
+Used by lemonadep to hand the GMU its real firmware blob (gitignored,
+pulled from the phone, never built into the kernel or committed) at a
+fixed physical address the IOKit driver reads via PE_parse_boot_argn +
+ml_io_map -- the same "shim places a blob at a known PA, kernel reads it
+from boot-args" pattern xnu/patches/1001 already uses for the early
+framebuffer, just via the free-text cmdline instead of boot_args->Video
+since there is no equivalent ABI field for an arbitrary blob. See
+lemonadep/HANDOFF.md "GPU, Phase 7 continued".
 """
 import argparse, os, struct, sys
 
@@ -140,7 +153,7 @@ def adt_dram(adt_blob):
             struct.unpack('<Q', chosen.prop('dram-size'))[0])
 
 
-def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
+def build(kernel_path, adt_path, cmdline, ramdisk_path=None, extra_blobs=None):
     buf = bytearray(open(kernel_path, 'rb').read())
     m = parse_macho(buf)
     nfix = apply_chained_fixups(buf, m)
@@ -168,6 +181,17 @@ def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
         adt_blob = add_ramdisk_to_adt(adt_blob, rd_pa, rd_size)
         ramdisk = (hex(rd_pa), hex(rd_size))
 
+    extra_info = []
+    for name, path in extra_blobs or []:
+        image = open(path, 'rb').read()
+        size = (len(image) + PAGE - 1) & ~(PAGE - 1)
+        va = kernel_end
+        kernel_end = va + size
+        pa = va - virt_base + PHYS_BASE
+        pieces.append((va, size, image))
+        cmdline += f' {name}_pa=0x{pa:x} {name}_bytes=0x{len(image):x}'
+        extra_info.append((name, hex(pa), hex(len(image))))
+
     hdr_size = SEG_TABLE + 32 * len(pieces)
     out = bytearray(hdr_size)
     seg_table = []
@@ -183,13 +207,14 @@ def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
     struct.pack_into('<8sII', out, 0, b'SWEETXNU', 1, len(pieces))
     struct.pack_into('<7Q', out, 0x10, virt_base, m['entry'], adt_off, len(adt_blob), kernel_end,
                      PHYS_BASE, MEM_SIZE)
-    cl = cmdline.encode()[:BOOT_LINE_LENGTH - 1]
+    cl = cmdline.encode()
+    assert len(cl) < BOOT_LINE_LENGTH, f'cmdline too long ({len(cl)} >= {BOOT_LINE_LENGTH}) after extra blobs'
     out[CMDLINE:CMDLINE + len(cl)] = cl
     for i, t in enumerate(seg_table):
         struct.pack_into('<4Q', out, SEG_TABLE + 32 * i, *t)
     info = dict(cputype=hex(m['cputype']), cpusub=m['cpusub'], fixups=nfix, virt_base=hex(virt_base),
-                entry=hex(m['entry']), kernel_end=hex(kernel_end), ramdisk=ramdisk, size=len(out),
-                segs=[(s['name'], hex(s['vmaddr']), hex(s['vmsize'])) for s in segs])
+                entry=hex(m['entry']), kernel_end=hex(kernel_end), ramdisk=ramdisk, extra_blobs=extra_info,
+                size=len(out), segs=[(s['name'], hex(s['vmaddr']), hex(s['vmsize'])) for s in segs])
     return bytes(out), info
 
 
@@ -198,11 +223,17 @@ if __name__ == '__main__':
     ap.add_argument('kernel'); ap.add_argument('adt'); ap.add_argument('out')
     ap.add_argument('--cmdline', default='debug=0xc serial=3 cpus=1 keepsyms=1')
     ap.add_argument('--ramdisk', help='root image for md0 (boot with rd=md0)')
+    ap.add_argument('--extra-blob', action='append', default=[], metavar='NAME:FILE',
+                     help='append FILE as one more segment, report its PA/size as '
+                          'NAME_pa=/NAME_bytes= boot-args; repeatable')
     a = ap.parse_args()
-    blob, info = build(a.kernel, a.adt, a.cmdline, a.ramdisk)
+    extra_blobs = [tuple(spec.split(':', 1)) for spec in a.extra_blob]
+    blob, info = build(a.kernel, a.adt, a.cmdline, a.ramdisk, extra_blobs)
     open(a.out, 'wb').write(blob)
     for k, v in info.items():
-        if k != 'segs':
+        if k not in ('segs', 'extra_blobs'):
             print(f'{k}: {v}')
     for s in info['segs']:
         print('  ', *s)
+    for b in info['extra_blobs']:
+        print('  extra_blob', *b)
