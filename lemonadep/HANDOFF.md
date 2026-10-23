@@ -418,12 +418,31 @@ own function with the same proven *shape* (reserve -> bootGmu ->
 programSmmu -> ring attach -> CP init -> wait -> IRQ/timer attach), not a
 call into the vendored class.
 
-**Still open**: whether `NativeAdrenoRing`'s plain `submit()` (not
-`submitFramed()`) is safe to reuse for A660 given its fence write is
-`CP_EVENT_WRITE7` -- needs checking whether plain A6XX's fence write in
-the real `a6xx_gpu.c` uses the same event encoding or (more likely, given
-the pattern so far) a different one. Not yet traced. The interrupt mask
-setup (`NativeAdrenoIrq.cpp`) needs the same real-vs-A7XX check before use.
+**Resolved, and it's worse than "needs checking": `NativeAdrenoRing::submit()`
+is genuinely wrong for A660, confirmed, not just suspected.** The real
+`a6xx_submit()` (`a6xx_gpu.c:416-430`, generic across the whole a6xx/a7xx
+family *except this one piece*) writes the fence as `CP_SCRATCH(2)=seqno`,
+then `CP_EVENT_WRITE` (opcode `0x46`, same number for both generations --
+confirmed in `adreno_pm4.xml`, `CP_EVENT_WRITE` tagged `A2XX-A6XX` and
+`CP_EVENT_WRITE7` tagged `A7XX-`, same opcode byte, different payload
+*field layout* per generation) with event `CACHE_FLUSH_TS` (`0x04`) and the
+IRQ bit, 4 plain payload words. `NativeAdrenoRing.cpp`'s `emitFence()`
+instead builds event `0x31` (`CACHE_CLEAN`) plus an extra "enable" bit with
+no equivalent in the classic format -- the A7XX `CP_EVENT_WRITE7` payload
+shape, not A6XX's. Same opcode number, genuinely different, incompatible
+payload. This is the A7XX GPU-generation protocol itself, not a chip
+variant of an address.
+
+**Conclusion: the CP ring and interrupt layer cannot be vendored for A660
+at all** -- `NativeAdrenoRing.cpp` and `NativeAdrenoIrq.cpp` are protocol-
+level A7XX implementations, not generically-addressed A6XX-family code
+like `NativeAdrenoTimer`/`NativeAdrenoSmmuContext`/`NativeAdrenoMemory`
+turned out to be. Submission and interrupt handling need the same
+from-scratch treatment the GMU cold-start got: real `a6xx_gpu.c` source,
+lemonadep's own code, not a vendored class. This is a real scope change
+from the original vendoring plan, found by reading function bodies rather
+than assuming headers and file sizes told the whole story -- worth stating
+plainly rather than quietly working around.
 
 Branch `lemonadep`, pushed to `fork` = github.com/popovluka/ios-sweet. Phone: LE2123 8 GB, Evolution X 16 + Magisk, slot b,
 `fastboot boot` of our v3 shim works. Backups in `backup/partitions` (23, SHA-256 verified). Tools: `C:\platform-tools`,
