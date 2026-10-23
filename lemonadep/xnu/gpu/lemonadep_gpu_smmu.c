@@ -25,6 +25,14 @@
  * not Qualcomm-specific. */
 #define LEMONADEP_SMMU_GR0_ID1_OFFSET 0x24u
 #define LEMONADEP_SMMU_ID1_NUMCB_MASK 0xffu
+/* ID2 (0x28): OAS (output/physical address size), bits [7:4], a 4-bit
+ * index into a fixed architectural table -- NOT a direct bit count.
+ * Confirmed from the real arm_smmu_id_size_to_bits() (arm-smmu.c:1723-1738),
+ * not assumed from general ARM knowledge: 0=32,1=36,2=40,3=42,4=44,5(or
+ * higher, reserved)=48. */
+#define LEMONADEP_SMMU_GR0_ID2_OFFSET 0x28u
+#define LEMONADEP_SMMU_ID2_OAS_SHIFT 4u
+#define LEMONADEP_SMMU_ID2_OAS_MASK 0xfu
 
 #define LEMONADEP_SMMU_SID_GPU_0 0u
 #define LEMONADEP_SMMU_SID_GPU_1 1u
@@ -66,5 +74,34 @@ lemonadep_smmu_discover_banks(const lemonadep_smmu_discover_io *io, unsigned *ba
 	}
 	*bank_gpu = 0;
 	*bank_gmu = 1;
+	return LemonadepSmmuOk;
+}
+
+/* Real architectural table (arm_smmu_id_size_to_bits, arm-smmu.c:1723-1738),
+ * not re-derived or guessed. */
+static unsigned
+oas_index_to_bits(unsigned index)
+{
+	switch (index) {
+	case 0: return 32;
+	case 1: return 36;
+	case 2: return 40;
+	case 3: return 42;
+	case 4: return 44;
+	default: return 48;
+	}
+}
+
+lemonadep_smmu_status
+lemonadep_smmu_discover_output_bits(const lemonadep_smmu_discover_io *io, unsigned *output_bits)
+{
+	uint32_t id2;
+	if (!io || !io->read32 || !output_bits) {
+		return LemonadepSmmuBadArg;
+	}
+	if (io->read32(io->cookie, LEMONADEP_SMMU_GR0_ID2_OFFSET, &id2)) {
+		return LemonadepSmmuIoError;
+	}
+	*output_bits = oas_index_to_bits((id2 >> LEMONADEP_SMMU_ID2_OAS_SHIFT) & LEMONADEP_SMMU_ID2_OAS_MASK);
 	return LemonadepSmmuOk;
 }

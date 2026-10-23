@@ -492,6 +492,47 @@ context/table programming with the real bank/SID values already traced,
 and the IOKit service publishing this as `IOAcceleratorES`. Then a boot-arg
 gate, an overlay patch, and a real CI kernel build.
 
+## GPU, Phase 6: memory/SMMU glue drafted; due diligence on "are we reinventing the wheel" (2026-10-23)
+
+**Sourced the real SMMU output address size (`OAS`) instead of guessing
+one.** `lemonadep_gpu_memory.cpp`'s first draft used `output_bits=32` with
+a TODO -- wrong on its face (would cap physical addressing at 4 GiB).
+`ID2` (`0x28`), bits `[7:4]`, is a 4-bit index into a fixed architectural
+table, confirmed from the real `arm_smmu_id_size_to_bits()`
+(`arm-smmu.c:1723-1738`): not a direct bit count. Added
+`lemonadep_smmu_discover_output_bits()` next to the existing `NUMCB`
+discovery (same ID1/ID2 register pair, same "read the real hardware
+capability at runtime" pattern), host-tested against every real table
+entry.
+
+**`lemonadep_gpu_memory.cpp`**: allocates the GMU regions and ring/fence
+buffers (`NativeAdrenoMemory::allocate`, confirmed chip-generic) and
+programs two real SMMU contexts (`NativeAdrenoSmmuContext`, also confirmed
+chip-generic) -- GMU on stream ID 5, GPU on stream IDs 0/1, the real
+traced binding. **Honestly incomplete, flagged in the code, not hidden**:
+only `icache` is actually mapped into the GMU context so far; `dummy`/
+`debug`/`log`/`hfi` are allocated but not yet mapped (needs
+`ArmSmmu4K`'s Live incremental-update API, not yet used). Can't be
+syntax-checked locally -- same Apple-SDK sysroot limitation as every other
+IOKit C++ file in this project.
+
+**Checked whether this is being duplicated elsewhere, concretely, not by
+assumption**: the two UniXNU device repos that actually target SM8350
+(`UniXNU-haydn`, Xiaomi K40 Pro; `UniXNU-zeta`, Surface Duo 2) have no GPU
+work at all -- `zeta`'s own handoff doc shows it's stuck before `launchd`
+even starts successfully (`EBADARCH`: it targets real arm64e iOS 26,
+needing pointer authentication hardware our iOS 16 arm64 approach
+sidesteps entirely), and `haydn`'s `package/` directory has nothing but a
+config file. A third, unrelated project (`lechaukha12/xnu-xzs`, Sony
+Xperia XZs, Adreno 530) claims a hardware-verified GPU accelerator in its
+README; reading the actual submit path found it submits a `CP_NOP` packet
+with a marker string and reports success unconditionally, with no real
+command execution or fence wait -- a stub that convinces userland a GPU
+exists, not working acceleration (its own source comments reference
+IDA-style `sub_0x...` names, and its doc links are local
+`file:///Users/.../Desktop/...` paths). No shortcut was missed; the
+low-level work in this project is genuinely new.
+
 Branch `lemonadep`, pushed to `fork` = github.com/popovluka/ios-sweet. Phone: LE2123 8 GB, Evolution X 16 + Magisk, slot b,
 `fastboot boot` of our v3 shim works. Backups in `backup/partitions` (23, SHA-256 verified). Tools: `C:\platform-tools`,
 WSL distro `LemonadepLab` (aarch64 gcc, dtc, qemu-user, AOSP mkbootimg at `/opt/aosp-mkbootimg`).
