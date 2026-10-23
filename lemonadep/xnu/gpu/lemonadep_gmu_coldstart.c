@@ -67,8 +67,6 @@ typedef enum {
 typedef enum {
 	LemonadepGmuPhaseNone,
 	LemonadepGmuPhasePrecheck,
-	LemonadepGmuPhaseRscWakeAck,
-	LemonadepGmuPhaseRscSeqIdle,
 	LemonadepGmuPhasePdcHandshake,
 	LemonadepGmuPhaseFirmwareLoad,
 	LemonadepGmuPhaseFwStart,
@@ -135,35 +133,31 @@ poll_core(const lemonadep_gmu_io *io, uint32_t byte_off, uint32_t mask, uint32_t
  * documented no-op).
  */
 
-/* ---- RSC/PDC handshake: a6xx_rpmh_start() + a6xx_gmu_rpmh_init(),
- * A660's real "PDC configured in AOP" path. ---- */
+/* ---- RSC/PDC handshake: a6xx_gmu_rpmh_init() only.
+ *
+ * a6xx_rpmh_start() (the RSCC_CONTROL_REQ wake request + its
+ * RSCC_CONTROL_ACK/RSCC_SEQ_BUSY_DRV0 polls) is REAL-DRIVER-GATED on
+ * `test_and_clear_bit(GMU_STATUS_PDC_SLEEP, &gmu->status)`: that bit is
+ * only ever set by a6xx_rpmh_stop() (the suspend path) and is 0 on a
+ * genuine first boot (gmu->status is zero-initialized at probe), so on a
+ * real cold start the real driver's a6xx_rpmh_start() takes its early
+ * `return 0` and never touches those registers at all -- confirmed by
+ * reading both functions directly (a6xx_gmu.c:607-634, :130 for the bit
+ * definition), not assumed. An earlier version of this file performed
+ * that wake-poll unconditionally; on real Adreno 660 silicon it timed
+ * out (RSCC_CONTROL_ACK bit 1 never sets) -- exactly what reading the
+ * real gate predicts for a device that was never previously put to
+ * sleep. See lemonadep/HANDOFF.md "GPU, Phase 8 continued" for the
+ * on-device log that caught this.
+ *
+ * a6xx_gmu_rpmh_init() (the writes below) is also real-driver-gated,
+ * but the other way: it's called exactly once, from GMU probe
+ * (a6xx_gmu.c:2464), never from the per-boot fw_start path -- for this
+ * driver's first and only bring-up, "once at probe" and "once here"
+ * are the same call. */
 static lemonadep_gmu_status
 rsc_pdc_handshake(const lemonadep_gmu_io *io, lemonadep_gmu_phase *phase)
 {
-	uint32_t val;
-	/* a6xx_rpmh_start: wake the RSC if it was asleep. */
-	TRY(io_write(io, LemonadepGmuWindowCore, A660_GMU_RSCC_CONTROL_REQ, 1u << 1));
-	if (phase) {
-		*phase = LemonadepGmuPhaseRscWakeAck;
-	}
-	TRY(poll_core(io, A660_GMU_RSCC_CONTROL_ACK, 1u << 1, 1u << 1, 1000, &val));
-	/* RSCC_SEQ_BUSY_DRV0 == 0 means the sequencer is idle (Rscc window). */
-	if (phase) {
-		*phase = LemonadepGmuPhaseRscSeqIdle;
-	}
-	for (unsigned i = 0; i < 1000; ++i) {
-		TRY(io_read(io, LemonadepGmuWindowRscc, A660_RSCC_SEQ_BUSY_DRV0, &val));
-		if (!val) {
-			break;
-		}
-		if (i == 999) {
-			return LemonadepGmuTimeout;
-		}
-		if (io->wait_us(io->cookie, 100)) {
-			return LemonadepGmuIoError;
-		}
-	}
-	TRY(io_write(io, LemonadepGmuWindowCore, A660_GMU_RSCC_CONTROL_REQ, 0));
 	if (phase) {
 		*phase = LemonadepGmuPhasePdcHandshake;
 	}

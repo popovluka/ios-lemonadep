@@ -752,6 +752,49 @@ already completed without corrupting anything).
 
 Next: rebuild with this patch, boot again, read which phase the timeout happened at.
 
+## GPU, Phase 8 continued: found and fixed the real bug -- RSC wake-poll was never supposed to run (2026-10-23)
+
+**Booted overlay 1007 again with phase tracking: `SWEET GPU: GMU cold start status=3 phase=2`** --
+`LemonadepGmuPhaseRscWakeAck`, the very first poll in `rsc_pdc_handshake()` (right after writing
+`RSCC_CONTROL_REQ = bit1`, waiting for `RSCC_CONTROL_ACK` bit 1). Read the frame via the same
+video-frame-extraction approach as the first readable capture.
+
+**Root cause, confirmed by reading the real `a6xx_gmu.c` directly (not assumed), from the pinned
+clone already in `/root/gpuwork/`**: `a6xx_rpmh_start()` (the function this wake-ack poll comes from)
+starts with:
+
+```c
+if (!test_and_clear_bit(GMU_STATUS_PDC_SLEEP, &gmu->status))
+	return 0;
+```
+
+`GMU_STATUS_PDC_SLEEP` is set *only* by `a6xx_rpmh_stop()` (the suspend path, `a6xx_gmu.c:660`) and
+checked/cleared only here (`:612`). `gmu->status` is zero-initialized at probe. So on a genuine first
+cold boot -- never previously suspended -- the real driver's `a6xx_rpmh_start()` takes that early
+`return 0` and **never touches `RSCC_CONTROL_REQ`/`RSCC_CONTROL_ACK`/`RSCC_SEQ_BUSY_DRV0` at all.**
+Our code performed that wake request + poll unconditionally on every cold start -- exactly the bug: on
+real cold silicon that was never previously put to sleep, nothing ever acks it, because nothing is
+*supposed* to be woken.
+
+Separately confirmed `a6xx_gmu_rpmh_init()` (the PDC/RSC-sequencer-microcode writes, what our
+`rsc_pdc_handshake()` does *after* the now-removed wake poll) is called **exactly once, from GMU probe**
+(`a6xx_gmu.c:2464`), never from the per-boot `fw_start` path -- for this driver's first and only
+bring-up, "once at probe" and "once here" are the same call, so those writes were already correctly
+placed; only the wake-poll before them was wrong.
+
+**Fix**: removed the `RSCC_CONTROL_REQ` wake write, the `RSCC_CONTROL_ACK` poll and the
+`RSCC_SEQ_BUSY_DRV0` idle loop from `rsc_pdc_handshake()` entirely (not gated/skipped -- deleted, with
+a comment citing the real source, since this driver has no suspend/resume path that would ever need
+them), going straight to the PDC-init writes. `LemonadepGmuPhaseRscWakeAck`/`RscSeqIdle` removed from
+the phase enum (dead states). Host tests (`test_gmu_coldstart.c`, `test_gpu_boot.c`) updated -- their
+mocks modeled the now-removed registers too -- and re-passing: 174 writes logged (2 fewer, exactly the
+two removed `RSCC_CONTROL_REQ` writes), `phase=8`/`LemonadepGmuPhaseDone`.
+
+This is the kind of mistake the project's own sourcing discipline exists to catch, caught the way it's
+supposed to be caught: not by guessing a fix from the symptom, but by reading the real function the
+failing poll came from and finding the actual gate condition. Next: rebuild, boot again, see whether
+cold start now actually completes (phase=8/status=0) or hits a different, now-unmasked step.
+
 Branch `lemonadep`, pushed to `fork` = github.com/popovluka/ios-sweet. Phone: LE2123 8 GB, Evolution X 16 + Magisk, slot b,
 `fastboot boot` of our v3 shim works. Backups in `backup/partitions` (23, SHA-256 verified). Tools: `C:\platform-tools`,
 WSL distro `LemonadepLab` (aarch64 gcc, dtc, qemu-user, AOSP mkbootimg at `/opt/aosp-mkbootimg`).

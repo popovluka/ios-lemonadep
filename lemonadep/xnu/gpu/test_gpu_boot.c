@@ -65,9 +65,6 @@ gmu_mock_write(void *cookie, unsigned window, uint32_t off, uint32_t value)
 	(void)cookie;
 	if (window >= LemonadepGmuWindowCount || off + 4 > MAX_GMU_REGS) return 1;
 	gmu_regs[window][off / 4] = value;
-	if (window == LemonadepGmuWindowCore && off == A660_GMU_RSCC_CONTROL_REQ) {
-		gmu_regs[LemonadepGmuWindowCore][A660_GMU_RSCC_CONTROL_ACK / 4] = 1u << 1;
-	}
 	if (window == LemonadepGmuWindowCore && off == A660_GMU_CM3_SYSRESET && value == 0) {
 		gmu_regs[LemonadepGmuWindowCore][A660_GMU_CM3_FW_INIT_RESULT / 4] =
 		    LEMONADEP_A660_GMU_START_READY_LOW;

@@ -42,13 +42,8 @@ mock_write(void *cookie, unsigned window, uint32_t off, uint32_t value)
 	if (n_writes < 4096) {
 		writes[n_writes++] = (struct write_log_entry){window, off, value};
 	}
-	/* Model RSCC_SEQ_BUSY_DRV0 as always idle, and RSCC_CONTROL_ACK as
-	 * always acking (bit 1), and the CM3 reset/HFI poll targets as
-	 * satisfied the instant the real code writes them -- a bring-up test,
-	 * not a timing model. */
-	if (window == LemonadepGmuWindowCore && off == A660_GMU_RSCC_CONTROL_REQ) {
-		regs[LemonadepGmuWindowCore][A660_GMU_RSCC_CONTROL_ACK / 4] = 1u << 1;
-	}
+	/* Model the CM3 reset/HFI poll target as satisfied the instant the
+	 * real code writes it -- a bring-up test, not a timing model. */
 	if (window == LemonadepGmuWindowCore && off == A660_GMU_CM3_SYSRESET && value == 0) {
 		/* Reset released: the probed-threshold path (our mock DTCM+0xff8
 		 * reads 0 by default, so the LOW mask/ready pattern applies). */
