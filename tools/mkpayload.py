@@ -183,6 +183,19 @@ def build(kernel_path, adt_path, cmdline, ramdisk_path=None, extra_blobs=None):
 
     extra_info = []
     for name, path in extra_blobs or []:
+        if path.startswith('zero:'):
+            # Reserved region: a segment with no file bytes and vmsize = size.
+            # shim/loader.c zero-fills vmsize past file_size, so this costs
+            # nothing in the boot image.
+            image = b''
+            size = (int(path[5:], 0) + PAGE - 1) & ~(PAGE - 1)
+            va = kernel_end
+            kernel_end = va + size
+            pa = va - virt_base + PHYS_BASE
+            pieces.append((va, size, image))
+            cmdline += f' {name}_pa=0x{pa:x} {name}_bytes=0x{size:x}'
+            extra_info.append((name, hex(pa), hex(size)))
+            continue
         image = open(path, 'rb').read()
         size = (len(image) + PAGE - 1) & ~(PAGE - 1)
         va = kernel_end
@@ -225,7 +238,8 @@ if __name__ == '__main__':
     ap.add_argument('--ramdisk', help='root image for md0 (boot with rd=md0)')
     ap.add_argument('--extra-blob', action='append', default=[], metavar='NAME:FILE',
                      help='append FILE as one more segment, report its PA/size as '
-                          'NAME_pa=/NAME_bytes= boot-args; repeatable')
+                          'NAME_pa=/NAME_bytes= boot-args; repeatable. FILE "zero:SIZE" '
+                          'reserves SIZE zero-filled bytes instead (no image growth)')
     a = ap.parse_args()
     extra_blobs = [tuple(spec.split(':', 1)) for spec in a.extra_blob]
     blob, info = build(a.kernel, a.adt, a.cmdline, a.ramdisk, extra_blobs)

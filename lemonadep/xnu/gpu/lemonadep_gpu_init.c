@@ -30,7 +30,13 @@
  *   4: + the GBIF QoS writes (the only GPU-window writes in this file)
  *   5: + power_config
  *   6: + the GMU-start DTCM probe read (still before SYSRESET)
- *   7+: full run, including the SYSRESET toggle and ready-poll
+ *   7: + GMU memory prep (HFI table, icache firmware copy into the
+ *        reserved gpumem region) and a READ-ONLY Adreno SMMU probe, logged
+ *   8: + program the GMU SMMU context, attach SIDs 5/0x405, map the
+ *        icache/dummy/debug/log/hfi regions (still before SYSRESET)
+ *   9+: full run, including the SYSRESET toggle and ready-poll
+ * Stages 7+ need the reserved region: mkpayload --extra-blob gpumem:zero:SIZE
+ * (lemonadep/m3-gpu-build.sh does it). See HANDOFF.md "GPU, Phase 9".
  *
  * Firmware delivery: the real a660_gmu.bin bytes (gitignored, pulled
  * from the phone, never touch CI) are placed by tools/mkpayload.py's
@@ -54,6 +60,33 @@ extern vm_offset_t phystokv(uint64_t);
 #include "lemonadep/LemonadepGmuSource.h"
 #include "lemonadep/lemonadep_gpu_reserve.c"
 #include "lemonadep/lemonadep_gmu_coldstart.c"
+#include "lemonadep/lemonadep_gpu_smmu_map.c"
+#include "lemonadep/lemonadep_gmu_mem.c"
+#include "lemonadep/vendor/ArmSmmu4K/ArmSmmu4KMmio.h"
+
+/* Clean [va, va+bytes) to the point of coherency. The Adreno SMMU is
+ * dma-coherent, so this is belt and braces for tables and GMU memory the
+ * CPU wrote through its cacheable mapping. Line size from CTR_EL0.DminLine. */
+static void
+lemonadep_clean_to_poc(const volatile void *va, size_t bytes)
+{
+	uint64_t ctr;
+	__asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
+	const uintptr_t line = (uintptr_t)4 << ((ctr >> 16) & 0xf);
+	uintptr_t a = (uintptr_t)va & ~(line - 1);
+	const uintptr_t end = (uintptr_t)va + bytes;
+	for (; a < end; a += line) {
+		__asm__ volatile("dc cvac, %0" :: "r"(a) : "memory");
+	}
+	__asm__ volatile("dsb sy" ::: "memory");
+}
+static int
+lemonadep_publish_table_page(void *cookie, volatile uint64_t *page, size_t bytes)
+{
+	(void)cookie;
+	lemonadep_clean_to_poc(page, bytes);
+	return 0;
+}
 
 static int
 lemonadep_pwr_read(void *cookie, unsigned window, uint32_t off, uint32_t *out)
@@ -124,6 +157,8 @@ lemonadep_gpu_init(void)
 		LemonadepGmuPhaseGbifCx,
 		LemonadepGmuPhasePowerConfig,
 		LemonadepGmuPhaseStartProbe,
+		LemonadepGmuPhaseStartProbe, /* 7: + memory prep, read-only SMMU probe */
+		LemonadepGmuPhaseStartProbe, /* 8: + GMU SMMU context programmed */
 	};
 	const lemonadep_gmu_phase stop_after =
 	    stage < sizeof(stage_stop) / sizeof(stage_stop[0]) ? stage_stop[stage] : LemonadepGmuPhaseNone;
@@ -162,6 +197,78 @@ lemonadep_gpu_init(void)
 	printf("SWEET GPU: power/clock reserve status=%d\n", pwr_status);
 	if (pwr_status != LemonadepPwrOk) {
 		return;
+	}
+
+	/*
+	 * Stages 7+: the GMU's real memory. Power first -- the SMMU sits in
+	 * the CX GDSC domain and needs its vote clock, both enabled above.
+	 */
+	if (stage >= 7) {
+		uint64_t gpumem_pa = 0;
+		uint32_t gpumem_bytes = 0;
+		if (!PE_parse_boot_argn("gpumem_pa", &gpumem_pa, sizeof(gpumem_pa)) ||
+		    !PE_parse_boot_argn("gpumem_bytes", &gpumem_bytes, sizeof(gpumem_bytes)) ||
+		    gpumem_bytes < LEMONADEP_GPUMEM_BYTES || (gpumem_pa & 4095)) {
+			printf("SWEET GPU: stage %u needs gpumem_pa/gpumem_bytes >= 0x%x (mkpayload "
+			    "--extra-blob gpumem:zero:SIZE)\n", stage, LEMONADEP_GPUMEM_BYTES);
+			return;
+		}
+		uint8_t *gpumem = (uint8_t *)phystokv(gpumem_pa);
+		printf("SWEET GPU: gpumem pa=0x%llx bytes=0x%x va=%p\n", gpumem_pa, gpumem_bytes, gpumem);
+
+		lemonadep_hfi_table_init((volatile uint32_t *)(gpumem + LEMONADEP_GPUMEM_HFI_OFF),
+		    (uint32_t)LEMONADEP_GMU_HFI_IOVA);
+		uint32_t icache_bytes = lemonadep_gmu_icache_load(gpumem + LEMONADEP_GPUMEM_ICACHE_OFF,
+		    fw.bytes, fw.length);
+		lemonadep_clean_to_poc(gpumem + LEMONADEP_GPUMEM_ICACHE_OFF, LEMONADEP_GPUMEM_BYTES -
+		    LEMONADEP_GPUMEM_ICACHE_OFF);
+		printf("SWEET GPU: hfi table at iova 0x%x, icache firmware %u bytes\n",
+		    (uint32_t)LEMONADEP_GMU_HFI_IOVA, icache_bytes);
+		if (icache_bytes == 0) {
+			return;
+		}
+
+		static ArmSmmu4KMmio smmu_mmio;
+		static ArmSmmu4KIo smmu_io;
+		smmu_mmio.mapping = (volatile unsigned char *)ml_io_map(LEMONADEP_ADRENO_SMMU_PA,
+		    LEMONADEP_ADRENO_SMMU_BYTES);
+		smmu_mmio.bytes = LEMONADEP_ADRENO_SMMU_BYTES;
+		if (!smmu_mmio.mapping || ArmSmmu4KBindMmio(&smmu_mmio, &smmu_io) != ArmSmmu4KSuccess) {
+			printf("SWEET GPU: SMMU map/bind failed\n");
+			return;
+		}
+		static lemonadep_smmu_probe_info probe;
+		if (lemonadep_smmu_probe(&smmu_io, &probe)) {
+			printf("SWEET GPU: SMMU probe read failed\n");
+			return;
+		}
+		printf("SWEET GPU: smmu scr0=0x%x id0=0x%x id1=0x%x id2=0x%x sgfsr=0x%x\n",
+		    probe.scr0, probe.id0, probe.id1, probe.id2, probe.sgfsr);
+		printf("SWEET GPU: smmu numcb=%u s2cb=%u smrg=%u sidbits=%u oas=%u global_ok=%u\n",
+		    probe.numcb, probe.nums2cb, probe.numsmrg, probe.sid_bits, probe.output_bits, probe.global_ok);
+		printf("SWEET GPU: smmu streams valid=%u trans=%u bypass=%u fault=%u banks_on=%u "
+		    "-> bank=%d slots=%u,%u (%u free)\n", probe.smr_valid, probe.s2cr_trans,
+		    probe.s2cr_bypass, probe.s2cr_fault, probe.banks_enabled, (int)probe.bank,
+		    probe.slots[0], probe.slots[1], probe.free_slots);
+
+		if (stage >= 8) {
+			static lemonadep_gmu_smmu gmu_smmu;
+			const ArmSmmu4KLiveVisibility vis = {.cookie = NULL,
+			    .publish_table_page = lemonadep_publish_table_page};
+			ArmSmmu4KStatus smmu_status = lemonadep_gmu_smmu_setup(&gmu_smmu, &smmu_io, &probe,
+			    gpumem, gpumem_pa, &vis);
+			printf("SWEET GPU: GMU SMMU setup status=%d step=%u sids=%u tables=%u leaves=%u "
+			    "program_phase=%u fsr=0x%x attach_phase=%u\n", smmu_status, gmu_smmu.step,
+			    gmu_smmu.sid_count, (unsigned)gmu_smmu.state.tables.table_pages,
+			    (unsigned)gmu_smmu.state.tables.leaf_pages, gmu_smmu.program.phase,
+			    gmu_smmu.program.fault_status, gmu_smmu.routes.phase);
+			if (smmu_status != ArmSmmu4KSuccess) {
+				/* Never release the GMU into unmapped memory. */
+				printf("SWEET GPU: stopping before GMU cold start (SMMU not ready)\n");
+				delay(8 * 1000 * 1000);
+				return;
+			}
+		}
 	}
 
 	/* GMU windows (lemonadep_gmu_coldstart.c's lemonadep_gmu_io). */

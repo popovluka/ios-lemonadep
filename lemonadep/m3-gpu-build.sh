@@ -43,7 +43,7 @@ BOOTARGS="$BOOTARGS sweettouch=1 sweetkeys=1 sweetusb=0 sweetgpu=${SWEETGPU:-1} 
 
 python3 "$REPO/tools/mkadt.py" "$OUT/m3.adt" --board lemonadep
 python3 "$REPO/tools/mkpayload.py" "$KERNEL" "$OUT/m3.adt" "$OUT/m3-payload.bin" --cmdline "$BOOTARGS" \
-	--extra-blob gmufw:"$GMU_FW"
+	--extra-blob gmufw:"$GMU_FW" --extra-blob gpumem:zero:0x1414000
 BOARD=lemonadep bash "$REPO/shim/build.sh" "$OUT/m3-payload.bin"
 cp "$OUT/shim-boot-lemonadep.img" "$OUT/m3-gpu-boot.img"
 sha256sum "$KERNEL" "$GMU_FW" "$OUT/m3-gpu-boot.img"
