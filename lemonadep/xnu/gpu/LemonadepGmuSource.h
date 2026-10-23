@@ -95,6 +95,26 @@
  * HANDOFF.md "GPU, Phase 2" for why A660 takes this path, not
  * ShengGmu.c's fixed-region one). Re-run that script and update this
  * block if the firmware file ever changes. */
+/* GMU memory regions (icache/dummy/debug/log/hfi): sizes and IOVAs, verified
+ * against the real a6xx_gmu_init() allocation calls for A660 specifically
+ * (a6xx_gmu.c:2316-2378), not assumed equal to ShengGmu.c's A740 values just
+ * because they're the same numbers. They turn out to genuinely be the same,
+ * because A660 takes the identical real branches A740 does for every one of
+ * these sizes (adreno_is_a650_family() for icache, and the explicit
+ * `adreno_is_a660_family() || adreno_is_a7xx() || adreno_is_a8xx()` branch
+ * for the debug/dummy pair -- the real source's own comment there: "A660
+ * now requires handling 'prealloc requests' in GMU firmware... hardcode
+ * allocations based on the known firmware"). log/hfi have no fixed IOVA
+ * (auto-assigned by the real allocator); icache/dummy/debug do. */
+#define LEMONADEP_GMU_ICACHE_BYTES 0xffc000u  /* SZ_16M - SZ_16K */
+#define LEMONADEP_GMU_ICACHE_IOVA 0x4000ull
+#define LEMONADEP_GMU_DUMMY_BYTES 0x4000u     /* SZ_16K, a660_family's size */
+#define LEMONADEP_GMU_DUMMY_IOVA 0x60000000ull
+#define LEMONADEP_GMU_DEBUG_BYTES 0x7000u     /* SZ_4K * 7 */
+#define LEMONADEP_GMU_DEBUG_IOVA 0x60400000ull
+#define LEMONADEP_GMU_LOG_BYTES 0x4000u       /* SZ_16K */
+#define LEMONADEP_GMU_HFI_BYTES 0x4000u       /* SZ_16K */
+
 #define LEMONADEP_GMU_FW_BYTES 55256u
 #define LEMONADEP_GMU_FW_SHA256_HEX \
 	"6bb9360a1601253a86ee3ae1b9b916f5f1832a72d55e9b8573567f1740c94e2b"
