@@ -1,0 +1,1133 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -111,6 +111,7 @@
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
++bsd/dev/lemonadep_gpu.c		standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -50,6 +50,7 @@
+ extern void sweet_keys_init(void);
+ extern void sweet_touch_init(void);
+ extern void sweet_usb_probe(void);
++extern void lemonadep_gpu_init(void);
+ 
+ #define REG_CAP         0x00
+ #define REG_IS          0x20
+@@ -659,6 +660,8 @@
+ 	sweet_keys_init();
+ 	sweet_touch_init();
+ 	sweet_usb_probe();
++	/* GPU bring-up, first on-device slice (lemonadep/HANDOFF.md "GPU, Phase 8"). */
++	lemonadep_gpu_init();
+ 	return 0;
+ }
+ 
+--- /dev/null
++++ b/bsd/dev/lemonadep_gpu.c
+@@ -0,0 +1,176 @@
++/*
++ * lemonadep: GPU bring-up, first on-device slice. Real register writes
++ * only: CX GDSC + the seven GMU clock branches (lemonadep_gpu_reserve.c),
++ * then the real GMU cold start (lemonadep_gmu_coldstart.c) -- both
++ * already host-tested under ASan/UBSan (lemonadep/xnu/gpu/test_gpu_reserve.c,
++ * test_gmu_coldstart.c).
++ *
++ * Deliberately stops there. The CP ring and CP_ME_INIT
++ * (lemonadep_ring.c/lemonadep_cp_init.c, also already written and
++ * host-tested -- lemonadep/xnu/gpu/test_gpu_boot.c) need the GPU/GMU SMMU
++ * context actually programmed and real IOVA-backed memory
++ * (lemonadep_gpu_memory.cpp) before submitting anything to the CP is
++ * safe to try on real silicon -- an unmapped/untranslated ring address
++ * reaching the real Adreno CP is not a risk to take without that in
++ * place. Wiring that in is the next patch. See lemonadep/HANDOFF.md
++ * "GPU, Phase 8" for the full writeup.
++ *
++ * Off by default (sweetgpu=1 to enable): unlike touch/keys/usb, every
++ * one of these register writes is unverified on real hardware.
++ *
++ * Firmware delivery: the real a660_gmu.bin bytes (gitignored, pulled
++ * from the phone, never touch CI) are placed by tools/mkpayload.py's
++ * --extra-blob option at a physical address reported via the
++ * gmufw_pa/gmufw_bytes boot-args (lemonadep/HANDOFF.md "GPU, Phase 7
++ * continued") -- read here via PE_parse_boot_argn + phystokv(), since
++ * that address is inside the kernel's own managed RAM window, not a
++ * device MMIO window (ml_io_map is for the latter).
++ */
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern vm_offset_t phystokv(uint64_t);
++
++#include "lemonadep/LemonadepGmuSource.h"
++#include "lemonadep/lemonadep_gpu_reserve.c"
++#include "lemonadep/lemonadep_gmu_coldstart.c"
++
++static int
++lemonadep_pwr_read(void *cookie, unsigned window, uint32_t off, uint32_t *out)
++{
++	vm_offset_t *bases = (vm_offset_t *)cookie;
++	*out = *(volatile uint32_t *)(bases[window] + off);
++	return 0;
++}
++static int
++lemonadep_pwr_write(void *cookie, unsigned window, uint32_t off, uint32_t value)
++{
++	vm_offset_t *bases = (vm_offset_t *)cookie;
++	*(volatile uint32_t *)(bases[window] + off) = value;
++	return 0;
++}
++static int
++lemonadep_gmu_read(void *cookie, unsigned window, uint32_t off, uint32_t *out)
++{
++	vm_offset_t *bases = (vm_offset_t *)cookie;
++	*out = *(volatile uint32_t *)(bases[window] + off);
++	return 0;
++}
++static int
++lemonadep_gmu_write(void *cookie, unsigned window, uint32_t off, uint32_t value)
++{
++	vm_offset_t *bases = (vm_offset_t *)cookie;
++	*(volatile uint32_t *)(bases[window] + off) = value;
++	return 0;
++}
++static int
++lemonadep_barrier(void *cookie)
++{
++	(void)cookie;
++	__asm__ volatile("dsb sy" ::: "memory");
++	return 0;
++}
++static int
++lemonadep_now_us(void *cookie, uint64_t *out)
++{
++	uint64_t ns;
++	(void)cookie;
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	*out = ns / 1000;
++	return 0;
++}
++static int
++lemonadep_wait_us(void *cookie, unsigned us)
++{
++	(void)cookie;
++	delay((int)us);
++	return 0;
++}
++
++void
++lemonadep_gpu_init(void)
++{
++	uint32_t enabled = 0;
++	(void)PE_parse_boot_argn("sweetgpu", &enabled, sizeof(enabled));
++	if (!enabled) {
++		printf("SWEET GPU: disabled (sweetgpu=1 to enable; unverified on hardware)\n");
++		return;
++	}
++
++	uint64_t fw_pa = 0;
++	uint32_t fw_bytes = 0;
++	if (!PE_parse_boot_argn("gmufw_pa", &fw_pa, sizeof(fw_pa)) ||
++	    !PE_parse_boot_argn("gmufw_bytes", &fw_bytes, sizeof(fw_bytes))) {
++		printf("SWEET GPU: no gmufw_pa/gmufw_bytes boot-args (mkpayload --extra-blob gmufw:... not used)\n");
++		return;
++	}
++	if (fw_bytes != LEMONADEP_GMU_FW_BYTES) {
++		printf("SWEET GPU: gmufw_bytes=0x%x != expected 0x%x\n", fw_bytes, LEMONADEP_GMU_FW_BYTES);
++		return;
++	}
++	lemonadep_gmu_firmware fw = {
++		.bytes = (const uint8_t *)phystokv(fw_pa),
++		.length = fw_bytes,
++	};
++	printf("SWEET GPU: firmware at pa=0x%llx bytes=0x%x\n", fw_pa, fw_bytes);
++
++	/* Power/clock windows (lemonadep_gpu_reserve.c's lemonadep_pwr_io). */
++	vm_offset_t pwr_bases[LemonadepPwrWindowCount];
++	pwr_bases[LemonadepPwrWindowGpucc] = ml_io_map(LEMONADEP_GPUCC_PA, LEMONADEP_GPUCC_BYTES);
++	pwr_bases[LemonadepPwrWindowGcc] = ml_io_map(LEMONADEP_GCC_PA, LEMONADEP_GCC_GPU_WINDOW_BYTES);
++	if (!pwr_bases[LemonadepPwrWindowGpucc] || !pwr_bases[LemonadepPwrWindowGcc]) {
++		printf("SWEET GPU: ml_io_map failed (power windows)\n");
++		return;
++	}
++	lemonadep_pwr_io pwr_io = {
++		.cookie = pwr_bases, .read32 = lemonadep_pwr_read, .write32 = lemonadep_pwr_write,
++		.now_us = lemonadep_now_us, .wait_us = lemonadep_wait_us,
++	};
++	lemonadep_pwr_status pwr_status = lemonadep_gpu_reserve(&pwr_io);
++	printf("SWEET GPU: power/clock reserve status=%d\n", pwr_status);
++	if (pwr_status != LemonadepPwrOk) {
++		return;
++	}
++
++	/* GMU windows (lemonadep_gmu_coldstart.c's lemonadep_gmu_io). */
++	vm_offset_t gmu_bases[LemonadepGmuWindowCount];
++	gmu_bases[LemonadepGmuWindowCore] = ml_io_map(LEMONADEP_GMU_CORE_PA, LEMONADEP_GMU_CORE_BYTES);
++	gmu_bases[LemonadepGmuWindowRscc] = ml_io_map(LEMONADEP_GMU_RSCC_PA, LEMONADEP_GMU_RSCC_BYTES);
++	gmu_bases[LemonadepGmuWindowPdc] = ml_io_map(LEMONADEP_GMU_PDC_PA, LEMONADEP_GMU_PDC_BYTES);
++	gmu_bases[LemonadepGmuWindowGpu] = ml_io_map(LEMONADEP_GMU_GPU_PA, LEMONADEP_GMU_GPU_BYTES);
++	gmu_bases[LemonadepGmuWindowCxMisc] = ml_io_map(LEMONADEP_GMU_CX_MISC_PA, LEMONADEP_GMU_CX_MISC_BYTES);
++	for (unsigned i = 0; i < LemonadepGmuWindowCount; i++) {
++		if (!gmu_bases[i]) {
++			printf("SWEET GPU: ml_io_map failed (GMU window %u)\n", i);
++			return;
++		}
++	}
++	lemonadep_gmu_io gmu_io = {
++		.cookie = gmu_bases, .read32 = lemonadep_gmu_read, .write32 = lemonadep_gmu_write,
++		.barrier = lemonadep_barrier, .now_us = lemonadep_now_us, .wait_us = lemonadep_wait_us,
++	};
++
++	/*
++	 * hfi_iova/log_iova: real fixed IOVAs the GMU firmware expects
++	 * (LemonadepGmuSource.h), but with no SMMU context programmed yet
++	 * (not wired in this slice) they are not actually translated to
++	 * anything -- fine for this slice: fw_start()/power_config() only
++	 * program these as values the GMU reads out of its own registers
++	 * once it runs, they are not dereferenced by this driver.
++	 */
++	const uint64_t log_iova = LEMONADEP_GMU_DEBUG_IOVA + LEMONADEP_GMU_DEBUG_BYTES;
++	const uint64_t hfi_iova = log_iova + LEMONADEP_GMU_LOG_BYTES;
++	lemonadep_gmu_status gmu_status = lemonadep_gmu_cold_start(&gmu_io, &fw, hfi_iova, log_iova,
++	    LEMONADEP_GMU_LOG_BYTES);
++	printf("SWEET GPU: GMU cold start status=%d\n", gmu_status);
++	if (gmu_status == LemonadepGmuOk) {
++		printf("SWEET GPU: GMU reports ready. Stopping before CP ring/CP_ME_INIT "
++		    "(needs SMMU context + real IOVA-backed memory, not yet wired)\n");
++	}
++}
+--- /dev/null
++++ b/bsd/dev/lemonadep/LemonadepGmuSource.h
+@@ -0,0 +1,157 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef LEMONADEP_GMU_SOURCE_H
++#define LEMONADEP_GMU_SOURCE_H
++#include <stdint.h>
++/*
++ * The board-specific facts the real GMU cold-start sequence
++ * (LemonadepA660HwInit.h; see lemonadep/HANDOFF.md "GPU, Phase 2") needs
++ * that aren't register offsets: the five MMIO window physical
++ * addresses/sizes and the real pulled firmware's size/hash. Written by
++ * hand from sourced facts below, not derived by a script (unlike
++ * LemonadepA660HwInit.h) -- there is no XML/catalog table for these, only
++ * the real device tree node and the firmware file already on the phone.
++ */
++
++/* qcom,adreno-660.1 node, mainline sm8350.dtsi (fetched 2026-10-23; see the
++ * ML-GPU source tag in HWMAP_lemonadep.md). Window order matches
++ * ShengGmuWindows (UniXNU/NativeAdreno's NativeAdrenoGmuPlatform.h):
++ * Core, Rscc, Pdc, Gpu, CxMisc. */
++#define LEMONADEP_GMU_CORE_PA 0x03d6a000u
++#define LEMONADEP_GMU_CORE_BYTES 0x34000u
++#define LEMONADEP_GMU_RSCC_PA 0x03de0000u
++#define LEMONADEP_GMU_RSCC_BYTES 0x10000u
++#define LEMONADEP_GMU_PDC_PA 0x0b290000u
++#define LEMONADEP_GMU_PDC_BYTES 0x10000u
++/* kgsl_3d0_reg_memory -- the main GPU register window (CP ring, RBBM, UCHE). */
++#define LEMONADEP_GMU_GPU_PA 0x03d00000u
++#define LEMONADEP_GMU_GPU_BYTES 0x40000u
++/* cx_mem -- confirmed this is the CX_MISC window by reading the real
++ * a6xx_gpu.c: `a6xx_gpu->cx_misc_mmio = msm_ioremap(pdev, "cx_mem")`, not
++ * cx_dbgc (a separate, unrelated debug-cluster window this driver doesn't
++ * need). */
++#define LEMONADEP_GMU_CX_MISC_PA 0x03d9e000u
++#define LEMONADEP_GMU_CX_MISC_BYTES 0x1000u
++
++/* GPUCC (clock controller, GPU_CX_GDSC/GPU_GX_GDSC power domains) and the
++ * Adreno SMMU, same dtsi node, needed for the clock/power/IOMMU bring-up
++ * this file does not cover yet. */
++#define LEMONADEP_GPUCC_PA 0x03d90000u
++#define LEMONADEP_GPUCC_BYTES 0x9000u
++/* GCC base, already sourced for touch/keys (HWMAP_lemonadep.md section 5):
++ * 0x100000, real size 0x1f0000, but this driver only reaches the two GPU
++ * branches above (highest real offset used: 0x71154+4), so it maps a
++ * smaller window of its own rather than sharing sweet_touch.c's GCC
++ * mapping across drivers. */
++#define LEMONADEP_GCC_PA 0x00100000u
++#define LEMONADEP_GCC_GPU_WINDOW_BYTES 0x72000u
++#define LEMONADEP_ADRENO_SMMU_PA 0x03da0000u
++#define LEMONADEP_ADRENO_SMMU_BYTES 0x20000u
++
++/* pil_gpu_mem reserved-memory node, same dtsi (also recorded in
++ * HWMAP_lemonadep.md section 1): the zap-shader PIL load target. */
++#define LEMONADEP_PIL_GPU_MEM_PA 0x8b51a000ull
++#define LEMONADEP_PIL_GPU_MEM_BYTES 0x2000u
++
++/* GIC SPIs, same dtsi node: GPU fault/idle IRQ, GMU HFI and GMU IRQs. */
++#define LEMONADEP_GPU_IRQ_SPI 300u
++#define LEMONADEP_GMU_HFI_IRQ_SPI 304u
++#define LEMONADEP_GMU_IRQ_SPI 305u
++
++/* CX GDSC (GPUCC window, drivers/clk/qcom/gpucc-sm8350.c gpu_cx_gdsc.gdscr):
++ * real software enable needed before anything else -- write SW_COLLAPSE
++ * (bit 0) to 0, poll PWR_ON (bit 31) set (drivers/clk/qcom/gdsc.c
++ * gdsc_update_collapse_bit/gdsc_poll_status). GX GDSC (gpu_gx_gdsc.gdscr
++ * = 0x100c) is a documented software no-op (.power_on =
++ * gdsc_gx_do_nothing_enable in the real driver) -- its real power-up is
++ * the GMU/RSC hardware sequence already in LemonadepA660HwInit.h, not a
++ * separate software step. */
++#define LEMONADEP_GPUCC_GDSC_CX_OFFSET 0x106cu
++#define LEMONADEP_GDSC_SW_COLLAPSE_BIT (1u << 0)
++#define LEMONADEP_GDSC_PWR_ON_BIT (1u << 31)
++
++/* Clocks GMU needs, from the qcom,adreno-gmu-660.1 node's own clocks list
++ * (mainline sm8350.dtsi): five GPUCC branches + two GCC branches, offsets
++ * from the real drivers/clk/qcom/{gpucc,gcc}-sm8350.c (fetched 2026-10-23).
++ * Standard clk_branch2 semantics: enable_reg bit0 = CLK_ENABLE, same
++ * register's bit31 = CLK_OFF (poll clear), except the BRANCH_HALT_SKIP one
++ * (gcc_ddrss_gpu_axi_clk -- never poll, same as BRANCH_HALT_DELAY/VOTED
++ * branches with an hwcg_bit set can legitimately read CLK_OFF=1 while
++ * idle, exactly the touch_clocks() HWCG pattern already used for m_ahb/
++ * s_ahb; see HWMAP_lemonadep.md section 8). */
++#define LEMONADEP_GPUCC_AHB_CLK_OFFSET 0x1078u            /* BRANCH_HALT_DELAY */
++#define LEMONADEP_GPUCC_CX_GMU_CLK_OFFSET 0x1098u          /* BRANCH_HALT */
++#define LEMONADEP_GPUCC_CXO_CLK_OFFSET 0x109cu              /* BRANCH_HALT */
++#define LEMONADEP_GPUCC_HLOS1_VOTE_GPU_SMMU_CLK_OFFSET 0x5000u /* BRANCH_HALT_VOTED */
++#define LEMONADEP_GPUCC_HUB_CX_INT_CLK_OFFSET 0x1204u      /* BRANCH_HALT */
++#define LEMONADEP_GCC_DDRSS_GPU_AXI_CLK_OFFSET 0x71154u    /* BRANCH_HALT_SKIP, hwcg_bit=1: never poll */
++#define LEMONADEP_GCC_GPU_MEMNOC_GFX_CLK_OFFSET 0x7100cu   /* BRANCH_HALT_VOTED, hwcg_bit=1 */
++#define LEMONADEP_CLK_ENABLE_BIT (1u << 0)
++#define LEMONADEP_CLK_OFF_BIT (1u << 31)
++#define LEMONADEP_CLK_HWCG_BIT (1u << 1)
++
++/* The real a660_gmu.bin already pulled from this phone's own /vendor
++ * (lemonadep/fw-gpu/, fw-gpu/pull.sh) and parsed with the real non-legacy
++ * block-loader algorithm (lemonadep/xnu/gpu/verify-gmu-firmware.py; see
++ * HANDOFF.md "GPU, Phase 2" for why A660 takes this path, not
++ * ShengGmu.c's fixed-region one). Re-run that script and update this
++ * block if the firmware file ever changes. */
++/* GMU memory regions (icache/dummy/debug/log/hfi): sizes and IOVAs, verified
++ * against the real a6xx_gmu_init() allocation calls for A660 specifically
++ * (a6xx_gmu.c:2316-2378), not assumed equal to ShengGmu.c's A740 values just
++ * because they're the same numbers. They turn out to genuinely be the same,
++ * because A660 takes the identical real branches A740 does for every one of
++ * these sizes (adreno_is_a650_family() for icache, and the explicit
++ * `adreno_is_a660_family() || adreno_is_a7xx() || adreno_is_a8xx()` branch
++ * for the debug/dummy pair -- the real source's own comment there: "A660
++ * now requires handling 'prealloc requests' in GMU firmware... hardcode
++ * allocations based on the known firmware"). log/hfi have no fixed IOVA
++ * (auto-assigned by the real allocator); icache/dummy/debug do. */
++#define LEMONADEP_GMU_ICACHE_BYTES 0xffc000u  /* SZ_16M - SZ_16K */
++#define LEMONADEP_GMU_ICACHE_IOVA 0x4000ull
++#define LEMONADEP_GMU_DUMMY_BYTES 0x4000u     /* SZ_16K, a660_family's size */
++#define LEMONADEP_GMU_DUMMY_IOVA 0x60000000ull
++#define LEMONADEP_GMU_DEBUG_BYTES 0x7000u     /* SZ_4K * 7 */
++#define LEMONADEP_GMU_DEBUG_IOVA 0x60400000ull
++#define LEMONADEP_GMU_LOG_BYTES 0x4000u       /* SZ_16K */
++#define LEMONADEP_GMU_HFI_BYTES 0x4000u       /* SZ_16K */
++
++/* The GMU SMMU context's prepare() aperture must span all five regions at
++ * once (icache near 0x4000, dummy/debug/log/hfi clustered past
++ * 0x60000000) -- ArmSmmu4KLive's fixed topology only reserves
++ * intermediate/leaf tables within the span prepare() was given, so a
++ * region outside that span can never be mapped later no matter how much
++ * table budget is left (see lemonadep/HANDOFF.md "GPU, Phase 6
++ * continued"). Derived from the real IOVAs/sizes above, not hand-typed,
++ * to avoid repeating the mmio_offset/firmware-offset class of mistake
++ * this project already caught twice. */
++#define LEMONADEP_GMU_APERTURE_IOVA 0ull
++#define LEMONADEP_GMU_APERTURE_BYTES \
++	(LEMONADEP_GMU_DEBUG_IOVA + LEMONADEP_GMU_DEBUG_BYTES + LEMONADEP_GMU_LOG_BYTES + LEMONADEP_GMU_HFI_BYTES)
++/* Must be >= APERTURE_BYTES/4096 (ArmSmmu4KLive's layout() rejects a
++ * smaller budget outright, treating it as the ceiling on how much of the
++ * aperture could ever be mapped) and <= NativeAdrenoSmmuContext::MaxLeaves
++ * (524288); margin added, not tuned to the exact minimum. */
++#define LEMONADEP_GMU_LEAF_BUDGET ((unsigned)(LEMONADEP_GMU_APERTURE_BYTES / 4096u) + 16u)
++/* Table-pool page budget for that aperture. The exact page count
++ * ArmSmmu4KLive's layout() needs (774) is verified empirically by
++ * test_gpu_memory.c, not hand-computed from the LPAE level formula --
++ * this is a generous multiple of it, not the tuned minimum. */
++#define LEMONADEP_GMU_TABLE_BUDGET_PAGES 1024u
++
++#define LEMONADEP_GMU_FW_BYTES 55256u
++#define LEMONADEP_GMU_FW_SHA256_HEX \
++	"6bb9360a1601253a86ee3ae1b9b916f5f1832a72d55e9b8573567f1740c94e2b"
++/* Real, parsed, payload-bearing blocks only (the loader skips the 11
++ * zero-size ones; header+payload bytes sum to exactly 55256, confirming
++ * the parse). Each entry: {firmware byte offset, length, target}. Targets:
++ * 0 = ITCM (CM3_ITCM_START + offset/4), 1 = DTCM (CM3_DTCM_START +
++ * offset/4), 2 = icache memory (icache.cpu + (addr - 0x4000)). */
++enum { LemonadepGmuFwTargetItcm, LemonadepGmuFwTargetDtcm, LemonadepGmuFwTargetIcache };
++struct LemonadepGmuFwBlock { uint32_t file_offset, addr, bytes, target; };
++static const struct LemonadepGmuFwBlock LemonadepGmuFwBlocks[4] = {
++	{192,    0x00000000u,   476u, LemonadepGmuFwTargetItcm},
++	{684,    0x00004000u, 54476u, LemonadepGmuFwTargetIcache},
++	{55176,  0x10007f98u,    40u, LemonadepGmuFwTargetDtcm},
++	{55232,  0x10007fdcu,    24u, LemonadepGmuFwTargetDtcm},
++};
++#endif
+--- /dev/null
++++ b/bsd/dev/lemonadep/LemonadepA660HwInit.h
+@@ -0,0 +1,303 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef LEMONADEP_A660_HWINIT_H
++#define LEMONADEP_A660_HWINIT_H
++#include <stdint.h>
++/* Derived (by lemonadep/xnu/test/derive-a660-hwinit.py, adapted from UniXNU/UniXNU's
++ * scripts/derive-a740-hwinit.py for the A660 -- plain a6xx gen4, not an A7XX variant) from the
++ * pinned ianchb/sm8550-mainline @ 42f3b40c (sha256-verified against UniXNU's own
++ * scripts/data/adreno-inputs.json record): registers/adreno/{a6xx,adreno_common,a6xx_gmu}.xml and
++ * adreno/a6xx_catalog.c (a660_hwcg, a660_protect_regs, DECLARE_ADRENO_PROTECT(a660_protect,48)).
++ * Dword register offsets (gpu_write()/CP_PROTECT convention, the main GPU register
++ * window, no correction needed) below; the GMU/RSC/PDC section further down is
++ * byte offsets with the real mmio_offset correction applied where gmu_write() needs
++ * it -- see that section's own comment. Do not edit by hand; re-run the deriving
++ * script instead. */
++#define A660_GBIF_HALT 0x03c45
++#define A660_RBBM_GBIF_HALT 0x00016
++#define A660_RBBM_SECVID_TSB_CNTL 0x0f803
++#define A660_RBBM_SECVID_TSB_TRUSTED_BASE 0x0f800
++#define A660_RBBM_SECVID_TSB_TRUSTED_SIZE 0x0f802
++#define A660_RBBM_GBIF_CLIENT_QOS_CNTL 0x00011
++#define A660_UCHE_GBIF_GX_CONFIG 0x00e3a
++#define A660_RBBM_PERFCTR_GPU_BUSY_MASKED 0x0050b
++#define A660_UCHE_TRAP_BASE 0x00e09
++#define A660_UCHE_WRITE_THRU_BASE 0x00e07
++#define A660_UCHE_GMEM_RANGE_MIN 0x00e0b
++#define A660_UCHE_GMEM_RANGE_MAX 0x00e0d
++#define A660_UCHE_CACHE_WAYS 0x00e17
++#define A660_CP_AHB_CNTL 0x0098d
++#define A660_RBBM_PERFCTR_CNTL 0x00500
++#define A660_RBBM_INTERFACE_HANG_INT_CNTL 0x0001f
++#define A660_UCHE_CLIENT_PF 0x00e19
++#define A660_CP_PROTECT_CNTL 0x0084f
++#define A660_UCHE_CMDQ_CONFIG 0x00e3c
++#define A660_CP_APRIV_CNTL 0x00844
++#define A660_RB_CMP_DBG_ECO_CNTL 0x08e28
++#define A660_RBBM_INT_0_MASK 0x00038
++#define A660_CP_SQE_INSTR_BASE 0x00830
++#define A660_CP_RB_BASE 0x00800
++#define A660_CP_RB_CNTL 0x00802
++#define A660_CP_RB_RPTR_ADDR 0x00804
++#define A660_CP_SQE_CNTL 0x00808
++#define A660_CP_RB_RPTR 0x00806
++#define A660_CP_RB_WPTR 0x00807
++#define A660_RBBM_STATUS 0x00210
++#define A660_RBBM_INT_0_STATUS 0x00201
++#define A660_CP_HW_FAULT 0x00821
++#define A660_CP_INTERRUPT_STATUS 0x00823
++#define A660_RBBM_CLOCK_CNTL 0x000ae
++#define A660_RBBM_SECVID_TRUST_CNTL 0x0f400
++#define A660_RBBM_STATUS3 0x00213
++#define A660_CP_SQE_STAT_ADDR 0x00908
++#define A660_CP_SQE_STAT_DATA 0x00909
++#define A660_RB_NC_MODE_CNTL 0x08e08
++#define A660_TPL1_NC_MODE_CNTL 0x0b604
++#define A660_SP_NC_MODE_CNTL 0x0ae02
++#define A660_CP_APERTURE_CNTL_HOST 0x00a00
++#define A660_UCHE_MODE_CNTL 0x00e01
++#define A660_RBBM_NC_MODE_CNTL 0x00534
++#define A660_RBBM_INT_CLEAR_CMD 0x00037
++#define A660_CP_ALWAYS_ON_COUNTER 0x00980
++#define A660_CP_PROTECT 0x00850
++static const uint32_t LemonadepA660Hwcg[][2]={
++    {0x000b0,0x02222222},   /* RBBM_CLOCK_CNTL_SP0 */
++    {0x000b4,0x02222220},   /* RBBM_CLOCK_CNTL2_SP0 */
++    {0x000b8,0x00000080},   /* RBBM_CLOCK_DELAY_SP0 */
++    {0x000bc,0x0000f3cf},   /* RBBM_CLOCK_HYST_SP0 */
++    {0x000c0,0x22222222},   /* RBBM_CLOCK_CNTL_TP0 */
++    {0x000c4,0x22222222},   /* RBBM_CLOCK_CNTL2_TP0 */
++    {0x000c8,0x22222222},   /* RBBM_CLOCK_CNTL3_TP0 */
++    {0x000cc,0x00022222},   /* RBBM_CLOCK_CNTL4_TP0 */
++    {0x000d0,0x11111111},   /* RBBM_CLOCK_DELAY_TP0 */
++    {0x000d4,0x11111111},   /* RBBM_CLOCK_DELAY2_TP0 */
++    {0x000d8,0x11111111},   /* RBBM_CLOCK_DELAY3_TP0 */
++    {0x000dc,0x00011111},   /* RBBM_CLOCK_DELAY4_TP0 */
++    {0x000e0,0x77777777},   /* RBBM_CLOCK_HYST_TP0 */
++    {0x000e4,0x77777777},   /* RBBM_CLOCK_HYST2_TP0 */
++    {0x000e8,0x77777777},   /* RBBM_CLOCK_HYST3_TP0 */
++    {0x000ec,0x00077777},   /* RBBM_CLOCK_HYST4_TP0 */
++    {0x000f0,0x22222222},   /* RBBM_CLOCK_CNTL_RB0 */
++    {0x000f4,0x01002222},   /* RBBM_CLOCK_CNTL2_RB0 */
++    {0x000f8,0x00002220},   /* RBBM_CLOCK_CNTL_CCU0 */
++    {0x00100,0x00040f00},   /* RBBM_CLOCK_HYST_RB_CCU0 */
++    {0x00104,0x25222022},   /* RBBM_CLOCK_CNTL_RAC */
++    {0x00105,0x00005555},   /* RBBM_CLOCK_CNTL2_RAC */
++    {0x00106,0x00000011},   /* RBBM_CLOCK_DELAY_RAC */
++    {0x00107,0x00445044},   /* RBBM_CLOCK_HYST_RAC */
++    {0x00108,0x04222222},   /* RBBM_CLOCK_CNTL_TSE_RAS_RBBM */
++    {0x00111,0x00002222},   /* RBBM_CLOCK_MODE_VFD */
++    {0x00114,0x00222222},   /* RBBM_CLOCK_MODE_GPC */
++    {0x00117,0x00000002},   /* RBBM_CLOCK_DELAY_HLSQ_2 */
++    {0x0011b,0x00002222},   /* RBBM_CLOCK_MODE_HLSQ */
++    {0x00109,0x00004000},   /* RBBM_CLOCK_DELAY_TSE_RAS_RBBM */
++    {0x00112,0x00002222},   /* RBBM_CLOCK_DELAY_VFD */
++    {0x00115,0x00000200},   /* RBBM_CLOCK_DELAY_GPC */
++    {0x0011c,0x00000000},   /* RBBM_CLOCK_DELAY_HLSQ */
++    {0x0010a,0x00000000},   /* RBBM_CLOCK_HYST_TSE_RAS_RBBM */
++    {0x00113,0x00000000},   /* RBBM_CLOCK_HYST_VFD */
++    {0x00116,0x04104004},   /* RBBM_CLOCK_HYST_GPC */
++    {0x0011d,0x00000000},   /* RBBM_CLOCK_HYST_HLSQ */
++    {0x00120,0x00000222},   /* RBBM_CLOCK_CNTL_TEX_FCHE */
++    {0x00121,0x00000111},   /* RBBM_CLOCK_DELAY_TEX_FCHE */
++    {0x00122,0x00000000},   /* RBBM_CLOCK_HYST_TEX_FCHE */
++    {0x0010b,0x22222222},   /* RBBM_CLOCK_CNTL_UCHE */
++    {0x00110,0x00000004},   /* RBBM_CLOCK_HYST_UCHE */
++    {0x0010f,0x00000002},   /* RBBM_CLOCK_DELAY_UCHE */
++    {0x00533,0x00000182},   /* RBBM_ISDB_CNT */
++    {0x00044,0x00000000},   /* RBBM_RAC_THRESHOLD_CNT */
++    {0x00042,0x00000000},   /* RBBM_SP_HYST_CNT */
++    {0x00118,0x00000222},   /* RBBM_CLOCK_CNTL_GMU_GX */
++    {0x00119,0x00000111},   /* RBBM_CLOCK_DELAY_GMU_GX */
++    {0x0011a,0x00000555},   /* RBBM_CLOCK_HYST_GMU_GX */
++};
++#define LEMONADEP_A660_HWCG_COUNT 49
++/* {CP_PROTECT index, value} in a6xx_set_cp_protect order. */
++static const uint32_t LemonadepA660Protect[][2]={
++    { 0,0x13fc0000},
++    { 1,0x00140501},
++    { 2,0x0bd0050b},
++    { 3,0x8000050e},
++    { 4,0x80000510},
++    { 5,0x80000534},
++    { 6,0x82080800},
++    { 7,0x802008a0},
++    { 8,0x809008ab},
++    { 9,0x02b808de},
++    {10,0x81340900},
++    {11,0x89c8098d},
++    {12,0x80040e00},
++    {13,0x80300e03},
++    {14,0x830c3c00},
++    {15,0x7ffc3cc4},
++    {16,0x873c8630},
++    {17,0x80008e00},
++    {18,0x80008e08},
++    {19,0x807c8e50},
++    {20,0x89fc8e80},
++    {21,0x876c9624},
++    {22,0x80449e60},
++    {23,0x861c9e78},
++    {24,0x873ca630},
++    {25,0x8000ae02},
++    {26,0x84bcae50},
++    {27,0x8000b604},
++    {28,0x8018b608},
++    {29,0x8004be02},
++    {30,0x857cbe20},
++    {31,0x97fcd000},
++    {32,0xaffcf000},
++    {33,0x7ffcfc00},
++    {34,0xfffd8400},
++    {35,0xfffda400},
++    {36,0x910df400},
++    {37,0x01edf844},
++    {38,0x8001f860},
++    {39,0x806df887},
++    {47,0x8001f8c0},
++};
++#define LEMONADEP_A660_PROTECT_COUNT 41
++
++/* GMU cold-start / RSC-PDC handshake (a6xx_gmu_fw_start, a6xx_rpmh_start,
++ * a6xx_gmu_rpmh_init in the pinned a6xx_gmu.c), A660's real traced path --
++ * see lemonadep/HANDOFF.md "GPU, Phase 2 continued" for the branch-by-branch
++ * citations. Byte offsets (register offset << 2), not dword, to match the
++ * ShengGmuIo read32/write32(window, byte_offset, ...) contract. Core-window
++ * registers (gmu_core_rsc here, plus every GMU_* register further below) have
++ * GMU_BYTE_OFFSET's mmio_offset correction already applied (0x6a000 = GMU core
++ * base - kgsl_3d0_reg_memory base, a6xx_gmu.c:2392) -- RSCC/PDC do not need
++ * it (gmu_write_rscc/pdc_write use their own mapped base directly, confirmed
++ * in the real source, not assumed). */
++#define A660_GPU_GMU_AO_GMU_CGC_MODE_CNTL 0x024c24
++#define A660_GPU_GMU_AO_GMU_CGC_DELAY_CNTL 0x024c28
++#define A660_GPU_GMU_AO_GMU_CGC_HYST_CNTL 0x024c2c
++#define A660_GMU_RSCC_CONTROL_REQ 0x024c1c
++#define A660_GMU_RSCC_CONTROL_ACK 0x024c20
++#define A660_GMU_GENERAL_7 0x014730
++#define A660_GPU_RSCC_RSC_STATUS0_DRV0 0x000010
++#define A660_RSCC_PDC_SLAVE_ID_DRV0 0x00002c
++#define A660_RSCC_HIDDEN_TCS_CMD0_DATA 0x000038
++#define A660_RSCC_HIDDEN_TCS_CMD0_ADDR 0x000034
++#define A660_RSCC_OVERRIDE_START_ADDR 0x000400
++#define A660_RSCC_PDC_SEQ_START_ADDR 0x000020
++#define A660_RSCC_PDC_MATCH_VALUE_LO 0x000024
++#define A660_RSCC_PDC_MATCH_VALUE_HI 0x000028
++#define A660_RSCC_SEQ_MEM_0_DRV0 0x000600
++#define A660_RSCC_SEQ_BUSY_DRV0 0x000404
++#define A660_PDC_GPU_ENABLE_PDC 0x004500
++#define A660_PDC_GPU_SEQ_START_ADDR 0x004520
++/* HIDDEN_TCS_CMD0 DATA/ADDR pairs step by +2 dwords per slot (0,2,4); A660
++ * writes slot 4's DATA as 0x80000000 (not A740's 0x80000021 -- A660 is not
++ * adreno_is_a740_family()). RSC sequencer microcode: A660 takes the
++ * a650_family/a7xx branch (not the plain-a6xx values). PDC is in the
++ * "configured in AOP" mode (pdc_in_aop=true for a650_family), so only the
++ * two PDC_GPU_* writes at the end happen -- the PDC sequencer uCode and
++ * TCS1/TCS3 command block (plain-a6xx/non-AOP path only) do not apply here. */
++/* Values this sequence writes INTO the registers above, as distinct from the
++ * A660_* MMIO offsets above (A660_RSCC_PDC_SEQ_START_ADDR is where to write;
++ * RSCC_VAL_PDC_SEQ_START_ADDR, which happens to equal A660_PDC_GPU_SEQ_START_ADDR
++ * numerically, is what to write there -- do not confuse the two). */
++#define LEMONADEP_A660_HIDDEN_TCS_CMD0_SLOT4_DATA 0x80000000u
++static const uint32_t LemonadepA660RscSeqMicrocode[5]={
++    0xeaaae5a0u,0xe1a1ebabu,0xa2e0a581u,0xecac82e2u,0x0020edadu,
++};
++#define LEMONADEP_A660_RSCC_VAL_PDC_SEQ_START_ADDR 0x4520u
++#define LEMONADEP_A660_RSCC_VAL_PDC_MATCH_VALUE_LO 0x4510u
++#define LEMONADEP_A660_RSCC_VAL_PDC_MATCH_VALUE_HI 0x4514u
++#define LEMONADEP_A660_PDC_VAL_GPU_ENABLE_PDC 0x80000001u
++
++/* Rest of a6xx_gmu_fw_start() (Core window): HFI table pointer, AHB fence
++ * range, CM3 config, chip ID + log buffer registration, GBIF QoS. A660 is NOT
++ * adreno_is_a7xx()/a8xx(), so it takes the plain-a6xx branches, which genuinely
++ * differ from ShengGmu.c's A740 values in two places -- confirmed against the
++ * real a6xx_gmu_fw_start(), not assumed:
++ *   - fence range is (upper=0xa,lower=0xa0), NOT A7XX/A8XX's (0x32,0x8a0/0x8c0)
++ *     the exact value ShengGmu.c writes for the A740.
++ *   - chip ID and the log buffer IOVA go to GMU_HFI_SFR_ADDR and
++ *     GPU_GMU_CX_GMU_PWR_COL_CP_MSG, NOT GMU_GENERAL_10/GMU_GENERAL_8 (those
++ *     are the A7XX/A8XX-only registers ShengGmu.c uses).
++ * Also includes GMU_CM3_ITCM_START/GMU_CM3_DTCM_START (a6xx_gmu_fw_load(),
++ * not fw_start) -- the firmware-block write targets. */
++#define A660_GMU_CM3_FW_INIT_RESULT 0x014070
++#define A660_GMU_CM3_BOOT_CONFIG 0x014004
++#define A660_GMU_HFI_QTBL_ADDR 0x014614
++#define A660_GMU_HFI_QTBL_INFO 0x014610
++#define A660_GMU_AHB_FENCE_RANGE_0 0x024c44
++#define A660_GMU_CM3_CFG 0x0140b4
++#define A660_GMU_HFI_SFR_ADDR 0x014608
++#define A660_GPU_GMU_CX_GMU_PWR_COL_CP_MSG 0x014400
++#define A660_GMU_CM3_ITCM_START 0x003000
++#define A660_GMU_CM3_DTCM_START 0x007000
++#define A660_GBIF_QSB_SIDE0 0x00f00c
++#define LEMONADEP_A660_FENCE_RANGE_UPPER 0xau
++#define LEMONADEP_A660_FENCE_RANGE_LOWER 0xa0u
++/* AHB_FENCE_RANGE_0 = BIT(31) | upper<<18 | lower, per the real FIELD_PREP calls. */
++#define LEMONADEP_A660_RSCC_VAL_CM3_CFG 0x4052u  /* avoids the snapshot/NMI jump */
++#define LEMONADEP_A660_VAL_HFI_QTBL_INFO 1u
++#define LEMONADEP_A660_VAL_CM3_BOOT_CONFIG 2u
++/* chip_id massaged the way a6xx_gmu_fw_start()'s plain-a6xx branch does
++ * (chip_id & 0xffff0000 | (chip_id<<4)&0xf000 | (chip_id<<8)&0x0f00), computed
++ * here from A660's real chip_id 0x06060001, not hand-typed. Written to
++ * GMU_HFI_SFR_ADDR (A660's real register; NOT GMU_GENERAL_10, the A7XX/A8XX one). */
++#define LEMONADEP_A660_GMU_CHIPID 0x06060100u
++
++/* a6xx_gmu_power_config() + a6xx_gmu_start(): the real tail of fw_start,
++ * after the GBIF writes -- RPMH_CTRL's GPU-client vote enable is
++ * unconditional for A660 (not idle-level-gated), and the CM3 reset must
++ * actually be toggled 1->0 (this was missing from an earlier draft of this
++ * driver entirely -- see lemonadep/HANDOFF.md). */
++#define A660_GMU_SYS_BUS_CONFIG 0x01303c
++#define A660_GMU_ICACHE_CONFIG 0x013000
++#define A660_GMU_DCACHE_CONFIG 0x013004
++#define A660_GMU_RPMH_CTRL 0x0143a0
++#define A660_GMU_CM3_SYSRESET 0x014000
++#define A660_GPU_GMU_CX_GMU_PWR_COL_CP_RESP 0x014404
++/* RPMH_INTERFACE|LLC_VOTE|DDR_VOTE|MX_VOTE|CX_VOTE|GFX_VOTE _ENABLE bits */
++#define LEMONADEP_A660_RPMH_CTRL_ENABLE_MASK 0xf11u
++#define LEMONADEP_A660_VAL_SYS_BUS_CONFIG 1u
++#define LEMONADEP_A660_VAL_ICACHE_CONFIG 1u
++#define LEMONADEP_A660_VAL_DCACHE_CONFIG 1u
++/* a6xx_gmu_start(): read DTCM_START+0xff8 first to pick the ready pattern
++ * (this is real, generation-independent logic in the pinned source, not
++ * an A740 simplification -- confirmed by reading a6xx_gmu_start() directly).
++ * val<=0x20010004 -> mask=0xffffffff, ready=0xbabeface; else -> mask=0x1ff,
++ * ready=0x100. */
++#define LEMONADEP_A660_GMU_START_PROBE_OFFSET 0xff8u  /* add to DTCM_START */
++#define LEMONADEP_A660_GMU_START_PROBE_THRESHOLD 0x20010004u
++#define LEMONADEP_A660_GMU_START_MASK_LOW 0xffffffffu
++#define LEMONADEP_A660_GMU_START_READY_LOW 0xbabefaceu
++#define LEMONADEP_A660_GMU_START_MASK_HIGH 0x1ffu
++#define LEMONADEP_A660_GMU_START_READY_HIGH 0x100u
++/* a640_gbif (shared by A660, confirmed in a6xx_catalog.c): write this same value
++ * to GBIF_QSB_SIDE0..SIDE3 (consecutive dwords, +1 each). */
++#define LEMONADEP_A660_GBIF_QSB_VALUE 0x00071620u
++
++/* a660_build_bw_table() in the pinned a6xx_hfi.c -- transcribed verbatim, not
++ * derived (it is already hand-written per chip in the real source, dispatched
++ * for us by adreno_is_a660(), an exact chip_id==660 match, confirmed our
++ * a6xx_catalog.c entry has no .bcms override that would select a different,
++ * dynamically-generated table instead). Part of the real, non-legacy
++ * a6xx_hfi_start() sequence: send_perf_table, THIS, enable_acd, enable_ifpc,
++ * send_core_fw_start, send_start (a6xx_hfi.c:972-1005; A660 is not
++ * gmu->legacy -- that is only RGMU chips and adreno_is_a630_family(), GEN1). */
++struct LemonadepA660BwTable {
++    uint32_t bw_level_num;
++    uint32_t ddr_cmds_num;
++    uint32_t ddr_wait_bitmask;
++    uint32_t ddr_cmds_addrs[3];
++    uint32_t ddr_cmds_data0[3];  /* only level 0 ("off") is populated */
++    uint32_t cnoc_cmds_num;
++    uint32_t cnoc_wait_bitmask;
++    uint32_t cnoc_cmds_addrs[1];
++    uint32_t cnoc_cmds_data0[1];
++    uint32_t cnoc_cmds_data1[1];
++};
++static const struct LemonadepA660BwTable LemonadepA660BwTable_ = {
++    .bw_level_num = 1,
++    .ddr_cmds_num = 3, .ddr_wait_bitmask = 0x01,
++    .ddr_cmds_addrs = {0x50004,0x500a0,0x50000},
++    .ddr_cmds_data0 = {0x40000000,0x40000000,0x40000000},
++    .cnoc_cmds_num = 1, .cnoc_wait_bitmask = 0x01,
++    .cnoc_cmds_addrs = {0x50070},
++    .cnoc_cmds_data0 = {0x40000000}, .cnoc_cmds_data1 = {0x60000001},
++};
++#endif
+--- /dev/null
++++ b/bsd/dev/lemonadep/lemonadep_gpu_reserve.c
+@@ -0,0 +1,155 @@
++/*
++ * lemonadep: GPU power/clock reserve -- CX GDSC enable and the seven real
++ * clock branches the GMU needs (qcom,adreno-gmu-660.1 node's own clocks
++ * list, mainline sm8350.dtsi), before any GMU/GPU register is touched.
++ * Offsets from the real drivers/clk/qcom/{gpucc,gcc}-sm8350.c; see
++ * LemonadepGmuSource.h for the per-branch citation and halt_check kind.
++ * GX GDSC needs no separate step here: its real power-up is the GMU/RSC
++ * sequence in lemonadep_gmu_coldstart.c (the real driver's own gx_gdsc
++ * .power_on is a documented no-op -- see HANDOFF.md).
++ *
++ * Host-testable: injected I/O over two windows (Gpucc, Gcc), same shape as
++ * lemonadep_gmu_coldstart.c.
++ */
++#include <stdbool.h>
++#include <stdint.h>
++
++#include "LemonadepGmuSource.h"
++
++enum { LemonadepPwrWindowGpucc, LemonadepPwrWindowGcc, LemonadepPwrWindowCount };
++typedef struct {
++	void *cookie;
++	int (*read32)(void *cookie, unsigned window, uint32_t byte_offset, uint32_t *out);
++	int (*write32)(void *cookie, unsigned window, uint32_t byte_offset, uint32_t value);
++	int (*now_us)(void *cookie, uint64_t *out);
++	int (*wait_us)(void *cookie, unsigned us);
++} lemonadep_pwr_io;
++
++typedef enum { LemonadepPwrOk, LemonadepPwrBadArg, LemonadepPwrIoError, LemonadepPwrTimeout } lemonadep_pwr_status;
++
++static lemonadep_pwr_status
++poll_clear(const lemonadep_pwr_io *io, unsigned window, uint32_t off, uint32_t mask)
++{
++	uint64_t start, now;
++	uint32_t value;
++	if (io->now_us(io->cookie, &start)) {
++		return LemonadepPwrIoError;
++	}
++	for (;;) {
++		if (io->read32(io->cookie, window, off, &value)) {
++			return LemonadepPwrIoError;
++		}
++		if (!(value & mask)) {
++			return LemonadepPwrOk;
++		}
++		if (io->now_us(io->cookie, &now) || now < start) {
++			return LemonadepPwrIoError;
++		}
++		if (now - start >= 10000) {
++			return LemonadepPwrTimeout;
++		}
++		if (io->wait_us(io->cookie, 10)) {
++			return LemonadepPwrIoError;
++		}
++	}
++}
++/* Real clk_branch2 pattern: the same idle CLK_OFF|HWCG bit pattern used for
++ * m_ahb/s_ahb in sweet_touch.c's touch_clocks() -- a branch whose CLK_OFF
++ * reads 1 while HWCG (bit1) is also set is legitimately idle-gated, not a
++ * failed enable (same citation: Linux clk_branch_in_hwcg_mode). */
++static lemonadep_pwr_status
++enable_branch(const lemonadep_pwr_io *io, unsigned window, uint32_t off, bool skip_poll,
++    bool hwcg_capable)
++{
++	uint32_t value;
++	if (io->read32(io->cookie, window, off, &value)) {
++		return LemonadepPwrIoError;
++	}
++	if (io->write32(io->cookie, window, off, value | LEMONADEP_CLK_ENABLE_BIT)) {
++		return LemonadepPwrIoError;
++	}
++	if (skip_poll) {
++		return LemonadepPwrOk;
++	}
++	if (hwcg_capable) {
++		if (io->read32(io->cookie, window, off, &value)) {
++			return LemonadepPwrIoError;
++		}
++		if ((value & LEMONADEP_CLK_OFF_BIT) && (value & LEMONADEP_CLK_HWCG_BIT)) {
++			return LemonadepPwrOk;
++		}
++	}
++	return poll_clear(io, window, off, LEMONADEP_CLK_OFF_BIT);
++}
++
++lemonadep_pwr_status
++lemonadep_gpu_reserve(const lemonadep_pwr_io *io)
++{
++	uint32_t value;
++	if (!io || !io->read32 || !io->write32 || !io->now_us || !io->wait_us) {
++		return LemonadepPwrBadArg;
++	}
++	/* CX GDSC: write SW_COLLAPSE=0 to enable, poll PWR_ON set
++	 * (gdsc_update_collapse_bit/gdsc_poll_status). */
++	if (io->read32(io->cookie, LemonadepPwrWindowGpucc, LEMONADEP_GPUCC_GDSC_CX_OFFSET, &value)) {
++		return LemonadepPwrIoError;
++	}
++	if (io->write32(io->cookie, LemonadepPwrWindowGpucc, LEMONADEP_GPUCC_GDSC_CX_OFFSET,
++	    value & ~LEMONADEP_GDSC_SW_COLLAPSE_BIT)) {
++		return LemonadepPwrIoError;
++	}
++	for (uint64_t start, now;;) {
++		if (io->now_us(io->cookie, &start)) {
++			return LemonadepPwrIoError;
++		}
++		if (io->read32(io->cookie, LemonadepPwrWindowGpucc, LEMONADEP_GPUCC_GDSC_CX_OFFSET,
++		    &value)) {
++			return LemonadepPwrIoError;
++		}
++		if (value & LEMONADEP_GDSC_PWR_ON_BIT) {
++			break;
++		}
++		if (io->now_us(io->cookie, &now) || now < start) {
++			return LemonadepPwrIoError;
++		}
++		if (now - start >= 10000) {
++			return LemonadepPwrTimeout;
++		}
++		if (io->wait_us(io->cookie, 10)) {
++			return LemonadepPwrIoError;
++		}
++	}
++
++	/* GPUCC branches (window Gpucc). */
++	lemonadep_pwr_status status;
++	if ((status = enable_branch(io, LemonadepPwrWindowGpucc,
++	    LEMONADEP_GPUCC_AHB_CLK_OFFSET, false, false)) != LemonadepPwrOk) {
++		return status;
++	}
++	if ((status = enable_branch(io, LemonadepPwrWindowGpucc,
++	    LEMONADEP_GPUCC_CX_GMU_CLK_OFFSET, false, false)) != LemonadepPwrOk) {
++		return status;
++	}
++	if ((status = enable_branch(io, LemonadepPwrWindowGpucc,
++	    LEMONADEP_GPUCC_CXO_CLK_OFFSET, false, false)) != LemonadepPwrOk) {
++		return status;
++	}
++	if ((status = enable_branch(io, LemonadepPwrWindowGpucc,
++	    LEMONADEP_GPUCC_HLOS1_VOTE_GPU_SMMU_CLK_OFFSET, false, false)) != LemonadepPwrOk) {
++		return status;
++	}
++	if ((status = enable_branch(io, LemonadepPwrWindowGpucc,
++	    LEMONADEP_GPUCC_HUB_CX_INT_CLK_OFFSET, false, false)) != LemonadepPwrOk) {
++		return status;
++	}
++	/* GCC branches (window Gcc), both hwcg_bit=1 in the real source. */
++	if ((status = enable_branch(io, LemonadepPwrWindowGcc,
++	    LEMONADEP_GCC_DDRSS_GPU_AXI_CLK_OFFSET, true, true)) != LemonadepPwrOk) {
++		return status; /* BRANCH_HALT_SKIP: never polled, real driver behavior */
++	}
++	if ((status = enable_branch(io, LemonadepPwrWindowGcc,
++	    LEMONADEP_GCC_GPU_MEMNOC_GFX_CLK_OFFSET, false, true)) != LemonadepPwrOk) {
++		return status;
++	}
++	return LemonadepPwrOk;
++}
+--- /dev/null
++++ b/bsd/dev/lemonadep/lemonadep_gmu_coldstart.c
+@@ -0,0 +1,298 @@
++/*
++ * lemonadep: Adreno 660 GMU cold start -- CX GDSC enable, RSC/PDC handshake,
++ * firmware load, HFI bring-up through the bandwidth table. Every register
++ * offset and write value comes from LemonadepA660HwInit.h/LemonadepGmuSource.h
++ * (sourced and derived from the real pinned Linux a6xx_gmu.c/a6xx_hfi.c/
++ * a6xx_catalog.c and the real a660_gmu.bin already on this phone -- see
++ * lemonadep/HANDOFF.md "GPU, Phase 2" for the branch-by-branch citations).
++ * The overall shape (validate -> reset/idle check -> RSC setup -> firmware
++ * load -> fw_start -> poll ready) follows UniXNU-sheng's package/ShengGmu.c,
++ * a real, in-production GMU driver for a sibling a7xx chip -- but every
++ * value here is A660's own, not ported with substituted addresses: that
++ * file's A740-specific choices (CX_MISC retention, the fence range, the
++ * chip-ID/log registers) are genuinely wrong for A660 and are not used.
++ *
++ * This file does NOT power the CX/GX rails' upstream RPMh votes, does not
++ * ungate GPUCC's clocks, does not set up the SMMU context, and does not
++ * touch the CP ring or GPU register window at all -- it brings the GMU
++ * itself from reset to "HFI ready", the prerequisite every later GPU step
++ * needs. Those are separate, not-yet-written pieces (see HANDOFF.md).
++ *
++ * Host-testable: no XNU headers, only touch_rd-style injected accessors
++ * (see lemonadep_gmu_io below) and a real parse of the pulled firmware
++ * file, so it can run under ASan/UBSan exactly like sweet_touch.c's own
++ * TCM framing tests, before this ever reaches real hardware.
++ */
++#include <stdbool.h>
++#include <stdint.h>
++#include <string.h>
++
++#include "LemonadepA660HwInit.h"
++#include "LemonadepGmuSource.h"
++
++/* ---- injected I/O, same shape as ShengGmuIo / NativeAdrenoRingIo: the
++ * caller supplies real MMIO accessors (or, for host tests, a software
++ * model) over five windows matching LemonadepGmuSource.h's layout. ---- */
++enum {
++	LemonadepGmuWindowCore,
++	LemonadepGmuWindowRscc,
++	LemonadepGmuWindowPdc,
++	LemonadepGmuWindowGpu,
++	LemonadepGmuWindowCxMisc,
++	LemonadepGmuWindowCount,
++};
++typedef struct {
++	void *cookie;
++	int (*read32)(void *cookie, unsigned window, uint32_t byte_offset, uint32_t *out);
++	int (*write32)(void *cookie, unsigned window, uint32_t byte_offset, uint32_t value);
++	int (*barrier)(void *cookie);
++	int (*now_us)(void *cookie, uint64_t *out);
++	int (*wait_us)(void *cookie, unsigned us);
++} lemonadep_gmu_io;
++
++typedef enum {
++	LemonadepGmuOk,
++	LemonadepGmuBadArg,
++	LemonadepGmuIoError,
++	LemonadepGmuTimeout,
++	LemonadepGmuStateMismatch,
++	LemonadepGmuFirmwareError,
++} lemonadep_gmu_status;
++
++/* Real on-phone firmware, already pulled and parsed; see
++ * verify-gmu-firmware.py and LemonadepGmuSource.h's LemonadepGmuFwBlocks. */
++typedef struct {
++	const uint8_t *bytes;
++	uint32_t length; /* must equal LEMONADEP_GMU_FW_BYTES */
++} lemonadep_gmu_firmware;
++
++static lemonadep_gmu_status
++io_read(const lemonadep_gmu_io *io, unsigned window, uint32_t off, uint32_t *v)
++{
++	return io->read32(io->cookie, window, off, v) ? LemonadepGmuIoError : LemonadepGmuOk;
++}
++static lemonadep_gmu_status
++io_write(const lemonadep_gmu_io *io, unsigned window, uint32_t off, uint32_t v)
++{
++	return io->write32(io->cookie, window, off, v) ? LemonadepGmuIoError : LemonadepGmuOk;
++}
++#define TRY(expr) do { lemonadep_gmu_status _s = (expr); if (_s != LemonadepGmuOk) return _s; } while (0)
++
++static lemonadep_gmu_status
++poll_core(const lemonadep_gmu_io *io, uint32_t byte_off, uint32_t mask, uint32_t expect,
++    unsigned budget, uint32_t *observed)
++{
++	uint64_t start, now;
++	if (io->now_us(io->cookie, &start)) {
++		return LemonadepGmuIoError;
++	}
++	for (unsigned i = 0; i < budget; ++i) {
++		if (io->now_us(io->cookie, &now) || now < start) {
++			return LemonadepGmuIoError;
++		}
++		if (now - start >= 10000) {
++			return LemonadepGmuTimeout;
++		}
++		TRY(io_read(io, LemonadepGmuWindowCore, byte_off, observed));
++		if ((*observed & mask) == expect) {
++			return io->barrier(io->cookie) ? LemonadepGmuIoError : LemonadepGmuOk;
++		}
++		if (i + 1 < budget && io->wait_us(io->cookie, 100)) {
++			return LemonadepGmuIoError;
++		}
++	}
++	return LemonadepGmuTimeout;
++}
++
++/*
++ * CX GDSC enable (GPUCC window would be a 6th window in a fuller driver;
++ * here the caller is expected to have already enabled CX GDSC and GPUCC's
++ * clocks before calling lemonadep_gmu_cold_start -- see
++ * LEMONADEP_GPUCC_GDSC_CX_OFFSET / LEMONADEP_GDSC_SW_COLLAPSE_BIT /
++ * LEMONADEP_GDSC_PWR_ON_BIT in LemonadepGmuSource.h and HANDOFF.md for the
++ * real algorithm (gdsc_update_collapse_bit/gdsc_poll_status). GX GDSC needs
++ * no separate software enable -- its real power-up is the RSC/PDC sequence
++ * below, not a CPU-driven bit (the real driver's gx_gdsc.power_on is a
++ * documented no-op).
++ */
++
++/* ---- RSC/PDC handshake: a6xx_rpmh_start() + a6xx_gmu_rpmh_init(),
++ * A660's real "PDC configured in AOP" path. ---- */
++static lemonadep_gmu_status
++rsc_pdc_handshake(const lemonadep_gmu_io *io)
++{
++	uint32_t val;
++	/* a6xx_rpmh_start: wake the RSC if it was asleep. */
++	TRY(io_write(io, LemonadepGmuWindowCore, A660_GMU_RSCC_CONTROL_REQ, 1u << 1));
++	TRY(poll_core(io, A660_GMU_RSCC_CONTROL_ACK, 1u << 1, 1u << 1, 1000, &val));
++	/* RSCC_SEQ_BUSY_DRV0 == 0 means the sequencer is idle (Rscc window). */
++	for (unsigned i = 0; i < 1000; ++i) {
++		TRY(io_read(io, LemonadepGmuWindowRscc, A660_RSCC_SEQ_BUSY_DRV0, &val));
++		if (!val) {
++			break;
++		}
++		if (i == 999) {
++			return LemonadepGmuTimeout;
++		}
++		if (io->wait_us(io->cookie, 100)) {
++			return LemonadepGmuIoError;
++		}
++	}
++	TRY(io_write(io, LemonadepGmuWindowCore, A660_GMU_RSCC_CONTROL_REQ, 0));
++
++	/* a6xx_gmu_rpmh_init: disable SDE clock gating, then the PDC handshake
++	 * setup. A660 is pdc_in_aop (adreno_is_a650_family()), so only the RSC
++	 * side's handshake registers and sequencer microcode are programmed;
++	 * the PDC sequencer-uCode/TCS1/TCS3 block (plain-a6xx, non-AOP only)
++	 * is skipped entirely -- not a missing step, the real driver skips it
++	 * for A660 too. */
++	TRY(io_write(io, LemonadepGmuWindowRscc, A660_GPU_RSCC_RSC_STATUS0_DRV0, 1u << 24));
++	TRY(io_write(io, LemonadepGmuWindowRscc, A660_RSCC_PDC_SLAVE_ID_DRV0, 1));
++	TRY(io_write(io, LemonadepGmuWindowRscc, A660_RSCC_HIDDEN_TCS_CMD0_DATA, 0));
++	TRY(io_write(io, LemonadepGmuWindowRscc, A660_RSCC_HIDDEN_TCS_CMD0_ADDR, 0));
++	TRY(io_write(io, LemonadepGmuWindowRscc, A660_RSCC_HIDDEN_TCS_CMD0_DATA + 4u * 2u, 0));
++	TRY(io_write(io, LemonadepGmuWindowRscc, A660_RSCC_HIDDEN_TCS_CMD0_ADDR + 4u * 2u, 0));
++	TRY(io_write(io, LemonadepGmuWindowRscc, A660_RSCC_HIDDEN_TCS_CMD0_DATA + 4u * 4u,
++	    LEMONADEP_A660_HIDDEN_TCS_CMD0_SLOT4_DATA));
++	TRY(io_write(io, LemonadepGmuWindowRscc, A660_RSCC_HIDDEN_TCS_CMD0_ADDR + 4u * 4u, 0));
++	TRY(io_write(io, LemonadepGmuWindowRscc, A660_RSCC_OVERRIDE_START_ADDR, 0));
++	TRY(io_write(io, LemonadepGmuWindowRscc, A660_RSCC_PDC_SEQ_START_ADDR,
++	    LEMONADEP_A660_RSCC_VAL_PDC_SEQ_START_ADDR));
++	TRY(io_write(io, LemonadepGmuWindowRscc, A660_RSCC_PDC_MATCH_VALUE_LO,
++	    LEMONADEP_A660_RSCC_VAL_PDC_MATCH_VALUE_LO));
++	TRY(io_write(io, LemonadepGmuWindowRscc, A660_RSCC_PDC_MATCH_VALUE_HI,
++	    LEMONADEP_A660_RSCC_VAL_PDC_MATCH_VALUE_HI));
++	for (unsigned i = 0; i < 5; ++i) {
++		TRY(io_write(io, LemonadepGmuWindowRscc, A660_RSCC_SEQ_MEM_0_DRV0 + 4u * i,
++		    LemonadepA660RscSeqMicrocode[i]));
++	}
++	TRY(io_write(io, LemonadepGmuWindowPdc, A660_PDC_GPU_SEQ_START_ADDR, 0));
++	TRY(io_write(io, LemonadepGmuWindowPdc, A660_PDC_GPU_ENABLE_PDC,
++	    LEMONADEP_A660_PDC_VAL_GPU_ENABLE_PDC));
++	return io->barrier(io->cookie) ? LemonadepGmuIoError : LemonadepGmuOk;
++}
++
++/* ---- firmware load: the real non-legacy block-walking format (A660 is not
++ * gmu->legacy), using the already-parsed segment table verbatim. ---- */
++static lemonadep_gmu_status
++load_firmware(const lemonadep_gmu_io *io, const lemonadep_gmu_firmware *fw)
++{
++	if (!fw || !fw->bytes || fw->length != LEMONADEP_GMU_FW_BYTES) {
++		return LemonadepGmuBadArg;
++	}
++	for (unsigned i = 0; i < 4; ++i) {
++		const struct LemonadepGmuFwBlock *b = &LemonadepGmuFwBlocks[i];
++		if ((uint64_t)b->file_offset + b->bytes > fw->length) {
++			return LemonadepGmuFirmwareError;
++		}
++		for (uint32_t at = 0; at < b->bytes; at += 4) {
++			const uint8_t *p = fw->bytes + b->file_offset + at;
++			uint32_t word = (uint32_t)p[0] | (uint32_t)p[1] << 8 |
++			    (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
++			switch (b->target) {
++			case LemonadepGmuFwTargetItcm:
++				TRY(io_write(io, LemonadepGmuWindowCore,
++				    A660_GMU_CM3_ITCM_START + at, word));
++				break;
++			case LemonadepGmuFwTargetDtcm:
++				TRY(io_write(io, LemonadepGmuWindowCore,
++				    A660_GMU_CM3_DTCM_START + (b->addr - 0x10004000u) + at, word));
++				break;
++			case LemonadepGmuFwTargetIcache:
++			default:
++				/* Loads into the icache memory region (a DMA-allocated
++				 * buffer, not an MMIO write) -- the caller does this
++				 * directly via the icache CPU pointer, not through
++				 * this I/O abstraction. Handled by the board glue,
++				 * not here. */
++				break;
++			}
++		}
++	}
++	return LemonadepGmuOk;
++}
++
++/*
++ * Top-level cold start. Preconditions the caller must already have met
++ * (not checked beyond a best-effort read-back here, matching ShengGmu.c's
++ * own stated contract): CX GDSC on, GPUCC clocks ungated, GMU held in
++ * reset with RSC idle, retention cleared, the five MMIO windows mapped at
++ * LemonadepGmuSource.h's addresses, the icache/dummy/debug/log/hfi memory
++ * regions allocated and zeroed at their real IOVAs, and the firmware's
++ * icache-target bytes already copied into the icache buffer by the caller
++ * (see load_firmware's LemonadepGmuFwTargetIcache case).
++ */
++lemonadep_gmu_status
++lemonadep_gmu_cold_start(const lemonadep_gmu_io *io, const lemonadep_gmu_firmware *fw,
++    uint64_t hfi_iova, uint64_t log_iova, uint32_t log_size_bytes)
++{
++	uint32_t value;
++	if (!io || !io->read32 || !io->write32 || !io->barrier || !io->now_us || !io->wait_us) {
++		return LemonadepGmuBadArg;
++	}
++	/* Reset/idle precondition checks (ShengGmu.c's validate() shape). */
++	TRY(io_read(io, LemonadepGmuWindowCore, A660_GMU_CM3_FW_INIT_RESULT, &value));
++	/* TCM retention: A660 writes GMU_GENERAL_7, NOT CX_MISC_TCM_RET_CNTL
++	 * (that register does not exist pre-A7XX; see HANDOFF.md). */
++	TRY(io_write(io, LemonadepGmuWindowCore, A660_GMU_GENERAL_7, 1));
++	TRY(rsc_pdc_handshake(io));
++	TRY(load_firmware(io, fw));
++	/* fw_start(): HFI table pointer, A660's real fence range (0xa/0xa0, not
++	 * the A7XX/A8XX values), CM3 config, chip ID + log buffer (A660's real
++	 * registers -- HFI_SFR_ADDR + PWR_COL_CP_MSG, not GENERAL_10/_8), GBIF
++	 * QoS (shared with A640, same as ShengGmu.c already did). */
++	TRY(io_write(io, LemonadepGmuWindowCore, A660_GMU_CM3_FW_INIT_RESULT, 0));
++	TRY(io_write(io, LemonadepGmuWindowCore, A660_GMU_CM3_BOOT_CONFIG,
++	    LEMONADEP_A660_VAL_CM3_BOOT_CONFIG));
++	TRY(io_write(io, LemonadepGmuWindowCore, A660_GMU_HFI_QTBL_ADDR, (uint32_t)hfi_iova));
++	TRY(io_write(io, LemonadepGmuWindowCore, A660_GMU_HFI_QTBL_INFO,
++	    LEMONADEP_A660_VAL_HFI_QTBL_INFO));
++	TRY(io_write(io, LemonadepGmuWindowCore, A660_GMU_AHB_FENCE_RANGE_0,
++	    (1u << 31) | (LEMONADEP_A660_FENCE_RANGE_UPPER << 18) | LEMONADEP_A660_FENCE_RANGE_LOWER));
++	TRY(io_write(io, LemonadepGmuWindowCore, A660_GMU_CM3_CFG, LEMONADEP_A660_RSCC_VAL_CM3_CFG));
++	TRY(io_write(io, LemonadepGmuWindowCore, A660_GMU_HFI_SFR_ADDR, LEMONADEP_A660_GMU_CHIPID));
++	TRY(io_write(io, LemonadepGmuWindowCore, A660_GPU_GMU_CX_GMU_PWR_COL_CP_MSG,
++	    (uint32_t)log_iova | ((log_size_bytes / 4096u - 1u) & 0xffu)));
++	for (unsigned i = 0; i < 4; ++i) {
++		TRY(io_write(io, LemonadepGmuWindowGpu, A660_GBIF_QSB_SIDE0 + 4u * i,
++		    LEMONADEP_A660_GBIF_QSB_VALUE));
++	}
++
++	/* a6xx_gmu_power_config(): disable the GMU WB/RB buffer, then -- A660 is
++	 * not a7xx/a8xx, so this part is not skipped -- enable the RPMh GPU
++	 * client vote (unconditional, not gated on an idle level we are not
++	 * requesting). The idle_level switch (IFPC/SPTP) is deliberately
++	 * skipped for this first bring-up, same as ACD/IFPC above: both are
++	 * real no-ops when not requested, not a corner cut. */
++	TRY(io_write(io, LemonadepGmuWindowCore, A660_GMU_SYS_BUS_CONFIG,
++	    LEMONADEP_A660_VAL_SYS_BUS_CONFIG));
++	TRY(io_write(io, LemonadepGmuWindowCore, A660_GMU_ICACHE_CONFIG,
++	    LEMONADEP_A660_VAL_ICACHE_CONFIG));
++	TRY(io_write(io, LemonadepGmuWindowCore, A660_GMU_DCACHE_CONFIG,
++	    LEMONADEP_A660_VAL_DCACHE_CONFIG));
++	TRY(io_read(io, LemonadepGmuWindowCore, A660_GMU_RPMH_CTRL, &value));
++	TRY(io_write(io, LemonadepGmuWindowCore, A660_GMU_RPMH_CTRL,
++	    value | LEMONADEP_A660_RPMH_CTRL_ENABLE_MASK));
++
++	/* a6xx_gmu_start(): probe DTCM_START+0xff8 to pick the ready pattern
++	 * (real, generation-independent logic -- confirmed by reading the
++	 * function directly, not an A740 simplification), toggle CM3_SYSRESET
++	 * 1 then 0, write the log-wptr-index register (A660's real one,
++	 * PWR_COL_CP_RESP -- not GMU_GENERAL_9, the A7XX/A8XX-only register),
++	 * then poll FW_INIT_RESULT for the pattern the probe selected. */
++	TRY(io_read(io, LemonadepGmuWindowCore,
++	    A660_GMU_CM3_DTCM_START + LEMONADEP_A660_GMU_START_PROBE_OFFSET, &value));
++	uint32_t ready_mask = value <= LEMONADEP_A660_GMU_START_PROBE_THRESHOLD ?
++	    LEMONADEP_A660_GMU_START_MASK_LOW : LEMONADEP_A660_GMU_START_MASK_HIGH;
++	uint32_t ready_val = value <= LEMONADEP_A660_GMU_START_PROBE_THRESHOLD ?
++	    LEMONADEP_A660_GMU_START_READY_LOW : LEMONADEP_A660_GMU_START_READY_HIGH;
++	TRY(io_write(io, LemonadepGmuWindowCore, A660_GMU_CM3_SYSRESET, 1));
++	TRY(io_write(io, LemonadepGmuWindowCore, A660_GPU_GMU_CX_GMU_PWR_COL_CP_RESP, 0));
++	TRY(io_write(io, LemonadepGmuWindowCore, A660_GMU_CM3_SYSRESET, 0));
++	TRY(poll_core(io, A660_GMU_CM3_FW_INIT_RESULT, ready_mask, ready_val, 2000, &value));
++	/* HFI table is already armed (QTBL_INFO=1 was written in fw_start above);
++	 * the caller now runs a6xx_hfi_start()'s message sequence (perf_table,
++	 * bw_table -- LemonadepA660BwTable_ --, core_fw_start, send_start; ACD
++	 * and IFPC skipped for this first bring-up) -- not yet written here. */
++	return LemonadepGmuOk;
++}

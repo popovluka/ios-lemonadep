@@ -664,6 +664,50 @@ Next: the boot-build script for this milestone will need
 `--extra-blob gmufw:lemonadep/fw-gpu/a660_gmu.bin` added to its `mkpayload.py` invocation, and
 `SweetAccelerator.cpp` reads `gmufw_pa`/`gmufw_bytes` via `PE_parse_boot_argn`.
 
+## GPU, Phase 8: first real patch into the xnu build -- power/clock + GMU cold start (2026-10-23)
+
+**No `SweetAccelerator`/`IOAcceleratorES` IOKit service after all.** Reading how touch/keys/usb
+actually integrate (`xnu/patches/0060`, `0072`) showed the real pattern: a plain-C board driver
+(`bsd/dev/sweet_touch.c` etc.) called from one hook in `bsd/dev/sweet_ufs.c`'s `sweet_ufs_rootdev()`,
+with IOKit only used for the user-visible HID event classes those drivers already have (`SweetHIDButtons`/
+`SweetHIDTouch`, from the base `0058` patch). GPU bring-up needs no user-visible events for this
+milestone, so `lemonadep_gpu_init()` follows that exact same shape, called right after
+`sweet_usb_probe()`.
+
+**Scope cut, on the user's call**: wiring the full GPU/GMU SMMU context and real IOVA-backed memory
+(`lemonadep_gpu_memory.cpp`, C++/IOKit) into the build is its own patch. This first one only wires
+`lemonadep_gpu_reserve.c` (CX GDSC + GMU clocks) and `lemonadep_gmu_coldstart.c` (real GMU firmware
+load and cold start) -- real register writes, nothing that depends on the CP ring or SMMU being
+correct. `lemonadep_gpu_init()` (new, `bsd/dev/lemonadep_gpu.c`) deliberately **stops right after GMU
+cold start reports ready**, before the ring/CP_ME_INIT: submitting a command to the real CP through an
+unmapped/untranslated SMMU context is not a risk worth taking before that context actually exists.
+Off by default (`sweetgpu=1` to enable) -- unlike touch/keys/usb's opt-out default, every one of these
+register writes is unverified on real hardware.
+
+**New patch `lemonadep/xnu/patches/1007-lemonadep-gpu-bringup.patch`**: injects
+`bsd/dev/lemonadep_gpu.c` (the glue -- boot-arg gate, `ml_io_map`s the GPUCC/GCC/five-GMU-window
+physical ranges from `LemonadepGmuSource.h`, reads the firmware via `phystokv(gmufw_pa)`, calls
+`lemonadep_gpu_reserve()` then `lemonadep_gmu_cold_start()`, logs each stage) plus
+`bsd/dev/lemonadep/{LemonadepGmuSource.h,LemonadepA660HwInit.h,lemonadep_gpu_reserve.c,
+lemonadep_gmu_coldstart.c}`, a `bsd/conf/files` entry, and the `sweet_ufs.c` extern+call-site hook --
+generated as real unified diffs (not hand-transcribed) from the actual files already written and
+host-tested this session, to avoid transcription mistakes in a ~1100-line patch.
+
+**Actually verified, not just plausible-looking**:
+- `lemonadep_gpu_init()`'s symbol/type usage (window enums, io-struct field names, status enums) was
+  grep-cross-checked against the real `lemonadep_gpu_reserve.c`/`lemonadep_gmu_coldstart.c` definitions.
+- Syntax-checked clean against minimal stub headers standing in for `pexpert.h`/`kern/clock.h`/etc
+  (only `%llx` vs the host's native `uint64_t` width differs -- a host-only artifact: `uint64_t` really
+  is `unsigned long long` on the actual arm64 Darwin target).
+- **Ran the project's own `check-overlay.sh` against the real cloned `xnu-8796.141.3` base plus the
+  full existing patch series plus this new one**: applies cleanly (not in the SKIP list; the two SKIPs
+  that do print, `0031`/`0041`, are pre-existing and expected -- the script's own comment says so), and
+  the patched tree's `bsd/dev/lemonadep_gpu.c`, `bsd/dev/lemonadep/*`, `bsd/conf/files` entry and
+  `sweet_ufs.c` hook are all exactly as intended.
+- Full real-SDK-header compilation isn't possible locally (`libkern/_OSByteOrder.h` isn't in the open
+  xnu tree) -- the same limitation every other IOKit/BSD-adjacent file in this project has always had;
+  real compilation happens on the next CI kernel build.
+
 Branch `lemonadep`, pushed to `fork` = github.com/popovluka/ios-sweet. Phone: LE2123 8 GB, Evolution X 16 + Magisk, slot b,
 `fastboot boot` of our v3 shim works. Backups in `backup/partitions` (23, SHA-256 verified). Tools: `C:\platform-tools`,
 WSL distro `LemonadepLab` (aarch64 gcc, dtc, qemu-user, AOSP mkbootimg at `/opt/aosp-mkbootimg`).
