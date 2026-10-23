@@ -91,7 +91,7 @@ verified on a host (WSL `LemonadepLab`, Ubuntu 24.04), not on the phone.
 | M2 | ~~**UFS mounts the iOS root**~~ **DONE 2026-10-22**: iOS root built (lemonadep/m2-build-macbook.sh), flashed to `userdata` | sweet UFS/HFS patches, unchanged, worked as-is | flash iOS root to `userdata`: **done, erased Android data** |
 | M3 | ~~**Lock screen**~~ **DONE 2026-10-22**: boots through to the rendered lock screen (time, status bar, slide bar, home indicator) | fixed boot-args (`unentitled_ios_sim_launch=1 ignition_level=1`); overlay 1003 turned out **not needed**, native FHD geometry rendered correctly as-is | no |
 | M4 | **Touch** | **DONE, confirmed on-device 2026-10-23**: S3908 TCM over bit-banged I2C, eGPIO pad claimed (gpio197), coordinates scaled from the 1440x3216 digitizer to the real panel. Settings app navigated by touch while keys also worked | yes |
-| M5 | **Home screen** (unlock, swipe, keys) | overlay 1004 (keys, PMK8350 PON + PM8350 GPIO6) written and passes `check-overlay.sh`; CI kernel build in progress; **not yet booted on-device** | no |
+| M5 | ~~**Home screen**~~ **DONE, confirmed on-device 2026-10-23**: overlay 1004 (keys, PMK8350 PON + PM8350 GPIO6), unlock/swipe/keys all confirmed working together with touch | no |
 
 ## 4. On-device checklist
 
