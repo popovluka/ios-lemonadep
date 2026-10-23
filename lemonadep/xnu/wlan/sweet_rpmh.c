@@ -192,6 +192,16 @@ rh_lookup(const char *res, uint32_t *address)
 				printf("SWEET RPMH: invalid VRM entry for %s\n", res);
 				return EINVAL;
 			}
+			/*
+			 * This phone's cmd-db lists smpe2 twice with the same address
+			 * (logs/lemonadep-wlan1.txt). Linux's cmd_db_get_header() takes
+			 * the first match, so an identical repeat is harmless; refuse
+			 * only entries that disagree.
+			 */
+			if (matches && addr != *address) {
+				printf("SWEET RPMH: %s conflicting addresses %#x/%#x; refusing\n", res, *address, addr);
+				return ENODEV;
+			}
 			*address = addr;
 			++matches;
 			printf("SWEET RPMH: %s addr=%#x slave=%u aux-version=%#x priority=%#x:%#x\n",
@@ -199,8 +209,8 @@ rh_lookup(const char *res, uint32_t *address)
 			    rh_read(rh_db, e + 8), rh_read(rh_db, e + 12));
 		}
 	}
-	if (matches != 1) {
-		printf("SWEET RPMH: %s lookup matches=%u; refusing\n", res, matches);
+	if (matches == 0) {
+		printf("SWEET RPMH: %s not in cmd-db; refusing\n", res);
 		return ENODEV;
 	}
 	return 0;

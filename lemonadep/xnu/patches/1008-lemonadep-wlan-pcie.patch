@@ -37,7 +37,35 @@
  
  /* Live downstream DT has two positional reg entries, no reg-names. */
  #define RH_RSC_PA       0x18220000u
-@@ -218,9 +219,17 @@
+@@ -191,6 +192,16 @@
+ 				printf("SWEET RPMH: invalid VRM entry for %s\n", res);
+ 				return EINVAL;
+ 			}
++			/*
++			 * This phone's cmd-db lists smpe2 twice with the same address
++			 * (logs/lemonadep-wlan1.txt). Linux's cmd_db_get_header() takes
++			 * the first match, so an identical repeat is harmless; refuse
++			 * only entries that disagree.
++			 */
++			if (matches && addr != *address) {
++				printf("SWEET RPMH: %s conflicting addresses %#x/%#x; refusing\n", res, *address, addr);
++				return ENODEV;
++			}
+ 			*address = addr;
+ 			++matches;
+ 			printf("SWEET RPMH: %s addr=%#x slave=%u aux-version=%#x priority=%#x:%#x\n",
+@@ -198,8 +209,8 @@
+ 			    rh_read(rh_db, e + 8), rh_read(rh_db, e + 12));
+ 		}
+ 	}
+-	if (matches != 1) {
+-		printf("SWEET RPMH: %s lookup matches=%u; refusing\n", res, matches);
++	if (matches == 0) {
++		printf("SWEET RPMH: %s not in cmd-db; refusing\n", res);
+ 		return ENODEV;
+ 	}
+ 	return 0;
+@@ -218,9 +229,17 @@
  	    !(rh_read(rh_tcs, RH_IRQ_STATUS) & (1u << t));
  }
  
@@ -57,7 +85,7 @@
  	int chosen = -1;
  	for (unsigned t = 0; t < RH_ACTIVE_N; ++t) {
  		uint32_t b = t * RH_TCS_STRIDE;
-@@ -234,7 +243,7 @@
+@@ -234,7 +253,7 @@
  		for (unsigned c = 0; c < rh_ncpt; ++c) {
  			if ((enabled & (1u << c)) &&
  			    (rh_read(rh_tcs, b + RH_ADDR + c * RH_CMD_STRIDE) & ~15u) == address) {
@@ -66,7 +94,7 @@
  				return EBUSY;
  			}
  		}
-@@ -266,11 +275,9 @@
+@@ -266,11 +285,9 @@
  	}
  	/* From here an uncertain write/timeout quarantines our slot for this boot. */
  	rh_poisoned = true;
@@ -81,7 +109,7 @@
  		uint32_t cmd = b + c * RH_CMD_STRIDE;
  		if (!rh_sync(cmd + RH_MSGID, RH_WRITE_ACK) ||
  		    !rh_sync(cmd + RH_ADDR, address + offsets[c]) ||
-@@ -278,7 +285,8 @@
+@@ -278,7 +295,8 @@
  			return EIO;
  		}
  	}
@@ -91,7 +119,7 @@
  	    !rh_sync(b + RH_CONTROL, 0) || !rh_sync(b + RH_CONTROL, RH_AMC_EN)) {
  		return EIO;
  	}
-@@ -289,7 +297,7 @@
+@@ -289,7 +307,7 @@
  		irq = rh_read(rh_tcs, RH_IRQ_STATUS);
  		idle = rh_read(rh_tcs, b + RH_STATUS);
  		bool complete = true;
@@ -100,7 +128,7 @@
  			status[c] = rh_read(rh_tcs, b + RH_CMD_STATUS + c * RH_CMD_STRIDE);
  			complete &= status[c] != 0xffffffffu &&
  			    (status[c] & (RH_ISSUED | RH_COMPLETE)) == (RH_ISSUED | RH_COMPLETE);
-@@ -320,26 +328,65 @@
+@@ -320,26 +338,65 @@
  		return EIO;
  	}
  	rh_poisoned = false;
@@ -180,7 +208,7 @@
  		return EINVAL;
  	}
  	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
-@@ -356,7 +403,7 @@
+@@ -356,7 +413,7 @@
  		error = rh_lookup(res, &address);
  	}
  	if (!error) {
