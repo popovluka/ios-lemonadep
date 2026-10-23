@@ -951,7 +951,18 @@ gitignored) and LineageOS kernel sources at commit 187d13c (`lemonadep/tools/fet
 - 10: link
 - 11 or higher: read the config ID
 
-Read the `SWEET WLAN:` lines from the TWRP log pull. Next, once the ID reads back: MHI and firmware download (the firmware stays on the phone and is never committed), then QMI, WMI and en0.
+Read the `SWEET WLAN:` lines from the TWRP log pull.
+
+**Observed on hardware (2026-10-23):**
+- **Run 1** (kernel CI 40002251006): smpb10 and ldoe7 voted OK. It stopped at smpe2 because this phone's cmd-db lists smpe2 twice at the same address (0x40500), and our lookup required exactly one match. It now accepts an identical repeat, like Linux's cmd_db (commit after 52b3e06).
+- **Run 2** (kernel CI 40007775869, `sweetwlan=11`, `logs/lemonadep-wlan2.txt`): **the chip answered.**
+  - All 8 rails voted with status 0. GDSC 0xf822f001 (on).
+  - PHY ready on the first poll (status 0x86).
+  - The link trained on the second poll: LTSSM 0x11 = L0, link status 0x30110008.
+  - **Config ID 0x110317cb**, i.e. vendor 0x17cb, device 0x1103 (QCA6490). Class/rev 0x02800001: network controller, rev 1.
+  - The boot then continued normally to SpringBoard.
+
+Next: MHI and firmware download (the firmware stays on the phone and is never committed), then QMI, WMI and en0.
 
 ## Overlay 1009: four UI fixes from PixeliOS (2026-10-23)
 
