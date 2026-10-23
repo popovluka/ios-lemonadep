@@ -444,6 +444,54 @@ from the original vendoring plan, found by reading function bodies rather
 than assuming headers and file sizes told the whole story -- worth stating
 plainly rather than quietly working around.
 
+## GPU, Phase 5 continued: real A660 CP ring written and host-tested (2026-10-23)
+
+**`lemonadep_ring.c`**: the real `a6xx_submit()` sequence (`a6xx_gpu.c:
+395-430`) -- `CP_SCRATCH(2)=seqno`, then `CP_EVENT_WRITE` with
+`event=CACHE_FLUSH_TS(0x04)|IRQ` and the real 4-word payload. `CP_RB_CNTL
+= 0x20c`, derived from the real `MSM_GPU_RB_CNTL_DEFAULT` formula in
+`msm_gpu.h` (`BUFSZ=ilog2(32KiB/8)=12`, `BLKSZ=ilog2(32/8)=2`) and
+confirmed A660 takes the `HAS_HW_APRIV` branch (no `NO_UPDATE` bit) from
+its real catalog quirks. Deliberately simplified for this first bring-up,
+the same "simplest correct path first" choice as ACD/IFPC: no RPTR-shadow
+setup (legitimate given `HAS_HW_APRIV`) and completion is CPU-polled on
+the fence memory instead of IRQ-driven, so `NativeAdrenoIrq.cpp`'s own
+A7XX-specific interrupt decode doesn't need fixing for this milestone.
+
+**Caught a real mistake in my own first draft, before testing**: hand-rolled
+the PM4 packet header encoding instead of calling the real vendored
+`AdrenoPM4Type4`/`AdrenoPM4Type7` functions, and got it wrong (missing the
+real format's odd-parity bits entirely). Fixed by calling the real
+functions instead of re-deriving the format.
+
+**`lemonadep_cp_init.c`**: rewritten from an earlier `.cpp` draft to sit
+directly on `lemonadep_ring.c` instead of the vendored (A7XX) `NativeAdrenoRing`
+class, removing an IOKit dependency this logic never actually needed and
+making it host-testable.
+
+Both have real host tests (`test_ring.c`, `test_cp_init.c`) built around a
+mock GPU that actually *executes* submitted packets (scans the ring for
+the real packet header and writes its own fence) rather than a stub that
+always reports success -- `wait()` observes a genuine completion, and the
+tests assert the exact real payload bytes landed, including an explicit
+check that no `CP_THREAD_CONTROL` packet (A7XX-only) is ever emitted.
+Clean under ASan/UBSan.
+
+Checked `NativeAdrenoMemory.cpp`/`NativeAdrenoSmmuContext.cpp` for the
+same A7XX coupling that broke Ring/CpInit/Irq: clean, no chip-generation
+references at all -- consistent with them being genuinely architectural
+(SMMU table management, BO bookkeeping), not Adreno-generation-specific.
+Safe to build the memory-allocation and SMMU-programming glue on top of
+these as originally planned.
+
+**Still to do**: the orchestrator tying `reserve -> bootGmu -> programSmmu
+-> ring attach -> CP init` together, real memory allocation
+(`IOBufferMemoryDescriptor`, the real pattern already used in
+`SweetSurface.cpp`) for the GMU regions and ring/fence buffers, SMMU
+context/table programming with the real bank/SID values already traced,
+and the IOKit service publishing this as `IOAcceleratorES`. Then a boot-arg
+gate, an overlay patch, and a real CI kernel build.
+
 Branch `lemonadep`, pushed to `fork` = github.com/popovluka/ios-sweet. Phone: LE2123 8 GB, Evolution X 16 + Magisk, slot b,
 `fastboot boot` of our v3 shim works. Backups in `backup/partitions` (23, SHA-256 verified). Tools: `C:\platform-tools`,
 WSL distro `LemonadepLab` (aarch64 gcc, dtc, qemu-user, AOSP mkbootimg at `/opt/aosp-mkbootimg`).
