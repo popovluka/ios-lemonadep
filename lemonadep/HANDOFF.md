@@ -367,6 +367,64 @@ the real hardware capability register (`ID1`'s `NUMCB` field) at runtime
 and pick free banks ourselves, not hardcode a guessed number. This is the
 next piece of code to write, not more header-reading.
 
+## GPU, Phase 5: vendored NativeAdreno/ArmSmmu4K/AdrenoPM4; found the CP ring/IRQ vendoring was wrong (2026-10-23)
+
+Vendored `NativeAdreno` (minus `NativeAdrenoGmuPlatform.cpp/h`, dropped
+after finding it's tightly bound to `ShengGmu.h`'s own types and redundant
+with `lemonadep_gmu_coldstart.c`), `ArmSmmu4K` (full, including
+`ArmSmmu4KAudit.{c,h}` and `ArmSmmu4KLive.{c,h}`, found to be real required
+dependencies only by actually trying to syntax-check the include chain,
+not by reading the file list) and `AdrenoPM4`. Full provenance (exact
+commits, what's included and why) in `lemonadep/xnu/gpu/vendor/README.md`.
+Verified GMU's real memory-region sizes for A660 specifically
+(`a6xx_gmu_init()`'s own A660-specific comment: "A660 now requires
+handling 'prealloc requests'... hardcode allocations based on the known
+firmware") -- they turn out to match `ShengGmu.c`'s A740 values exactly,
+because A660 takes the identical real branches.
+
+**Caught a real, more serious problem before writing more on top of it**:
+`NativeAdrenoRing.cpp`/`NativeAdrenoCpInit.cpp`/`NativeAdrenoIrq.cpp` are
+**not chip-generic the way the headers and the earlier file-size survey
+suggested** -- their actual submission, fence and interrupt mechanics are
+tuned for A7XX specifically, not just differently addressed:
+
+- `NativeAdrenoCpInit.cpp` implements `a7xx_cp_init()` (its own comment
+  says so: "The payload values are a7xx_cp_init in a6xx_gpu.c"). The real
+  dispatch is `adreno_is_a7xx(adreno_gpu) ? a7xx_cp_init(gpu) :
+  a6xx_cp_init(gpu)` (`a6xx_gpu.c:1480`) -- A660 takes `a6xx_cp_init()`, a
+  genuinely different packet: no `CP_THREAD_CONTROL` prefix (that disables
+  concurrent binning, an A7XX-only feature), and an 8-word `CP_ME_INIT`
+  payload with a different mask/layout, not the power-up-reglist-carrying
+  7-word A7XX one (`a6xx_gpu.c:895-920` vs `924-968`).
+- `NativeAdrenoRing.cpp`'s fence write itself uses `CP_EVENT_WRITE7`,
+  its own comment says "on A7XX"; the SMMU table-switch cache handling is
+  explicitly A7XX-only ("event 0x31 is only CACHE_CLEAN on A7XX"); the BR/BV
+  thread framing in `submitFramed()` is a hardware feature A660 (not a7xx)
+  doesn't have at all.
+- `NativeAdrenoIrq.cpp`'s decode table is, by its own comment, "every A7XX
+  status bit", including "A7XX LPAC/BV replicas" in the CP error mask.
+
+Only `NativeAdrenoTimer.cpp` (confirmed: both counters are tagged
+`A6XX-A7XX` in the real register XML, genuinely shared) and the
+SMMU/memory pieces hold up as vendored. **Wrote `lemonadep_cp_init.cpp`**:
+the real `a6xx_cp_init()` 8-word `CP_ME_INIT` sequence, new code (not
+adapted from a vendored file), reusing only what's confirmed generic --
+`NativeAdrenoRing::submit()`/`wait()` for the ring mechanics and
+`AdrenoPM4Type7()` for packet-header encoding (`CP_ME_INIT = 0x48`,
+untagged in `adreno_pm4.xml`, confirmed shared). `NativeAdrenoGpu::start()`
+itself can't be used unmodified either -- it hardcodes a call into the
+A7XX `CpInit` internally -- so the actual orchestration will be lemonadep's
+own function with the same proven *shape* (reserve -> bootGmu ->
+programSmmu -> ring attach -> CP init -> wait -> IRQ/timer attach), not a
+call into the vendored class.
+
+**Still open**: whether `NativeAdrenoRing`'s plain `submit()` (not
+`submitFramed()`) is safe to reuse for A660 given its fence write is
+`CP_EVENT_WRITE7` -- needs checking whether plain A6XX's fence write in
+the real `a6xx_gpu.c` uses the same event encoding or (more likely, given
+the pattern so far) a different one. Not yet traced. The interrupt mask
+setup (`NativeAdrenoIrq.cpp`) needs the same real-vs-A7XX check before use.
+
 Branch `lemonadep`, pushed to `fork` = github.com/popovluka/ios-sweet. Phone: LE2123 8 GB, Evolution X 16 + Magisk, slot b,
 `fastboot boot` of our v3 shim works. Backups in `backup/partitions` (23, SHA-256 verified). Tools: `C:\platform-tools`,
 WSL distro `LemonadepLab` (aarch64 gcc, dtc, qemu-user, AOSP mkbootimg at `/opt/aosp-mkbootimg`).
