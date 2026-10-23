@@ -28,7 +28,18 @@ BOOTARGS="debug=0xc serial=3 cpus=$CPUS keepsyms=1 -enable_kprintf_spam -noprogr
 # lemonadep/m2-boot-build.sh). Without this, boot panics at launchd before
 # the console shows enough to read live.
 BOOTARGS="$BOOTARGS unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1"
-BOOTARGS="$BOOTARGS sweettouch=0 sweetkeys=0 sweetusb=0 sweetgpu=1 wdt=-1 wdt_test=no_user_checkin"
+# ufsrw=1: enables the persistent console log ring (patch 0047, last 4 MiB of
+# userdata) so a crash can be read back with TWRP + tools/sweet-log-pull.sh
+# instead of filming the screen -- read-only boots never write it. Same
+# setting the proven m2-boot-build.sh uses (Android is gone from userdata).
+# SWEETGPU: stage, see bsd/dev/lemonadep_gpu.c (1 = PDC handshake only).
+BOOTARGS="$BOOTARGS ufsrw=1"
+# Stop drawing console text over the GUI once it presents; it still goes to
+# the persistent log, and a panic still draws (patch 0067).
+BOOTARGS="$BOOTARGS sweetfb_noconsole=1"
+# touch/keys on: logs are read back with TWRP + grep now, so their log
+# lines don't get in the way, and the phone stays usable during a test.
+BOOTARGS="$BOOTARGS sweettouch=1 sweetkeys=1 sweetusb=0 sweetgpu=${SWEETGPU:-1} wdt=-1 wdt_test=no_user_checkin"
 
 python3 "$REPO/tools/mkadt.py" "$OUT/m3.adt" --board lemonadep
 python3 "$REPO/tools/mkpayload.py" "$KERNEL" "$OUT/m3.adt" "$OUT/m3-payload.bin" --cmdline "$BOOTARGS" \
