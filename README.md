@@ -4,7 +4,7 @@
 
 This project ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation) to the OnePlus 9 Pro (`lemonadep`, Qualcomm SM8350 / Snapdragon 888). On top of it runs the **unmodified iOS 16.7.16 (20H392) userland of the iPhone X**: launchd, the system daemons, backboardd, SpringBoard and the stock apps — the same bare-metal shim and patched kernel as [ios-sweet](https://github.com/dipa-studio/ios-sweet), whose original target (the Xiaomi Redmi Note 10 Pro) this repo still fully supports too (see [below](#also-runs-on-the-redmi-note-10-pro-sweet)).
 
-As of **2026-10-22** the phone boots to the **iOS 16 lock screen**: time, status bar, slide-to-unlock bar and home indicator all render correctly. Touch (Synaptics S3908) and the hardware buttons (PMK8350/PM8350) are written, compile and link cleanly, and a boot image with both enabled is built and waiting on its first real test. Rendering runs entirely on the CPU; there is no GPU driver.
+As of **2026-10-23** the phone boots to an **interactive iOS 16 home screen**: touch (Synaptics S3908) and the hardware buttons (PMK8350/PM8350) work, and you can unlock, open Settings, browse the app drawer and pull down Control Center. Rendering still runs entirely on the CPU, so it's slow. A native Adreno 660 GPU driver is being brought up step by step on the real phone; its GMU power-management controller now gets its firmware loaded and every cold-start step short of the final reset release.
 
 > Experimental bring-up, not a usable phone OS. Many things are missing or stubbed, and Apple's security model is mostly switched off. It installs into the `userdata` partition and so **erases Android's user data**.
 
@@ -15,8 +15,9 @@ As of **2026-10-22** the phone boots to the **iOS 16 lock screen**: time, status
 | Boot + framebuffer | **confirmed on-device** |
 | UFS mounts the iOS root | **confirmed on-device** |
 | Lock screen | **confirmed on-device**: time, status bar, slide bar, home indicator all rendered |
-| Touch (Synaptics S3908 over TCM, GENI SE4) | overlay written, kernel builds and links cleanly, boot image built — **not yet verified against the real touch controller** |
-| Buttons (PMK8350/PM8350) + interactive home screen | overlay written, kernel builds and links cleanly, boot image built — **not yet verified against the real PMIC** |
+| Touch (Synaptics S3908 over TCM, bit-banged I²C) | **confirmed on-device** |
+| Buttons (PMK8350/PM8350) + interactive home screen | **confirmed on-device**: Settings, app drawer, Control Center |
+| GPU (Adreno 660) | **in progress**: power/clocks, GMU firmware load and the GMU cold start up to its reset release confirmed on-device; GMU memory and SMMU context next ([details](lemonadep/README.md#gpu-bring-up)) |
 
 Full detail, every sourced hardware fact with its citation, and the complete replication guide live in **[`lemonadep/README.md`](lemonadep/README.md)**. This top-level page is the overview; that one is the manual.
 
