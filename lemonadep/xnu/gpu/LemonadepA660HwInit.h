@@ -7,7 +7,11 @@
  * pinned ianchb/sm8550-mainline @ 42f3b40c (sha256-verified against UniXNU's own
  * scripts/data/adreno-inputs.json record): registers/adreno/{a6xx,adreno_common,a6xx_gmu}.xml and
  * adreno/a6xx_catalog.c (a660_hwcg, a660_protect_regs, DECLARE_ADRENO_PROTECT(a660_protect,48)).
- * Dword register offsets. Do not edit by hand; re-run the deriving script instead. */
+ * Dword register offsets (gpu_write()/CP_PROTECT convention, the main GPU register
+ * window, no correction needed) below; the GMU/RSC/PDC section further down is
+ * byte offsets with the real mmio_offset correction applied where gmu_write() needs
+ * it -- see that section's own comment. Do not edit by hand; re-run the deriving
+ * script instead. */
 #define A660_GBIF_HALT 0x03c45
 #define A660_RBBM_GBIF_HALT 0x00016
 #define A660_RBBM_SECVID_TSB_CNTL 0x0f803
@@ -54,9 +58,6 @@
 #define A660_RBBM_NC_MODE_CNTL 0x00534
 #define A660_RBBM_INT_CLEAR_CMD 0x00037
 #define A660_CP_ALWAYS_ON_COUNTER 0x00980
-#define A660_GPU_GMU_AO_GMU_CGC_MODE_CNTL 0x23b09
-#define A660_GPU_GMU_AO_GMU_CGC_DELAY_CNTL 0x23b0a
-#define A660_GPU_GMU_AO_GMU_CGC_HYST_CNTL 0x23b0b
 #define A660_CP_PROTECT 0x00850
 static const uint32_t LemonadepA660Hwcg[][2]={
     {0x000b0,0x02222222},   /* RBBM_CLOCK_CNTL_SP0 */
@@ -160,10 +161,18 @@ static const uint32_t LemonadepA660Protect[][2]={
  * a6xx_gmu_rpmh_init in the pinned a6xx_gmu.c), A660's real traced path --
  * see lemonadep/HANDOFF.md "GPU, Phase 2 continued" for the branch-by-branch
  * citations. Byte offsets (register offset << 2), not dword, to match the
- * ShengGmuIo read32/write32(window, byte_offset, ...) contract. */
-#define A660_GMU_RSCC_CONTROL_REQ 0x08ec1c
-#define A660_GMU_RSCC_CONTROL_ACK 0x08ec20
-#define A660_GMU_GENERAL_7 0x07e730
+ * ShengGmuIo read32/write32(window, byte_offset, ...) contract. Core-window
+ * registers (gmu_core_rsc here, plus every GMU_* register further below) have
+ * GMU_BYTE_OFFSET's mmio_offset correction already applied (0x6a000 = GMU core
+ * base - kgsl_3d0_reg_memory base, a6xx_gmu.c:2392) -- RSCC/PDC do not need
+ * it (gmu_write_rscc/pdc_write use their own mapped base directly, confirmed
+ * in the real source, not assumed). */
+#define A660_GPU_GMU_AO_GMU_CGC_MODE_CNTL 0x024c24
+#define A660_GPU_GMU_AO_GMU_CGC_DELAY_CNTL 0x024c28
+#define A660_GPU_GMU_AO_GMU_CGC_HYST_CNTL 0x024c2c
+#define A660_GMU_RSCC_CONTROL_REQ 0x024c1c
+#define A660_GMU_RSCC_CONTROL_ACK 0x024c20
+#define A660_GMU_GENERAL_7 0x014730
 #define A660_GPU_RSCC_RSC_STATUS0_DRV0 0x000010
 #define A660_RSCC_PDC_SLAVE_ID_DRV0 0x00002c
 #define A660_RSCC_HIDDEN_TCS_CMD0_DATA 0x000038
@@ -205,15 +214,19 @@ static const uint32_t LemonadepA660RscSeqMicrocode[5]={
  *     the exact value ShengGmu.c writes for the A740.
  *   - chip ID and the log buffer IOVA go to GMU_HFI_SFR_ADDR and
  *     GPU_GMU_CX_GMU_PWR_COL_CP_MSG, NOT GMU_GENERAL_10/GMU_GENERAL_8 (those
- *     are the A7XX/A8XX-only registers ShengGmu.c uses). */
-#define A660_GMU_CM3_FW_INIT_RESULT 0x07e070
-#define A660_GMU_CM3_BOOT_CONFIG 0x07e004
-#define A660_GMU_HFI_QTBL_ADDR 0x07e614
-#define A660_GMU_HFI_QTBL_INFO 0x07e610
-#define A660_GMU_AHB_FENCE_RANGE_0 0x08ec44
-#define A660_GMU_CM3_CFG 0x07e0b4
-#define A660_GMU_HFI_SFR_ADDR 0x07e608
-#define A660_GPU_GMU_CX_GMU_PWR_COL_CP_MSG 0x07e400
+ *     are the A7XX/A8XX-only registers ShengGmu.c uses).
+ * Also includes GMU_CM3_ITCM_START/GMU_CM3_DTCM_START (a6xx_gmu_fw_load(),
+ * not fw_start) -- the firmware-block write targets. */
+#define A660_GMU_CM3_FW_INIT_RESULT 0x014070
+#define A660_GMU_CM3_BOOT_CONFIG 0x014004
+#define A660_GMU_HFI_QTBL_ADDR 0x014614
+#define A660_GMU_HFI_QTBL_INFO 0x014610
+#define A660_GMU_AHB_FENCE_RANGE_0 0x024c44
+#define A660_GMU_CM3_CFG 0x0140b4
+#define A660_GMU_HFI_SFR_ADDR 0x014608
+#define A660_GPU_GMU_CX_GMU_PWR_COL_CP_MSG 0x014400
+#define A660_GMU_CM3_ITCM_START 0x003000
+#define A660_GMU_CM3_DTCM_START 0x007000
 #define A660_GBIF_QSB_SIDE0 0x00f00c
 #define LEMONADEP_A660_FENCE_RANGE_UPPER 0xau
 #define LEMONADEP_A660_FENCE_RANGE_LOWER 0xa0u
@@ -221,6 +234,39 @@ static const uint32_t LemonadepA660RscSeqMicrocode[5]={
 #define LEMONADEP_A660_RSCC_VAL_CM3_CFG 0x4052u  /* avoids the snapshot/NMI jump */
 #define LEMONADEP_A660_VAL_HFI_QTBL_INFO 1u
 #define LEMONADEP_A660_VAL_CM3_BOOT_CONFIG 2u
+/* chip_id massaged the way a6xx_gmu_fw_start()'s plain-a6xx branch does
+ * (chip_id & 0xffff0000 | (chip_id<<4)&0xf000 | (chip_id<<8)&0x0f00), computed
+ * here from A660's real chip_id 0x06060001, not hand-typed. Written to
+ * GMU_HFI_SFR_ADDR (A660's real register; NOT GMU_GENERAL_10, the A7XX/A8XX one). */
+#define LEMONADEP_A660_GMU_CHIPID 0x06060100u
+
+/* a6xx_gmu_power_config() + a6xx_gmu_start(): the real tail of fw_start,
+ * after the GBIF writes -- RPMH_CTRL's GPU-client vote enable is
+ * unconditional for A660 (not idle-level-gated), and the CM3 reset must
+ * actually be toggled 1->0 (this was missing from an earlier draft of this
+ * driver entirely -- see lemonadep/HANDOFF.md). */
+#define A660_GMU_SYS_BUS_CONFIG 0x01303c
+#define A660_GMU_ICACHE_CONFIG 0x013000
+#define A660_GMU_DCACHE_CONFIG 0x013004
+#define A660_GMU_RPMH_CTRL 0x0143a0
+#define A660_GMU_CM3_SYSRESET 0x014000
+#define A660_GPU_GMU_CX_GMU_PWR_COL_CP_RESP 0x014404
+/* RPMH_INTERFACE|LLC_VOTE|DDR_VOTE|MX_VOTE|CX_VOTE|GFX_VOTE _ENABLE bits */
+#define LEMONADEP_A660_RPMH_CTRL_ENABLE_MASK 0xf11u
+#define LEMONADEP_A660_VAL_SYS_BUS_CONFIG 1u
+#define LEMONADEP_A660_VAL_ICACHE_CONFIG 1u
+#define LEMONADEP_A660_VAL_DCACHE_CONFIG 1u
+/* a6xx_gmu_start(): read DTCM_START+0xff8 first to pick the ready pattern
+ * (this is real, generation-independent logic in the pinned source, not
+ * an A740 simplification -- confirmed by reading a6xx_gmu_start() directly).
+ * val<=0x20010004 -> mask=0xffffffff, ready=0xbabeface; else -> mask=0x1ff,
+ * ready=0x100. */
+#define LEMONADEP_A660_GMU_START_PROBE_OFFSET 0xff8u  /* add to DTCM_START */
+#define LEMONADEP_A660_GMU_START_PROBE_THRESHOLD 0x20010004u
+#define LEMONADEP_A660_GMU_START_MASK_LOW 0xffffffffu
+#define LEMONADEP_A660_GMU_START_READY_LOW 0xbabefaceu
+#define LEMONADEP_A660_GMU_START_MASK_HIGH 0x1ffu
+#define LEMONADEP_A660_GMU_START_READY_HIGH 0x100u
 /* a640_gbif (shared by A660, confirmed in a6xx_catalog.c): write this same value
  * to GBIF_QSB_SIDE0..SIDE3 (consecutive dwords, +1 each). */
 #define LEMONADEP_A660_GBIF_QSB_VALUE 0x00071620u

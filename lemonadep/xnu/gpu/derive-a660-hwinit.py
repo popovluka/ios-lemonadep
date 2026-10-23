@@ -94,20 +94,54 @@ PDC = ['GPU_ENABLE_PDC', 'GPU_SEQ_START_ADDR']
 # comment below for what and why).
 GMU_FW_START = ['GMU_CM3_FW_INIT_RESULT', 'GMU_CM3_BOOT_CONFIG', 'GMU_HFI_QTBL_ADDR',
                 'GMU_HFI_QTBL_INFO', 'GMU_AHB_FENCE_RANGE_0', 'GMU_CM3_CFG', 'GMU_HFI_SFR_ADDR',
-                'GPU_GMU_CX_GMU_PWR_COL_CP_MSG']
+                'GPU_GMU_CX_GMU_PWR_COL_CP_MSG', 'GMU_CM3_ITCM_START', 'GMU_CM3_DTCM_START']
+# a6xx_gmu_power_config() + a6xx_gmu_start() (a6xx_gmu.c:801-841, 291-331): called at the tail
+# of fw_start, after the GBIF writes -- found only by continuing to trace past what
+# ShengGmu.c's A740 code showed, not present in the earlier fw_start list above. A660 is not
+# adreno_is_a7xx()/a8xx(), so power_config's RPMH_CTRL enable (unconditional, not idle-level-
+# gated) and gmu_start's real reset toggle both apply, using the plain-a6xx register for the
+# log-wptr write (PWR_COL_CP_RESP, not GMU_GENERAL_9 -- the A7XX/A8XX-only register).
+GMU_POWER_CONFIG = ['GMU_SYS_BUS_CONFIG', 'GMU_ICACHE_CONFIG', 'GMU_DCACHE_CONFIG',
+                     'GMU_RPMH_CTRL', 'GMU_CM3_SYSRESET', 'GPU_GMU_CX_GMU_PWR_COL_CP_RESP']
 GBIF_CX = ['GBIF_QSB_SIDE0']  # a640_gbif writes SIDE0..SIDE3 at +1 each, all the same value
+
+
+# gmu_write()/gmu_read() (the Core window) do NOT use a plain offset<<2: the real macro is
+# GMU_BYTE_OFFSET(gmu, offset) = (offset<<2) - gmu->mmio_offset, where mmio_offset =
+# (GMU core reg base) - (kgsl_3d0_reg_memory / GPU reg base), set once at probe time
+# (a6xx_gmu.c:2392). gmu_write_rscc()/pdc_write() do NOT have this correction (confirmed:
+# they use `gmu->rscc + (offset<<2)` / `ptr + (offset<<2)` directly, their own mapped base) --
+# this applies only to Core-window registers. Missing it was caught by test_gmu_coldstart.c's
+# mock register bank crashing on an out-of-window offset, not assumed correct beforehand.
+GMU_CORE_MMIO_OFFSET = 0x03d6a000 - 0x03d00000  # LEMONADEP_GMU_CORE_PA - LEMONADEP_GMU_GPU_PA
+
+
+def core_byte_offset(dword_offset):
+    off = (dword_offset << 2) - GMU_CORE_MMIO_OFFSET
+    if off < 0 or off >= 0x34000:  # LEMONADEP_GMU_CORE_BYTES
+        raise SystemExit('Core register at dword 0x%x (byte 0x%x after mmio_offset correction) '
+                          'falls outside the real 0x34000-byte GMU window -- re-check' %
+                          (dword_offset, off))
+    return off
 
 
 def main():
     catalog = CATALOG.read_text()
+    # GPU is dword-offset, gpu_write()-convention (that macro shifts internally, no
+    # mmio_offset correction -- the main kgsl_3d0_reg_memory window is its own base). GMU's 3
+    # registers are gmu_write()-convention instead (Core window, WITH the mmio_offset
+    # correction) -- moved below, byte-offset, alongside gmu_core_rsc/fw_start/power_config,
+    # instead of living here with a silently different unit and no correction (that
+    # inconsistency is exactly what hid the mmio_offset bug the first time around).
     defines = [(n, resolve(n, ['a6xx.xml', 'adreno_common.xml'])) for n in GPU]
-    defines += [(n, resolve(n, ['a6xx_gmu.xml'])) for n in GMU]
     defines.append(('CP_PROTECT', resolve('CP_PROTECT', ['a6xx.xml'], 'array')))
+    gmu_ao_cgc = [(n, resolve(n, ['a6xx_gmu.xml'])) for n in GMU]
     gmu_core_rsc = [(n, resolve(n, ['a6xx_gmu.xml'])) for n in GMU_CORE_RSC]
     rscc = [(n, resolve(n, ['a6xx_gmu.xml'])) for n in RSCC]
     pdc = [(n, resolve(n, ['a6xx.xml'])) for n in PDC]
     fw_start = [(n, resolve(n, ['a6xx_gmu.xml'])) for n in GMU_FW_START]
     gbif_cx = [(n, resolve(n, ['a6xx.xml'])) for n in GBIF_CX]
+    power_config = [(n, resolve(n, ['a6xx_gmu.xml'])) for n in GMU_POWER_CONFIG]
 
     block = re.search(r'a660_hwcg\[\]\s*=\s*\{(.*?)\{\},\s*\};', catalog, re.S).group(1)
     hwcg = []
@@ -141,7 +175,11 @@ def main():
              ' * pinned ianchb/sm8550-mainline @ 42f3b40c (sha256-verified against UniXNU\'s own',
              ' * scripts/data/adreno-inputs.json record): registers/adreno/{a6xx,adreno_common,a6xx_gmu}.xml and',
              ' * adreno/a6xx_catalog.c (a660_hwcg, a660_protect_regs, DECLARE_ADRENO_PROTECT(a660_protect,48)).',
-             ' * Dword register offsets. Do not edit by hand; re-run the deriving script instead. */']
+             ' * Dword register offsets (gpu_write()/CP_PROTECT convention, the main GPU register',
+             ' * window, no correction needed) below; the GMU/RSC/PDC section further down is',
+             ' * byte offsets with the real mmio_offset correction applied where gmu_write() needs',
+             ' * it -- see that section\'s own comment. Do not edit by hand; re-run the deriving',
+             ' * script instead. */']
     for name, offset in defines:
         lines.append('#define A660_%s 0x%05x' % (name, offset))
     lines.append('static const uint32_t LemonadepA660Hwcg[][2]={')
@@ -159,9 +197,17 @@ def main():
     lines.append(' * a6xx_gmu_rpmh_init in the pinned a6xx_gmu.c), A660\'s real traced path --')
     lines.append(' * see lemonadep/HANDOFF.md "GPU, Phase 2 continued" for the branch-by-branch')
     lines.append(' * citations. Byte offsets (register offset << 2), not dword, to match the')
-    lines.append(' * ShengGmuIo read32/write32(window, byte_offset, ...) contract. */')
+    lines.append(' * ShengGmuIo read32/write32(window, byte_offset, ...) contract. Core-window')
+    lines.append(' * registers (gmu_core_rsc here, plus every GMU_* register further below) have')
+    lines.append(' * GMU_BYTE_OFFSET\'s mmio_offset correction already applied (0x%x = GMU core' %
+                  GMU_CORE_MMIO_OFFSET)
+    lines.append(' * base - kgsl_3d0_reg_memory base, a6xx_gmu.c:2392) -- RSCC/PDC do not need')
+    lines.append(' * it (gmu_write_rscc/pdc_write use their own mapped base directly, confirmed')
+    lines.append(' * in the real source, not assumed). */')
+    for n, o in gmu_ao_cgc:
+        lines.append('#define A660_%s 0x%06x' % (n, core_byte_offset(o)))
     for n, o in gmu_core_rsc:
-        lines.append('#define A660_%s 0x%06x' % (n, o * 4))
+        lines.append('#define A660_%s 0x%06x' % (n, core_byte_offset(o)))
     for n, o in rscc:
         lines.append('#define A660_%s 0x%06x' % (n, o * 4))
     for n, o in pdc:
@@ -196,10 +242,14 @@ def main():
     lines.append(' *     the exact value ShengGmu.c writes for the A740.')
     lines.append(' *   - chip ID and the log buffer IOVA go to GMU_HFI_SFR_ADDR and')
     lines.append(' *     GPU_GMU_CX_GMU_PWR_COL_CP_MSG, NOT GMU_GENERAL_10/GMU_GENERAL_8 (those')
-    lines.append(' *     are the A7XX/A8XX-only registers ShengGmu.c uses). */')
+    lines.append(' *     are the A7XX/A8XX-only registers ShengGmu.c uses).')
+    lines.append(' * Also includes GMU_CM3_ITCM_START/GMU_CM3_DTCM_START (a6xx_gmu_fw_load(),')
+    lines.append(' * not fw_start) -- the firmware-block write targets. */')
     for n, o in fw_start:
-        lines.append('#define A660_%s 0x%06x' % (n, o * 4))
+        lines.append('#define A660_%s 0x%06x' % (n, core_byte_offset(o)))
     for n, o in gbif_cx:
+        # GBIF is written via gpu_write() (the main kgsl_3d0_reg_memory window directly,
+        # confirmed in a6xx_gmu_fw_start()), not gmu_write() -- no mmio_offset correction.
         lines.append('#define A660_%s 0x%06x' % (n, o * 4))
     lines.append('#define LEMONADEP_A660_FENCE_RANGE_UPPER 0xau')
     lines.append('#define LEMONADEP_A660_FENCE_RANGE_LOWER 0xa0u')
@@ -207,6 +257,43 @@ def main():
     lines.append('#define LEMONADEP_A660_RSCC_VAL_CM3_CFG 0x4052u  /* avoids the snapshot/NMI jump */')
     lines.append('#define LEMONADEP_A660_VAL_HFI_QTBL_INFO 1u')
     lines.append('#define LEMONADEP_A660_VAL_CM3_BOOT_CONFIG 2u')
+    # chipid massaging, a6xx_gmu_fw_start()'s plain-a6xx else branch (not the a7xx/a8xx one
+    # ShengGmu.c uses): chip_id & 0xffff0000 | (chip_id<<4)&0xf000 | (chip_id<<8)&0x0f00.
+    a660_chip_id = 0x06060001
+    gmu_chipid = (a660_chip_id & 0xffff0000) | ((a660_chip_id << 4) & 0xf000) | \
+        ((a660_chip_id << 8) & 0x0f00)
+    gmu_chipid &= 0xffffffff
+    lines.append('/* chip_id massaged the way a6xx_gmu_fw_start()\'s plain-a6xx branch does')
+    lines.append(' * (chip_id & 0xffff0000 | (chip_id<<4)&0xf000 | (chip_id<<8)&0x0f00), computed')
+    lines.append(' * here from A660\'s real chip_id 0x%08x, not hand-typed. Written to' % a660_chip_id)
+    lines.append(' * GMU_HFI_SFR_ADDR (A660\'s real register; NOT GMU_GENERAL_10, the A7XX/A8XX one). */')
+    lines.append('#define LEMONADEP_A660_GMU_CHIPID 0x%08xu' % gmu_chipid)
+
+    lines.append('')
+    lines.append('/* a6xx_gmu_power_config() + a6xx_gmu_start(): the real tail of fw_start,')
+    lines.append(' * after the GBIF writes -- RPMH_CTRL\'s GPU-client vote enable is')
+    lines.append(' * unconditional for A660 (not idle-level-gated), and the CM3 reset must')
+    lines.append(' * actually be toggled 1->0 (this was missing from an earlier draft of this')
+    lines.append(' * driver entirely -- see lemonadep/HANDOFF.md). */')
+    for n, o in power_config:
+        lines.append('#define A660_%s 0x%06x' % (n, core_byte_offset(o)))
+    rpmh_mask = (1 << 0) | (1 << 4) | (1 << 8) | (1 << 9) | (1 << 10) | (1 << 11)
+    lines.append('/* RPMH_INTERFACE|LLC_VOTE|DDR_VOTE|MX_VOTE|CX_VOTE|GFX_VOTE _ENABLE bits */')
+    lines.append('#define LEMONADEP_A660_RPMH_CTRL_ENABLE_MASK 0x%03xu' % rpmh_mask)
+    lines.append('#define LEMONADEP_A660_VAL_SYS_BUS_CONFIG 1u')
+    lines.append('#define LEMONADEP_A660_VAL_ICACHE_CONFIG 1u')
+    lines.append('#define LEMONADEP_A660_VAL_DCACHE_CONFIG 1u')
+    lines.append('/* a6xx_gmu_start(): read DTCM_START+0xff8 first to pick the ready pattern')
+    lines.append(' * (this is real, generation-independent logic in the pinned source, not')
+    lines.append(' * an A740 simplification -- confirmed by reading a6xx_gmu_start() directly).')
+    lines.append(' * val<=0x20010004 -> mask=0xffffffff, ready=0xbabeface; else -> mask=0x1ff,')
+    lines.append(' * ready=0x100. */')
+    lines.append('#define LEMONADEP_A660_GMU_START_PROBE_OFFSET 0xff8u  /* add to DTCM_START */')
+    lines.append('#define LEMONADEP_A660_GMU_START_PROBE_THRESHOLD 0x20010004u')
+    lines.append('#define LEMONADEP_A660_GMU_START_MASK_LOW 0xffffffffu')
+    lines.append('#define LEMONADEP_A660_GMU_START_READY_LOW 0xbabefaceu')
+    lines.append('#define LEMONADEP_A660_GMU_START_MASK_HIGH 0x1ffu')
+    lines.append('#define LEMONADEP_A660_GMU_START_READY_HIGH 0x100u')
     lines.append('/* a640_gbif (shared by A660, confirmed in a6xx_catalog.c): write this same value')
     lines.append(' * to GBIF_QSB_SIDE0..SIDE3 (consecutive dwords, +1 each). */')
     lines.append('#define LEMONADEP_A660_GBIF_QSB_VALUE 0x00071620u')
@@ -243,7 +330,8 @@ def main():
     lines.append('};')
     lines.append('#endif')
     text = '\n'.join(lines) + '\n'
-    gmu_seq_count = len(gmu_core_rsc) + len(rscc) + len(pdc) + len(fw_start) + len(gbif_cx)
+    gmu_seq_count = (len(gmu_ao_cgc) + len(gmu_core_rsc) + len(rscc) + len(pdc) + len(fw_start) +
+                     len(gbif_cx) + len(power_config))
     if '--check' in sys.argv[3:]:
         if OUT.read_text() != text:
             raise SystemExit('LemonadepA660HwInit.h is stale')

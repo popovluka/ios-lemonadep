@@ -50,6 +50,18 @@
 #define LEMONADEP_GMU_HFI_IRQ_SPI 304u
 #define LEMONADEP_GMU_IRQ_SPI 305u
 
+/* CX GDSC (GPUCC window, drivers/clk/qcom/gpucc-sm8350.c gpu_cx_gdsc.gdscr):
+ * real software enable needed before anything else -- write SW_COLLAPSE
+ * (bit 0) to 0, poll PWR_ON (bit 31) set (drivers/clk/qcom/gdsc.c
+ * gdsc_update_collapse_bit/gdsc_poll_status). GX GDSC (gpu_gx_gdsc.gdscr
+ * = 0x100c) is a documented software no-op (.power_on =
+ * gdsc_gx_do_nothing_enable in the real driver) -- its real power-up is
+ * the GMU/RSC hardware sequence already in LemonadepA660HwInit.h, not a
+ * separate software step. */
+#define LEMONADEP_GPUCC_GDSC_CX_OFFSET 0x106cu
+#define LEMONADEP_GDSC_SW_COLLAPSE_BIT (1u << 0)
+#define LEMONADEP_GDSC_PWR_ON_BIT (1u << 31)
+
 /* The real a660_gmu.bin already pulled from this phone's own /vendor
  * (lemonadep/fw-gpu/, fw-gpu/pull.sh) and parsed with the real non-legacy
  * block-loader algorithm (lemonadep/xnu/gpu/verify-gmu-firmware.py; see
