@@ -37,6 +37,13 @@
  * this file does not cover yet. */
 #define LEMONADEP_GPUCC_PA 0x03d90000u
 #define LEMONADEP_GPUCC_BYTES 0x9000u
+/* GCC base, already sourced for touch/keys (HWMAP_lemonadep.md section 5):
+ * 0x100000, real size 0x1f0000, but this driver only reaches the two GPU
+ * branches above (highest real offset used: 0x71154+4), so it maps a
+ * smaller window of its own rather than sharing sweet_touch.c's GCC
+ * mapping across drivers. */
+#define LEMONADEP_GCC_PA 0x00100000u
+#define LEMONADEP_GCC_GPU_WINDOW_BYTES 0x72000u
 #define LEMONADEP_ADRENO_SMMU_PA 0x03da0000u
 #define LEMONADEP_ADRENO_SMMU_BYTES 0x20000u
 
@@ -61,6 +68,26 @@
 #define LEMONADEP_GPUCC_GDSC_CX_OFFSET 0x106cu
 #define LEMONADEP_GDSC_SW_COLLAPSE_BIT (1u << 0)
 #define LEMONADEP_GDSC_PWR_ON_BIT (1u << 31)
+
+/* Clocks GMU needs, from the qcom,adreno-gmu-660.1 node's own clocks list
+ * (mainline sm8350.dtsi): five GPUCC branches + two GCC branches, offsets
+ * from the real drivers/clk/qcom/{gpucc,gcc}-sm8350.c (fetched 2026-10-23).
+ * Standard clk_branch2 semantics: enable_reg bit0 = CLK_ENABLE, same
+ * register's bit31 = CLK_OFF (poll clear), except the BRANCH_HALT_SKIP one
+ * (gcc_ddrss_gpu_axi_clk -- never poll, same as BRANCH_HALT_DELAY/VOTED
+ * branches with an hwcg_bit set can legitimately read CLK_OFF=1 while
+ * idle, exactly the touch_clocks() HWCG pattern already used for m_ahb/
+ * s_ahb; see HWMAP_lemonadep.md section 8). */
+#define LEMONADEP_GPUCC_AHB_CLK_OFFSET 0x1078u            /* BRANCH_HALT_DELAY */
+#define LEMONADEP_GPUCC_CX_GMU_CLK_OFFSET 0x1098u          /* BRANCH_HALT */
+#define LEMONADEP_GPUCC_CXO_CLK_OFFSET 0x109cu              /* BRANCH_HALT */
+#define LEMONADEP_GPUCC_HLOS1_VOTE_GPU_SMMU_CLK_OFFSET 0x5000u /* BRANCH_HALT_VOTED */
+#define LEMONADEP_GPUCC_HUB_CX_INT_CLK_OFFSET 0x1204u      /* BRANCH_HALT */
+#define LEMONADEP_GCC_DDRSS_GPU_AXI_CLK_OFFSET 0x71154u    /* BRANCH_HALT_SKIP, hwcg_bit=1: never poll */
+#define LEMONADEP_GCC_GPU_MEMNOC_GFX_CLK_OFFSET 0x7100cu   /* BRANCH_HALT_VOTED, hwcg_bit=1 */
+#define LEMONADEP_CLK_ENABLE_BIT (1u << 0)
+#define LEMONADEP_CLK_OFF_BIT (1u << 31)
+#define LEMONADEP_CLK_HWCG_BIT (1u << 1)
 
 /* The real a660_gmu.bin already pulled from this phone's own /vendor
  * (lemonadep/fw-gpu/, fw-gpu/pull.sh) and parsed with the real non-legacy
