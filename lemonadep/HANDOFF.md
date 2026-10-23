@@ -326,15 +326,46 @@ on the phone. Clean under ASan/UBSan, verifying specific sourced values
 actually land on the wire and that the firmware payload reaches the right
 ITCM/DTCM offsets.
 
-**Not yet written**: CX GDSC/clock enable (the real algorithm is sourced --
-see `LemonadepGmuSource.h` -- just not wired up), SMMU context programming
-(no new sourcing needed here: `ArmSmmu4K`, a real MIT-licensed library
-already used in production on `UniXNU-sheng`, plus the exact bank/stream-ID
-values already in our own pinned device tree), the CP ring and submit/fence
-(`NativeAdrenoRing`/`NativeAdrenoCpInit`, also real and reusable), and the
-IOKit user client implementing `NativeAdrenoABI.h`. Then, separately, the
-Apple cross-toolchain build of Turnip + the Metal frontend bridge -- both
-need real CI time this repo hasn't spent yet.
+**Not yet written**: SMMU context programming, the CP ring and submit/fence
+(`NativeAdrenoRing`/`NativeAdrenoCpInit`), and the IOKit user client
+implementing `NativeAdrenoABI.h`. Then, separately, the Apple cross-toolchain
+build of Turnip + the Metal frontend bridge -- both need real CI time this
+repo hasn't spent yet. (**Metal is explicitly de-scoped for now** -- the
+near-term goal is proving the GPU wakes up and executes a real command,
+which needs none of the Mesa/Turnip toolchain at all.)
+
+## GPU, Phase 4: CX GDSC + GMU clocks written and host-tested; real SMMU stream/bank semantics traced (2026-10-23)
+
+**`lemonadep_gpu_reserve.c`**: real CX GDSC enable (`SW_COLLAPSE`/`PWR_ON`
+bit poll, `drivers/clk/qcom/gdsc.c`'s real algorithm) and the seven real
+clock branches the GMU needs, sourced from `drivers/clk/qcom/
+{gpucc,gcc}-sm8350.c`. GX GDSC needs no separate step -- confirmed earlier,
+its real power-up is the GMU/RSC sequence already written, not a software
+toggle. Host-tested with a mock register bank that starts in the real
+cold-reset state (everything gated/collapsed) and proves the one
+`BRANCH_HALT_SKIP` branch (`gcc_ddrss_gpu_axi_clk`) is genuinely never
+polled, by leaving its `CLK_OFF` bit deliberately stuck and checking the
+function still returns success.
+
+**SMMU stream/bank semantics, traced from the real `arm-smmu.c` (not
+guessed, not left as a TODO)**: the device tree's `iommus = <&adreno_smmu
+SID MASK>` cells are literal -- confirmed directly in
+`arm_smmu_of_xlate()`'s `FIELD_PREP(ARM_SMMU_SMR_ID, args->args[0])`/
+`FIELD_PREP(ARM_SMMU_SMR_MASK, args->args[1])` -- so GPU uses SIDs 0 and 1
+(two contexts), GMU uses SID 5, mask `0x400` on all three (architecturally,
+an SMR mask bit of 1 means "don't care" for that ID bit; since 0/1/5 differ
+in the bits the mask does *not* cover, this unambiguously separates the
+three routes regardless of bit 10's value at runtime).
+
+**What's genuinely not a DT-sourceable constant**: the real ARM SMMU
+*context bank* number each stream lands on. On Linux this is picked
+dynamically by the IOMMU core's own allocator at domain-attach time, not a
+fixed hardware wiring -- there is nothing to "source" here the way a
+register offset can be. Since our driver will exclusively own this SMMU
+instance (no Linux allocator sharing it), the correct approach is to read
+the real hardware capability register (`ID1`'s `NUMCB` field) at runtime
+and pick free banks ourselves, not hardcode a guessed number. This is the
+next piece of code to write, not more header-reading.
 
 Branch `lemonadep`, pushed to `fork` = github.com/popovluka/ios-sweet. Phone: LE2123 8 GB, Evolution X 16 + Magisk, slot b,
 `fastboot boot` of our v3 shim works. Backups in `backup/partitions` (23, SHA-256 verified). Tools: `C:\platform-tools`,
