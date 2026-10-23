@@ -54,7 +54,12 @@ lemonadep_gpu_boot(const lemonadep_pwr_io *pwr_io, const lemonadep_gmu_io *gmu_i
 	if (lemonadep_gpu_reserve(pwr_io) != LemonadepPwrOk) {
 		return LemonadepBootPowerFailed;
 	}
-	if (lemonadep_gmu_cold_start(gmu_io, fw, hfi_iova, log_iova, log_size_bytes, gmu_phase) != LemonadepGmuOk) {
+	/* Always runs to completion here -- a partial GMU with the ring/CP_ME_INIT
+	 * still attempted after it would make no sense. Staged stop_after testing
+	 * (HANDOFF.md "GPU, Phase 8 continued") is for lemonadep_gpu_init.c, which
+	 * doesn't reach the ring/cp_init stage yet anyway. */
+	if (lemonadep_gmu_cold_start(gmu_io, fw, hfi_iova, log_iova, log_size_bytes, gmu_phase,
+	    LemonadepGmuPhaseNone) != LemonadepGmuOk) {
 		return LemonadepBootGmuFailed;
 	}
 	if (lemonadep_ring_attach(ring_io, ring, ring_mem, ring_dwords, ring_iova, fence_word, fence_iova)

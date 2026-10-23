@@ -94,7 +94,8 @@ main(void)
 	lemonadep_gmu_firmware fw = {.bytes = fw_bytes, .length = (uint32_t)got};
 
 	lemonadep_gmu_phase phase = LemonadepGmuPhaseNone;
-	lemonadep_gmu_status status = lemonadep_gmu_cold_start(&io, &fw, 0x1230000, 0x4560000, 0x4000, &phase);
+	lemonadep_gmu_status status = lemonadep_gmu_cold_start(&io, &fw, 0x1230000, 0x4560000, 0x4000, &phase,
+	    LemonadepGmuPhaseNone);
 	CHECK(status == LemonadepGmuOk);
 	CHECK(phase == LemonadepGmuPhaseDone);
 	printf("cold_start: status=%d phase=%d, %u register writes logged\n", status, phase, n_writes);
@@ -133,6 +134,26 @@ main(void)
 		}
 	}
 	CHECK(icache_writes == 0);
+
+	/* stop_after: added after a real on-device SoC-level fault during the
+	 * untested firmware-load/fw_start/SYSRESET tail (HANDOFF.md "GPU,
+	 * Phase 8 continued") -- verify it actually halts where asked, not
+	 * just that it returns a plausible-looking status. */
+	memset(regs, 0, sizeof(regs));
+	n_writes = 0;
+	lemonadep_gmu_phase stop_phase = LemonadepGmuPhaseNone;
+	lemonadep_gmu_status stop_status = lemonadep_gmu_cold_start(&io, &fw, 0x1230000, 0x4560000, 0x4000,
+	    &stop_phase, LemonadepGmuPhasePdcHandshake);
+	CHECK(stop_status == LemonadepGmuOk);
+	CHECK(stop_phase == LemonadepGmuPhasePdcHandshake);
+	/* PDC handshake's own writes did happen... */
+	CHECK(written(LemonadepGmuWindowPdc, A660_PDC_GPU_ENABLE_PDC) == LEMONADEP_A660_PDC_VAL_GPU_ENABLE_PDC);
+	/* ...but nothing past it did: no firmware load, no fw_start writes. */
+	CHECK(regs[LemonadepGmuWindowCore][A660_GMU_CM3_ITCM_START / 4] == 0);
+	CHECK(regs[LemonadepGmuWindowCore][A660_GMU_HFI_SFR_ADDR / 4] == 0);
+	CHECK(regs[LemonadepGmuWindowGpu][A660_GBIF_QSB_SIDE0 / 4] == 0);
+	printf("stop_after(PdcHandshake): status=%d phase=%d, %u register writes logged\n",
+	    stop_status, stop_phase, n_writes);
 
 	printf("test_gmu_coldstart %s (%d failures)\n", fails ? "FAILED" : "ok", fails);
 	return fails != 0;

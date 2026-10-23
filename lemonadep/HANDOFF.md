@@ -795,6 +795,55 @@ supposed to be caught: not by guessing a fix from the symptom, but by reading th
 failing poll came from and finding the actual gate condition. Next: rebuild, boot again, see whether
 cold start now actually completes (phase=8/status=0) or hits a different, now-unmasked step.
 
+## GPU, Phase 8 continued: a hard SoC-level fault, a due-diligence check, and staged on-device testing (2026-10-23)
+
+**The fix above wasn't the end of it.** Rebuilding and booting again (same `sweetgpu=1`, now running the
+untested firmware-load/fw_start/SYSRESET tail for the first time ever on real hardware) produced a
+**hard SoC-level fault** -- the device dropped into Qualcomm's own `XBLRamDumpMain`/`phoenix:PHOENIX_XBL_RAMDUMP`
+crash-collector log, not a kernel panic. That's a platform-level reset (likely a NOC/bus fault), a step
+below anything our kernel's own panic handler can even catch.
+
+**Due diligence first, per the user's explicit ask, before touching more code**: searched for any
+existing project -- UniXNU's own flagship (A740/Xiaomi Pad 6S Pro, self-reported, unverified, a
+different chip generation we already draw from), `UniXNU-sweet` (SM7150/Adreno 618, no bootable image),
+`ios-guacamole` (SM8150/Adreno 640, GPU explicitly "roadmap", its own author notes Turnip/Freedreno/KGSL
+all assume a Linux kernel interface that doesn't exist here -- the same wall), `ios-topaz` (claims
+working GPU accel via unpublished patches, unverifiable) -- **nothing solves this for us; we are
+genuinely at the frontier here**, confirmed by real searching, not assumed. Also checked the real
+upstream commit history for *why* Linux does an initial DDR bandwidth vote and sets explicit clock
+rates before GMU bring-up: the bandwidth vote is a **soft** reliability improvement (`a6xx_gmu_set_initial_bw()`
+silently skips if its OPP lookup fails, GMU starts on default bus settings anyway) and the clock-rate
+set is about determinism, not documented anywhere as crash-preventing. **Neither is a confirmed cause**
+of the fault -- real but not a smoking gun, so not implemented yet on a guess.
+
+**Instead: staged, boot-arg-selected testing**, so each further step can be tried on real hardware one
+at a time without a new CI kernel build per attempt (`sweetgpu` is now an integer stage, not a boolean;
+`lemonadep_gmu_cold_start()` gained a `stop_after` parameter and a finer-grained phase split -- a new
+`LemonadepGmuPhaseGbifCx` isolates the GBIF QoS writes, the *only* writes in the whole function through
+the GPU register window instead of the GMU Core window, and therefore the most plausible single point
+where an unpowered/unclocked GX rail could produce exactly this kind of hard fault):
+
+```
+sweetgpu=1: power reserve + PDC handshake only
+sweetgpu=2: + firmware load (ITCM/DTCM writes)
+sweetgpu=3: + fw_start's HFI/fence/chipid Core-window writes
+sweetgpu=4: + the GBIF QoS writes (GPU-window)
+sweetgpu=5: + power_config
+sweetgpu=6: + the GMU-start DTCM probe read (still before SYSRESET)
+sweetgpu=7+: full run, including the SYSRESET toggle and ready-poll
+```
+
+`lemonadep_gpu_boot()`'s own GMU cold-start call is unaffected (hardcoded `stop_after=None`): a partial
+GMU with the ring/CP_ME_INIT still attempted after it would make no sense, and that path doesn't reach
+hardware yet regardless. New host test in `test_gmu_coldstart.c` proves `stop_after` actually halts
+where asked (PDC writes present, firmware-load/fw_start/GBIF writes absent) rather than just returning
+a plausible-looking status. All host tests still pass (174 writes / phase=9/Done on a full run, matching
+the new phase count after inserting `GbifCx`).
+
+Next: boot with `sweetgpu=1` (lowest-risk increment: PDC handshake only, the exact step that crashed
+*before* the wake-poll fix and has never been exercised cleanly on its own) and work up one stage at a
+time, rather than re-running the whole untested tail again.
+
 Branch `lemonadep`, pushed to `fork` = github.com/popovluka/ios-sweet. Phone: LE2123 8 GB, Evolution X 16 + Magisk, slot b,
 `fastboot boot` of our v3 shim works. Backups in `backup/partitions` (23, SHA-256 verified). Tools: `C:\platform-tools`,
 WSL distro `LemonadepLab` (aarch64 gcc, dtc, qemu-user, AOSP mkbootimg at `/opt/aosp-mkbootimg`).

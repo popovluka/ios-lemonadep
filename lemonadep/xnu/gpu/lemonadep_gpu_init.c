@@ -15,8 +15,22 @@
  * place. Wiring that in is the next patch. See lemonadep/HANDOFF.md
  * "GPU, Phase 8" for the full writeup.
  *
- * Off by default (sweetgpu=1 to enable): unlike touch/keys/usb, every
- * one of these register writes is unverified on real hardware.
+ * Off by default (sweetgpu=N, N>=1, to enable): unlike touch/keys/usb,
+ * every one of these register writes is unverified on real hardware.
+ * N also selects how far GMU cold start is allowed to go before
+ * stopping cleanly (lemonadep_gmu_cold_start()'s stop_after parameter),
+ * so each further step can be tried on real hardware one at a time --
+ * a different boot-arg value, no kernel rebuild -- instead of re-running
+ * the whole untested tail again after a real on-device SoC-level fault
+ * (XBL ramdump, not just a kernel panic) during it. See HANDOFF.md
+ * "GPU, Phase 8 continued" for the incident this responds to:
+ *   1: power reserve + PDC handshake only
+ *   2: + firmware load (ITCM/DTCM writes)
+ *   3: + fw_start's HFI/fence/chipid Core-window writes
+ *   4: + the GBIF QoS writes (the only GPU-window writes in this file)
+ *   5: + power_config
+ *   6: + the GMU-start DTCM probe read (still before SYSRESET)
+ *   7+: full run, including the SYSRESET toggle and ready-poll
  *
  * Firmware delivery: the real a660_gmu.bin bytes (gitignored, pulled
  * from the phone, never touch CI) are placed by tools/mkpayload.py's
@@ -96,12 +110,24 @@ lemonadep_wait_us(void *cookie, unsigned us)
 void
 lemonadep_gpu_init(void)
 {
-	uint32_t enabled = 0;
-	(void)PE_parse_boot_argn("sweetgpu", &enabled, sizeof(enabled));
-	if (!enabled) {
-		printf("SWEET GPU: disabled (sweetgpu=1 to enable; unverified on hardware)\n");
+	uint32_t stage = 0;
+	(void)PE_parse_boot_argn("sweetgpu", &stage, sizeof(stage));
+	if (!stage) {
+		printf("SWEET GPU: disabled (sweetgpu=N, N>=1, to enable; unverified on hardware)\n");
 		return;
 	}
+	static const lemonadep_gmu_phase stage_stop[] = {
+		LemonadepGmuPhaseNone, /* unused, stage 0 means disabled */
+		LemonadepGmuPhasePdcHandshake,
+		LemonadepGmuPhaseFirmwareLoad,
+		LemonadepGmuPhaseFwStart,
+		LemonadepGmuPhaseGbifCx,
+		LemonadepGmuPhasePowerConfig,
+		LemonadepGmuPhaseStartProbe,
+	};
+	const lemonadep_gmu_phase stop_after =
+	    stage < sizeof(stage_stop) / sizeof(stage_stop[0]) ? stage_stop[stage] : LemonadepGmuPhaseNone;
+	printf("SWEET GPU: stage=%u stop_after=%d\n", stage, stop_after);
 
 	uint64_t fw_pa = 0;
 	uint32_t fw_bytes = 0;
@@ -168,11 +194,13 @@ lemonadep_gpu_init(void)
 	const uint64_t hfi_iova = log_iova + LEMONADEP_GMU_LOG_BYTES;
 	lemonadep_gmu_phase gmu_phase = LemonadepGmuPhaseNone;
 	lemonadep_gmu_status gmu_status = lemonadep_gmu_cold_start(&gmu_io, &fw, hfi_iova, log_iova,
-	    LEMONADEP_GMU_LOG_BYTES, &gmu_phase);
+	    LEMONADEP_GMU_LOG_BYTES, &gmu_phase, stop_after);
 	printf("SWEET GPU: GMU cold start status=%d phase=%d\n", gmu_status, gmu_phase);
-	if (gmu_status == LemonadepGmuOk) {
+	if (gmu_status == LemonadepGmuOk && gmu_phase == LemonadepGmuPhaseDone) {
 		printf("SWEET GPU: GMU reports ready. Stopping before CP ring/CP_ME_INIT "
 		    "(needs SMMU context + real IOVA-backed memory, not yet wired)\n");
+	} else if (gmu_status == LemonadepGmuOk) {
+		printf("SWEET GPU: stopped cleanly as requested (sweetgpu=%u)\n", stage);
 	}
 	/*
 	 * Pause here so these lines are readable on screen before boot
