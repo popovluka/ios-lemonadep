@@ -1681,18 +1681,17 @@
 
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -53,6 +53,8 @@
- extern void sweet_usb_probe(void);
+@@ -56,4 +56,6 @@
  extern void lemonadep_gpu_init(void);
+ extern void lemonadep_wlan_init(void);
+ extern void lemonadep_reboot_arm(void);
+ extern void lemonadep_reboot_poll(void);
 +extern void redwood_battery_init(void);
 +extern void redwood_dpu_init(void);
-
- #define REG_CAP         0x00
-@@ -662,6 +664,8 @@
- 	sweet_touch_init();
- 	sweet_usb_probe();
- 	/* GPU bring-up (lemonadep/HANDOFF.md "GPU, Phase 8"/"Phase 9"). */
+@@ -810,5 +812,7 @@
  	lemonadep_gpu_init();
+ 	lemonadep_wlan_init();
+ 	lemonadep_reboot_arm();
 +	redwood_battery_init();         /* BQ28Z610 gauge + RedwoodBattery IOPMPowerSource */
 +	redwood_dpu_init();             /* DPU page-flip + DSI backlight (board=lemonadep) */
  	return 0;
