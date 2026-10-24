@@ -26,6 +26,12 @@ dev=$($ADB shell 'for d in /dev/block/by-name/userdata /dev/block/bootdevice/by-
 [ -n "$dev" ] || { echo "userdata block device not found on connected device" >&2; exit 1; }
 bytes=$($ADB shell blockdev --getsize64 "$dev" | tr -d '\r')
 skip=$((bytes / 4096 - 1025))
-$ADB exec-out "dd if=$dev bs=4096 skip=$skip count=1025 2>/dev/null" > "$out.bin"
+# dd into the recovery's tmpfs, then pull: a 4 MiB "adb exec-out dd" stalled
+# part-way on Windows adb (2026-10-24), leaving a truncated, stale-looking log.
+$ADB shell "dd if=$dev of=/tmp/sweetlog.bin bs=4096 skip=$skip count=1025 2>/dev/null"
+local_bin="$out.bin"
+command -v cygpath >/dev/null 2>&1 && local_bin=$(cygpath -w "$out.bin")
+$ADB pull /tmp/sweetlog.bin "$local_bin" >/dev/null
+$ADB shell rm -f /tmp/sweetlog.bin
 echo "$dev: $bytes bytes, read blocks $skip.. ($(stat -c %s "$out.bin") bytes)" >&2
 python3 "$(dirname "$0")/sweet-log.py" "$out.bin" "$out"

@@ -31,7 +31,13 @@ if [ "${SWEETWLAN:-1}" -ge 14 ]; then
 	for f in amss.bin amss20.bin; do
 		[ -f "$FW/$f" ] || { echo "error: $FW/$f missing (run lemonadep/tools/pull-wlan-fw.sh)" >&2; exit 1; }
 	done
-	BLOBS=(--extra-blob "wlanfw1:$FW/amss.bin" --extra-blob "wlanfw2:$FW/amss20.bin")
+	# Only the SBL part (first 512 KiB, cnss2 sbl_size): the full 5 MB images
+	# made the payload (ABL's initrd) big enough that the boot never reached
+	# the kernel log (2026-10-24, logs/lemonadep-wlan3/4); the shim refuses a
+	# payload that overlaps kernel memory. BHIe will need the rest from disk.
+	head -c 524288 "$FW/amss.bin" > "$OUT/wlan-sbl1.bin"
+	head -c 524288 "$FW/amss20.bin" > "$OUT/wlan-sbl2.bin"
+	BLOBS=(--extra-blob "wlanfw1:$OUT/wlan-sbl1.bin" --extra-blob "wlanfw2:$OUT/wlan-sbl2.bin")
 fi
 
 python3 "$REPO/tools/mkadt.py" "$OUT/m4.adt" --board lemonadep

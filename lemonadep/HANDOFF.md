@@ -1022,6 +1022,18 @@ Fix for the next run:
 - The build sets `ufslogsecs=1`.
 - One boot now names the access that kills the SoC, and the stage-1 lines show whether the payload booted.
 
+**Root cause, found by bisecting on hardware (2026-10-24):** it was the kernel, not the chip.
+- Every boot of the new kernel left no log: `sweetwlan` 13 and 11, with or without firmware blobs or `ufslogsecs`.
+- The old kernel-1008b image logged fine (`logs/lemonadep-good2.txt`).
+- The only kernel change is the window mapping. XNU's `ml_io_map` allocates from `io_submap`, which is **8 MiB for the whole kernel** (`osfmk/arm/io_map.c` `IO_MAP_SIZE`), with `KMA_NOFAIL`.
+- Stage 2's 8 MiB PCIe memory window can never fit there, so the kernel dies at the mapping, before stage 1 even runs.
+- Fix: all Wi-Fi windows now use `ml_io_map_unmappable(pa, size, VM_WIMG_IO)`, which allocates from kernel_map.
+- **Rule for every driver here:** big MMIO windows never go through `ml_io_map`.
+
+Two other findings from the bisect:
+- `adb exec-out dd` can stall part-way on Windows, leaving a truncated log that looks stale. `tools/sweet-log-pull.sh` now runs dd into the recovery's /tmp and then `adb pull`s the file.
+- The 26 MB image (full firmware) was probably fine. Only the SBL slices are embedded now anyway; BHIe will read the rest from disk.
+
 ## Overlay 1009: four UI fixes from PixeliOS (2026-10-23)
 
 PixeliOS ([PixOS-Project/pixelios-kernel](https://github.com/PixOS-Project/pixelios-kernel)) is iOS 16 on the Pixel 6a, built on the same ios-sweet base. The four patches below touch files that are byte-identical to ours, so `lemonadep/xnu/gen-1009.sh` applies them unchanged at their commit 41198ee. check-overlay: ok.

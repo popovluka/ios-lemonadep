@@ -23,7 +23,16 @@
 #include <machine/machine_routines.h>
 #include <pexpert/pexpert.h>
 
-extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+/*
+ * Not ml_io_map(): that carves from io_submap, 8 MiB for the whole kernel
+ * (osfmk/arm/io_map.c IO_MAP_SIZE) with KMA_NOFAIL, and stage 2's 8 MiB PCIe
+ * memory window can never fit -- the kernel died there, before its first log
+ * flush, on every stage-2 boot (2026-10-24, logs/lemonadep-wlan3..7). The
+ * unmappable variant takes kernel_map instead; flags VM_WIMG_IO = 0x7
+ * (osfmk/arm/memory_types.h).
+ */
+extern vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, uint32_t);
+#define WLAN_VM_WIMG_IO 0x7u
 extern int sweet_rpmh_vreg_vote(const char *res, unsigned mv, int hpm);
 extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);   /* as sweet_ufs.c */
 
@@ -150,10 +159,10 @@ lemonadep_wlan_init(void)
 	};
 	for (unsigned i = 0; i < WlanWinCount; ++i) {
 		if (!wlan_win[i]) {
-			wlan_win[i] = ml_io_map(maps[i].pa, maps[i].bytes);
+			wlan_win[i] = ml_io_map_unmappable(maps[i].pa, maps[i].bytes, WLAN_VM_WIMG_IO);
 		}
 		if (!wlan_win[i]) {
-			printf("SWEET WLAN: ml_io_map failed for window %u (pa %#x)\n", i, maps[i].pa);
+			printf("SWEET WLAN: ml_io_map_unmappable failed for window %u (pa %#x)\n", i, maps[i].pa);
 			return;
 		}
 	}
