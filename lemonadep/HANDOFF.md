@@ -1034,6 +1034,28 @@ Two other findings from the bisect:
 - `adb exec-out dd` can stall part-way on Windows, leaving a truncated log that looks stale. `tools/sweet-log-pull.sh` now runs dd into the recovery's /tmp and then `adb pull`s the file.
 - The 26 MB image (full firmware) was probably fine. Only the SBL slices are embedded now anyway; BHIe will read the rest from disk.
 
+## Auto-reboot to fastboot: overlay 1010 (2026-10-24, host-tested, not yet seen on the phone)
+
+The user asked for this so test boots don't need someone to hold Power+Vol Down. Boot-arg `sweetreboot=<seconds>[,recovery]` (absent = off).
+
+**Mechanism** (`lemonadep/xnu/reboot/`):
+- The persistent-log thread polls the deadline. PixeliOS 0083/0086 found that a sleeping thread of its own "never fired in 3 of 4 runs".
+- The first tick past the deadline logs. The next tick resets, so that line has reached the disk.
+- It also sets `PE_halt_restart`, so a panic or restart lands in fastboot instead of sitting there.
+
+**Reset**, as the vendor kernel's `reboot bootloader` (LOS-K `qcom-reboot-reason.c` + `msm-poweroff.c`):
+1. The reason byte goes into PMK8350 SDAM 0x7148, bits 7:1: bootloader 0x02, recovery 0x01. This is the live DT's `reboot_reason` nvmem cell.
+   - It is written over SPMI through the arbiter's owner channel: the APID owned by EE 0, v5 command format (`spmi-pmic-arb.c`).
+   - The old byte is read first through the observer channel, so bit 0 stays as it was.
+2. The IMEM `restart_reason` (0x146bf65c) is set to 0x77665500 (or 0x77665502 for recovery).
+3. PSCI SYSTEM_RESET via smc.
+
+All windows are mapped when the timer is armed, from kernel_map. `test_reboot.c` passes under ASan/UBSan.
+
+**Host side:** `lemonadep/tools/test-cycle.sh IMAGE OUT.txt` boots the image, waits for fastboot, boots TWRP and pulls the log. `m4-wlan-build.sh` sets `sweetreboot=300` by default (`SWEETREBOOT=0` turns it off).
+
+Hard SoC crashes (XBL ramdump) still need a button press.
+
 ## Overlay 1009: four UI fixes from PixeliOS (2026-10-23)
 
 PixeliOS ([PixOS-Project/pixelios-kernel](https://github.com/PixOS-Project/pixelios-kernel)) is iOS 16 on the Pixel 6a, built on the same ios-sweet base. The four patches below touch files that are byte-identical to ours, so `lemonadep/xnu/gen-1009.sh` applies them unchanged at their commit 41198ee. check-overlay: ok.

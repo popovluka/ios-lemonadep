@@ -38,3 +38,15 @@ aarch64-linux-gnu-gcc -std=gnu11 -fsyntax-only -Wall -Wextra -Wno-format -I. lem
 aarch64-linux-gnu-gcc -std=gnu11 -fsyntax-only -Wall -Wextra -Wno-format -DARM64_BOARD_CONFIG_SWEET \
 	-include string.h -include stdbool.h -I. "$W/sweet_rpmh.c"
 echo "wlan glue syntax check: ok"
+
+# Auto-reboot: bsd/dev/lemonadep_reboot.c.
+R="$G/../reboot"
+mkdir -p "$S/lemonadep/reboot" "$S/libkern"
+printf '#include <string.h>
+' > "$S/libkern/libkern.h"
+cp "$R/lemonadep_reboot_core.c" "$S/lemonadep/reboot/"
+cp "$R/lemonadep_reboot.c" "$S/lemonadep_reboot.c"
+printf '#include <stdint.h>\n#define NSEC_PER_SEC 1000000000ull\nstatic inline uint64_t mach_absolute_time(void) { return 0; }\nstatic inline void nanoseconds_to_absolutetime(uint64_t a, uint64_t *o) { *o = a; }\nvoid delay(int usec);\n' > "$S/kern/clock.h"
+printf '#include <string.h>\n#include <stdint.h>\nstatic inline int PE_parse_boot_argn(const char *n, void *v, int sz) { (void)n; memset(v, 0, sz); return 0; }\nstatic inline int PE_parse_boot_arg_str(const char *n, char *v, int sz) { (void)n; memset(v, 0, sz); return 0; }\n' > "$S/pexpert/pexpert.h"
+aarch64-linux-gnu-gcc -std=gnu11 -fsyntax-only -Wall -Wextra -Wno-format -I. lemonadep_reboot.c
+echo "reboot glue syntax check: ok"

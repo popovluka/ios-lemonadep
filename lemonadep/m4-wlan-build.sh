@@ -21,6 +21,12 @@ BOOTARGS="$BOOTARGS ufsrw=1 sweetfb_noconsole=1"
 # Flush the log ring every second (default 10 s): stage 2 logs a checkpoint
 # before each risky access and waits for it to reach the disk.
 BOOTARGS="$BOOTARGS ufslogsecs=1"
+# Back to fastboot by itself after SWEETREBOOT seconds (default 300), and on
+# any panic/restart (overlay 1010) -- no one has to hold the keys.
+# SWEETREBOOT=0 turns it off.
+if [ "${SWEETREBOOT:-300}" != 0 ]; then
+	BOOTARGS="$BOOTARGS sweetreboot=${SWEETREBOOT:-300}"
+fi
 BOOTARGS="$BOOTARGS sweettouch=1 sweetkeys=1 sweetusb=0 sweetwlan=${SWEETWLAN:-1} wdt=-1 wdt_test=no_user_checkin"
 
 # Stage 2 (sweetwlan >= 14) hands the chip its firmware straight from where

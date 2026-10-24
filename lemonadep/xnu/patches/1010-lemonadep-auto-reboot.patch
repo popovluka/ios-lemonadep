@@ -1,0 +1,339 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -113,6 +113,7 @@
+ bsd/dev/sweet_usb.c			standard
+ bsd/dev/lemonadep_gpu.c		standard
+ bsd/dev/lemonadep_wlan.c		standard
++bsd/dev/lemonadep_reboot.c		standard
+ bsd/dev/lemonadep/vendor/ArmSmmu4K/ArmSmmu4KLive.c		standard
+ bsd/dev/lemonadep/vendor/ArmSmmu4K/ArmSmmu4KProgram.c		standard
+ bsd/dev/lemonadep/vendor/ArmSmmu4K/ArmSmmu4KContext.c		standard
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -55,6 +55,8 @@
+ extern void sweet_usb_probe(void);
+ extern void lemonadep_gpu_init(void);
+ extern void lemonadep_wlan_init(void);
++extern void lemonadep_reboot_arm(void);
++extern void lemonadep_reboot_poll(void);
+ 
+ #define REG_CAP         0x00
+ #define REG_IS          0x20
+@@ -753,6 +755,8 @@
+ 	    SWEET_LOG_BLOCKS * UFS_BLOCK >> 10, base);
+ 	for (;;) {
+ 		(void)tsleep(&sweet_log_chan, PZERO, "sweetlog", hz * (int)sweet_log_secs);
++		/* sweetreboot=<s>: lemonadep/HANDOFF.md "Auto-reboot" */
++		lemonadep_reboot_poll();
+ 		uint64_t total = os_atomic_load(&sweet_log_total, relaxed);
+ 		if (total == flushed) {
+ 			continue;
+@@ -806,6 +810,7 @@
+ 	if (sweet_log_secs == 0 || sweet_log_secs > 60) {
+ 		sweet_log_secs = SWEET_LOG_SECS;
+ 	}
++	lemonadep_reboot_arm();
+ 	if (kernel_thread_start(sweet_log_thread, NULL, &thread) == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	}
+--- /dev/null
++++ b/bsd/dev/lemonadep_reboot.c
+@@ -0,0 +1,151 @@
++/*
++ * lemonadep: timed reset into fastboot (or recovery) so test boots come back
++ * by themselves, and panics/restarts land there too instead of hanging.
++ *
++ * Boot-arg sweetreboot=<seconds>[,recovery]; absent = off, nothing changes.
++ * The deadline is polled from the persistent-log thread (sweet_ufs.c), not a
++ * sleeping thread of its own: PixeliOS found a dedicated sleeping thread
++ * "never fired on hardware in 3 of 4 runs" (pixelios-kernel 0083/0086). The
++ * first poll past the deadline only logs, so that line reaches the disk with
++ * that tick's flush; the next poll resets.
++ *
++ * Reset sequence: lemonadep/reboot/lemonadep_reboot_core.c (vendor-sourced,
++ * host-tested). Everything is mapped when armed, so the panic path maps
++ * nothing and takes no locks.
++ */
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <libkern/libkern.h>
++
++#include "lemonadep/reboot/lemonadep_reboot_core.c"
++
++/* kernel_map, not the 8 MiB io_submap (see bsd/dev/lemonadep_wlan.c) */
++extern vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, uint32_t);
++#define LR_VM_WIMG_IO 0x7u
++extern int (*PE_halt_restart)(unsigned int type);
++
++static vm_offset_t lr_win[LrWinCount];
++static uint32_t lr_chnls_base;          /* LR_CHAN_RW(apid): the one page mapped */
++static bool lr_recovery, lr_armed, lr_announced;
++static uint64_t lr_deadline;            /* mach absolute time */
++
++static uint32_t
++lr_read32(void *c, unsigned w, uint32_t off)
++{
++	(void)c;
++	if (w == LrWinChnls) {
++		off -= lr_chnls_base;
++	}
++	uint32_t v = *(volatile uint32_t *)(lr_win[w] + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++static void
++lr_write32(void *c, unsigned w, uint32_t off, uint32_t v)
++{
++	(void)c;
++	if (w == LrWinChnls) {
++		off -= lr_chnls_base;
++	}
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(lr_win[w] + off) = v;
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++static void
++lr_delay(void *c, unsigned us)
++{
++	(void)c;
++	delay((int)us);
++}
++
++static void __attribute__((noreturn))
++lr_reset(void)
++{
++	const lemonadep_reboot_io io = {.read32 = lr_read32, .write32 = lr_write32, .delay_us = lr_delay};
++	lemonadep_reboot_result r;
++	int e = lemonadep_reboot_prepare(&io, lr_recovery, &r);
++	printf("SWEET REBOOT: %s: sdam apid=%d owner=%u %#x -> %#x status=%#x (%d), PSCI SYSTEM_RESET\n",
++	    lr_recovery ? "recovery" : "bootloader", r.apid, r.owner, r.old, r.new_, r.status, e);
++	register uint64_t x0 __asm__("x0") = LR_PSCI_SYSTEM_RESET;
++	__asm__ volatile("smc #0" : "+r"(x0) : : "x1", "x2", "x3", "memory");
++	for (;;) {
++		__asm__ volatile("wfe");
++	}
++}
++
++/* IOPlatformExpert.h: kPERestartCPU 1, kPEPanicRestartCPU 4, kPEPanicRestartCPUNoCallouts 9 */
++static int
++lr_halt_restart(unsigned int type)
++{
++	if (type == 1 || type == 4 || type == 9) {
++		lr_reset();
++	}
++	return -1;
++}
++
++void lemonadep_reboot_arm(void);
++void lemonadep_reboot_poll(void);
++
++void
++lemonadep_reboot_arm(void)
++{
++	char arg[32] = {0};
++	if (lr_armed || !PE_parse_boot_arg_str("sweetreboot", arg, sizeof(arg)) || !arg[0]) {
++		return;
++	}
++	uint32_t secs = 0;
++	const char *p = arg;
++	for (; *p >= '0' && *p <= '9'; ++p) {
++		secs = secs * 10u + (uint32_t)(*p - '0');
++	}
++	lr_recovery = *p == ',' && !strncmp(p + 1, "recovery", 8);
++	if (secs == 0) {
++		return;
++	}
++	static const struct { uint32_t pa, bytes; } maps[LrWinCount] = {
++		[LrWinCore] = {LR_SPMI_CORE_PA, 0x2000u},
++		[LrWinObs] = {LR_SPMI_OBS_PA, 0x10000u},
++		[LrWinCnfg] = {LR_SPMI_CNFG_PA, 0x1000u},
++		[LrWinImem] = {LR_IMEM_PA, 0x1000u},
++	};
++	for (unsigned i = 0; i < LrWinCount; ++i) {
++		if (i != LrWinChnls && !(lr_win[i] = ml_io_map_unmappable(maps[i].pa, maps[i].bytes, LR_VM_WIMG_IO))) {
++			printf("SWEET REBOOT: map %#x failed, off\n", maps[i].pa);
++			return;
++		}
++	}
++	const lemonadep_reboot_io io = {.read32 = lr_read32, .write32 = lr_write32, .delay_us = lr_delay};
++	uint32_t owner = 0;
++	int apid = lr_find_apid(&io, (uint16_t)(LR_SDAM_SID << 8 | (LR_SDAM_ADDR >> 8)), &owner);
++	if (apid >= 0 && owner == LR_SPMI_EE) {
++		lr_chnls_base = LR_CHAN_RW((uint32_t)apid);
++		lr_win[LrWinChnls] = ml_io_map_unmappable(LR_SPMI_CHNLS_PA + lr_chnls_base, 0x1000u, LR_VM_WIMG_IO);
++	}
++	printf("SWEET REBOOT: to %s in %u s (sdam apid=%d owner=%u%s)\n", lr_recovery ? "recovery" : "fastboot",
++	    secs, apid, owner, apid >= 0 && owner == LR_SPMI_EE ? "" : ": NOT writable, reason will be missing");
++	if (apid >= 0 && owner == LR_SPMI_EE && !lr_win[LrWinChnls]) {
++		return;
++	}
++	uint64_t span;
++	nanoseconds_to_absolutetime((uint64_t)secs * NSEC_PER_SEC, &span);
++	lr_deadline = mach_absolute_time() + span;
++	PE_halt_restart = lr_halt_restart;
++	lr_armed = true;
++}
++
++void
++lemonadep_reboot_poll(void)
++{
++	if (!lr_armed || mach_absolute_time() < lr_deadline) {
++		return;
++	}
++	if (!lr_announced) {
++		lr_announced = true;
++		printf("SWEET REBOOT: time is up, resetting at the next log tick\n");
++		return;
++	}
++	lr_reset();
++}
+--- /dev/null
++++ b/bsd/dev/lemonadep/reboot/lemonadep_reboot_core.c
+@@ -0,0 +1,144 @@
++/* SPDX-License-Identifier: MIT */
++/*
++ * lemonadep: reset the phone into the bootloader (fastboot) or recovery from
++ * the kernel, the way the vendor kernel's "reboot bootloader" does it
++ * (LOS-K @ 187d13c, drivers/power/reset/qcom-reboot-reason.c + msm-poweroff.c):
++ *   1. the reboot reason into PMK8350 SDAM: LIVE reboot_reason node ->
++ *      nvmem cell sdam@7100 "restart@48", bits <1 7> (bit offset 1, 7 bits):
++ *      bootloader = 0x02, recovery = 0x01 (qcom-reboot-reason.c reasons[]);
++ *   2. the IMEM restart_reason word (LIVE qcom,msm-imem@146bf000 +
++ *      restart_reason@65c): 0x77665500 bootloader, 0x77665502 recovery
++ *      (msm-poweroff.c msm_restart_prepare);
++ *   3. PSCI SYSTEM_RESET (LIVE psci method "smc"; PSCI 0.2 function id).
++ * Plain C with injected I/O; host-tested by test_reboot.c.
++ *
++ * The SDAM byte is written over SPMI through the PMIC arbiter's owner
++ * channel (spmi-pmic-arb.c, v5): pick the APID whose PPID is SID 0 /
++ * peripheral 0x71 and whose ownership entry is our EE (0), write the data
++ * to WDATA0, the command (opcode EXT_WRITEL = 0, addr low byte << 4, byte
++ * count - 1) to CMD, poll STATUS for DONE (and not DENIED/FAILURE/DROPPED).
++ * The old value is read first through the observer channel, so bit 0 stays.
++ */
++#include <stdbool.h>
++#include <stdint.h>
++
++/* LIVE qcom,spmi@c440000: core, chnls, obsrvr, cnfg; qcom,ee = 0 */
++#define LR_SPMI_CORE_PA    0x0c440000u
++#define LR_SPMI_CORE_BYTES 0x1100u
++#define LR_SPMI_CHNLS_PA   0x0c600000u
++#define LR_SPMI_OBS_PA     0x0e600000u
++#define LR_SPMI_CNFG_PA    0x0c40a000u
++#define LR_SPMI_EE         0u
++#define LR_APID_MAP(n)     (0x900u + 4u * (n))     /* pmic_arb_apid_map_offset_v5 */
++#define LR_APID_COUNT      ((LR_SPMI_CORE_BYTES - 0x900u) / 4u)
++#define LR_OWNERSHIP(n)    (0x700u + 4u * (n))     /* SPMI_OWNERSHIP_TABLE_REG, owner [2:0] */
++#define LR_CHAN_RW(apid)   (0x10000u * (apid))      /* in chnls */
++#define LR_CHAN_OBS(apid)  (0x10000u * LR_SPMI_EE + 0x80u * (apid))   /* in obsrvr */
++#define LR_ARB_CMD         0x00u
++#define LR_ARB_STATUS      0x08u
++#define LR_ARB_WDATA0      0x10u
++#define LR_ARB_RDATA0      0x18u
++#define LR_ARB_DONE        (1u << 0)
++#define LR_ARB_FAILURE     (1u << 1)
++#define LR_ARB_DENIED      (1u << 2)
++#define LR_ARB_DROPPED     (1u << 3)
++#define LR_OP_EXT_WRITEL   0u
++#define LR_OP_EXT_READL    1u
++#define LR_ARB_TIMEOUT_US  1000u                    /* PMIC_ARB_TIMEOUT_US */
++/* LIVE sdam@7100 on qcom,pmk8350@0 (SID 0), cell restart@48 bits <1 7> */
++#define LR_SDAM_SID        0u
++#define LR_SDAM_ADDR       0x7148u
++#define LR_REASON_RECOVERY   0x01u
++#define LR_REASON_BOOTLOADER 0x02u
++/* LIVE qcom,msm-imem@146bf000, restart_reason@65c */
++#define LR_IMEM_PA         0x146bf000u
++#define LR_IMEM_RESTART    0x65cu
++#define LR_IMEM_BOOTLOADER 0x77665500u
++#define LR_IMEM_RECOVERY   0x77665502u
++#define LR_PSCI_SYSTEM_RESET 0x84000009u
++
++enum { LrWinCore, LrWinChnls, LrWinObs, LrWinCnfg, LrWinImem, LrWinCount };
++
++typedef struct {
++	void *cookie;
++	uint32_t (*read32)(void *cookie, unsigned win, uint32_t off);
++	void (*write32)(void *cookie, unsigned win, uint32_t off, uint32_t v);
++	void (*delay_us)(void *cookie, unsigned us);
++} lemonadep_reboot_io;
++
++typedef struct {
++	int apid;                 /* -1: none found */
++	uint32_t owner, old, new_, status;
++} lemonadep_reboot_result;
++
++static int
++lr_find_apid(const lemonadep_reboot_io *io, uint16_t ppid, uint32_t *owner)
++{
++	int found = -1;
++	for (uint32_t i = 0; i < LR_APID_COUNT; ++i) {
++		uint32_t map = io->read32(io->cookie, LrWinCore, LR_APID_MAP(i));
++		if (map == 0 || ((map >> 8) & 0xfffu) != ppid) {
++			continue;
++		}
++		uint32_t o = io->read32(io->cookie, LrWinCnfg, LR_OWNERSHIP(i)) & 7u;
++		if (o == LR_SPMI_EE) {           /* the entry this EE may write through */
++			*owner = o;
++			return (int)i;
++		}
++		if (found < 0) {
++			found = (int)i;
++			*owner = o;
++		}
++	}
++	return found;
++}
++
++static uint32_t
++lr_wait(const lemonadep_reboot_io *io, unsigned win, uint32_t chan)
++{
++	uint32_t st = 0;
++	for (unsigned t = 0; t < LR_ARB_TIMEOUT_US; ++t) {
++		st = io->read32(io->cookie, win, chan + LR_ARB_STATUS);
++		if (st & LR_ARB_DONE) {
++			break;
++		}
++		io->delay_us(io->cookie, 1);
++	}
++	return st;
++}
++
++static bool
++lr_ok(uint32_t st)
++{
++	return (st & LR_ARB_DONE) && !(st & (LR_ARB_FAILURE | LR_ARB_DENIED | LR_ARB_DROPPED));
++}
++
++/* Steps 1 and 2. Returns 0 when the SDAM write went through; the IMEM word is
++ * written either way (it is plain memory). The caller then does step 3. */
++int
++lemonadep_reboot_prepare(const lemonadep_reboot_io *io, bool recovery, lemonadep_reboot_result *r)
++{
++	*r = (lemonadep_reboot_result){.apid = -1};
++	io->write32(io->cookie, LrWinImem, LR_IMEM_RESTART, recovery ? LR_IMEM_RECOVERY : LR_IMEM_BOOTLOADER);
++
++	const uint16_t ppid = (uint16_t)(LR_SDAM_SID << 8 | (LR_SDAM_ADDR >> 8));
++	r->apid = lr_find_apid(io, ppid, &r->owner);
++	if (r->apid < 0 || r->owner != LR_SPMI_EE) {
++		return -1;
++	}
++	const uint32_t apid = (uint32_t)r->apid;
++	const uint32_t cmd_rd = LR_OP_EXT_READL << 27 | (LR_SDAM_ADDR & 0xffu) << 4;
++	io->write32(io->cookie, LrWinObs, LR_CHAN_OBS(apid) + LR_ARB_CMD, cmd_rd);
++	r->status = lr_wait(io, LrWinObs, LR_CHAN_OBS(apid));
++	if (!lr_ok(r->status)) {
++		return -2;
++	}
++	r->old = io->read32(io->cookie, LrWinObs, LR_CHAN_OBS(apid) + LR_ARB_RDATA0) & 0xffu;
++	const uint32_t reason = recovery ? LR_REASON_RECOVERY : LR_REASON_BOOTLOADER;
++	r->new_ = (r->old & 1u) | (reason << 1);         /* nvmem cell bits <1 7> */
++	io->write32(io->cookie, LrWinChnls, LR_CHAN_RW(apid) + LR_ARB_WDATA0, r->new_);
++	io->write32(io->cookie, LrWinChnls, LR_CHAN_RW(apid) + LR_ARB_CMD,
++	    LR_OP_EXT_WRITEL << 27 | (LR_SDAM_ADDR & 0xffu) << 4);
++	r->status = lr_wait(io, LrWinChnls, LR_CHAN_RW(apid));
++	return lr_ok(r->status) ? 0 : -3;
++}
