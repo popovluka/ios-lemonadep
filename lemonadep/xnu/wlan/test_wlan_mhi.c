@@ -24,7 +24,7 @@ static uint32_t *win[WlanWinCount];
 static uint32_t bar0_mask_lo, bar0, bar1; /* sizing state */
 static unsigned bhi_polls, ready_polls, reads_after_db;
 static uint32_t chip_ee, chip_major;
-static bool chip_bhi_fails, smmu_ro;
+static bool chip_bhi_fails, smmu_ro, smmu_quirk;
 static uint64_t want_pa;
 static uint32_t want_size;
 
@@ -113,6 +113,11 @@ mwrite(void *c, unsigned w, uint32_t off, uint32_t v)
 		return 0;
 	}
 	if (w == WlanWinSmmu && smmu_ro) return 0;   /* hypervisor drops the write */
+	/* this phone's firmware: an S2CR bypass write lands as fault */
+	if (w == WlanWinSmmu && smmu_quirk && off >= SMMU_S2CR(0) && off < SMMU_S2CR(128) &&
+	    SMMU_S2CR_TYPE(v) == SMMU_S2CR_BYPASS) {
+		v = (v & ~(3u << 16)) | SMMU_S2CR_FAULT << 16;
+	}
 	*reg(w, off) = v;
 	return 0;
 }
@@ -128,6 +133,7 @@ reset(void)
 	chip_major = 2;
 	chip_bhi_fails = false;
 	smmu_ro = false;
+	smmu_quirk = false;
 	/* apps SMMU: 4 SMRs, unmatched streams bypass (USFCFG 0), SMR 1 = UFS-like */
 	*reg(WlanWinSmmu, SMMU_ID0) = 4;
 	*reg(WlanWinSmmu, SMMU_SMR(1)) = SMMU_SMR_VALID | 0x0080u;
@@ -213,6 +219,41 @@ main(void)
 	st = lemonadep_wlan_mhi_up(&io, &p, &r, LemonadepMhiPhaseNone);
 	CHECK(st == LemonadepMhiSmmuWriteRefused && r.smmu_written && !r.smmu_bypass);
 	CHECK(*reg(WlanWinMem, r.bar_pa - LEMONADEP_PCIE0_MEM_PA + BHIOFF + BHI_IMGTXDB) == 0);
+
+	/* ---- the Qualcomm quirk: bypass emulated with the last context bank ----
+	 * ID1: 4 KiB pages, NUMPAGENDXB 6 (128 pages), 64 context banks -> CB 63
+	 * page at (128 + 63) << 12 = 0xbf000, GR1 at 0x1000. */
+	reset();
+	want_pa = p.fw_v2.pa;
+	*reg(WlanWinSmmu, SMMU_sCR0) = SMMU_sCR0_USFCFG;
+	*reg(WlanWinSmmu, SMMU_ID1) = 6u << 28 | 64u;
+	*reg(WlanWinSmmu, 0xbf000u + SMMU_CB_SCTLR) = 0x2u;     /* not enabled (M = 0) */
+	smmu_quirk = true;
+	st = lemonadep_wlan_mhi_up(&io, &p, &r, LemonadepMhiPhaseNone);
+	printf("quirk: status=%d cb=%u s2cr=%#x cbar=%#x\n", st, r.cb, r.s2cr_rb, r.cbar_rb);
+	CHECK(st == LemonadepMhiOk && r.smmu_quirk && r.cb == 63 && r.smmu_bypass);
+	CHECK(*reg(WlanWinSmmu, SMMU_S2CR(0)) == 63u);                       /* TRANS -> CB 63 */
+	CHECK(*reg(WlanWinSmmu, 0x1000u + SMMU_GR1_CBAR(63)) == 1u << 16);   /* S1_TRANS_S2_BYPASS */
+	CHECK(*reg(WlanWinSmmu, 0xbf000u + SMMU_CB_SCTLR) == 0);
+
+	/* ---- quirk, but the last context bank is in use (M = 1): no BHI ---- */
+	reset();
+	*reg(WlanWinSmmu, SMMU_sCR0) = SMMU_sCR0_USFCFG;
+	*reg(WlanWinSmmu, SMMU_ID1) = 6u << 28 | 64u;
+	*reg(WlanWinSmmu, 0xbf000u + SMMU_CB_SCTLR) = 1u;
+	smmu_quirk = true;
+	st = lemonadep_wlan_mhi_up(&io, &p, &r, LemonadepMhiPhaseNone);
+	CHECK(st == LemonadepMhiSmmuCbInUse && !r.smmu_bypass);
+	CHECK(*reg(WlanWinMem, r.bar_pa - LEMONADEP_PCIE0_MEM_PA + BHIOFF + BHI_IMGTXDB) == 0);
+
+	/* ---- quirk, another valid entry already translates to CB 63 ---- */
+	reset();
+	*reg(WlanWinSmmu, SMMU_sCR0) = SMMU_sCR0_USFCFG;
+	*reg(WlanWinSmmu, SMMU_ID1) = 6u << 28 | 64u;
+	*reg(WlanWinSmmu, SMMU_S2CR(1)) = 63u;
+	smmu_quirk = true;
+	st = lemonadep_wlan_mhi_up(&io, &p, &r, LemonadepMhiPhaseNone);
+	CHECK(st == LemonadepMhiSmmuCbInUse);
 
 	/* ---- no free entry ---- */
 	reset();

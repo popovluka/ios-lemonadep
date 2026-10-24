@@ -126,6 +126,10 @@ wlan_stage2(void *arg, wait_result_t wr)
 		printf("SWEET WLAN: smmu wrote entry %d: s2cr %#x -> read %#x, smr %#x -> read %#x\n", m.smr_free,
 		    m.s2cr_want, m.s2cr_rb, m.smr_want, m.smr_rb);
 	}
+	if (m.smmu_quirk) {
+		printf("SWEET WLAN: smmu bypass quirk: id1=%#x cb=%u sctlr was %#x, cbar %#x -> %#x\n",
+		    m.id1, m.cb, m.cb_sctlr0, m.cbar0, m.cbar_rb);
+	}
 	if (m.phase >= LemonadepMhiPhaseBhi && m.fw_name) {
 		printf("SWEET WLAN: bhi %s pa=%#llx sbl=%#x status=%#x after %u ms errcode=%#x dbg=%#x/%#x/%#x\n",
 		    m.fw_name, m.fw_pa, m.sbl_bytes, m.bhi_status, m.bhi_ms, m.bhi_errcode,
@@ -160,7 +164,7 @@ lemonadep_wlan_init(void)
 		[WlanWinIatu] = {LEMONADEP_PCIE0_IATU_PA, 0x1000u},
 		[WlanWinConf] = {LEMONADEP_PCIE0_CONF_PA, 0x1000u},
 		[WlanWinMem] = {LEMONADEP_PCIE0_MEM_PA, LEMONADEP_PCIE0_MEM_MAP},
-		[WlanWinSmmu] = {LEMONADEP_APPS_SMMU_PA, 0x1000u},   /* GR0: SMR/S2CR end at 0xe00 */
+		[WlanWinSmmu] = {LEMONADEP_APPS_SMMU_PA, SMMU_APPS_BYTES},   /* GR0, GR1, context banks */
 	};
 	for (unsigned i = 0; i < WlanWinCount; ++i) {
 		if (!wlan_win[i]) {

@@ -94,5 +94,16 @@
 #define SMMU_S2CR_EXIDVALID     (1u << 10)   /* with EXIDS */
 #define SMMU_S2CR_TYPE(v)       (((v) >> 16) & 3u)   /* 0 trans, 1 bypass, 2 fault */
 #define SMMU_S2CR_BYPASS        1u
+#define SMMU_S2CR_FAULT         2u
+/* Qualcomm firmware quirk (mainline arm-smmu-qcom.c qcom_smmu_cfg_probe, v6.6:
+ * "writing BYPASS will end up written as FAULT"): bypass is emulated with the
+ * last context bank -- SCTLR = 0, CBAR type S1_TRANS_S2_BYPASS -- and S2CR
+ * type TRANS pointing at it (qcom_smmu_write_s2cr). Seen on this phone:
+ * S2CR 0x10300 written, 0x20300 read back (logs/lemonadep-wlan10.txt). */
+#define SMMU_APPS_BYTES         0x100000u    /* LIVE apps-smmu reg size */
+#define SMMU_ID1                0x024u       /* PAGESIZE bit 31, NUMPAGENDXB [30:28], NUMCB [7:0] */
+#define SMMU_GR1_CBAR(n)        (4u * (n))   /* in GR1 = page 1 */
+#define SMMU_CBAR_S1_TRANS_S2_BYPASS (1u << 16)
+#define SMMU_CB_SCTLR           0x000u       /* M = bit 0 */
 #define SMMU_S2CR_SHCFG_NSH     3u           /* S2CR_SHCFG [9:8], what arm_smmu_write_s2cr() sets */
 #endif

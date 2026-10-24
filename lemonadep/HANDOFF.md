@@ -1050,6 +1050,14 @@ Fix for the next run:
 - New stage 14 handles this case. It writes a bypass entry (S2CR bypass + NSH, then SMR valid|0x1c01, mask 0) into the first free slot, reads both back, and stops if either was refused. This mirrors arm-smmu.c `arm_smmu_write_sme` for a bypass domain; LOS-K uses S2CR bypass for those.
 - BHI is now stage 15 and READY is 16.
 
+**Run with stage 14 (kernel CI 40095843825, `logs/lemonadep-wlan10.txt`):**
+- The SMR write stuck: entry 8 = 0x80001c01.
+- **S2CR bypass did not stick:** 0x10300 was written and 0x20300 (fault) read back. The guard stopped before BHI (status 9).
+- This is the Qualcomm firmware quirk that mainline handles in `arm-smmu-qcom.c qcom_smmu_cfg_probe` (v6.6). Its comment says "writing BYPASS will end up written as FAULT".
+- The fix follows mainline. The last context bank gets SCTLR = 0 and CBAR type S1_TRANS_S2_BYPASS, and the stream's S2CR becomes TRANS → that bank.
+- First we check that nobody uses that bank: SCTLR.M must be 0 and no valid entry may already translate to it. If it is in use, the step stops (`SmmuCbInUse`).
+- The geometry comes from ID1 (pgshift, numpage, NUMCB), and the whole 1 MiB SMMU window is now mapped.
+
 Two other findings from the bisect:
 - `adb exec-out dd` can stall part-way on Windows, leaving a truncated log that looks stale. `tools/sweet-log-pull.sh` now runs dd into the recovery's /tmp and then `adb pull`s the file.
 - The 26 MB image (full firmware) was probably fine. Only the SBL slices are embedded now anyway; BHIe will read the rest from disk.

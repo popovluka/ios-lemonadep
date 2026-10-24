@@ -46,6 +46,7 @@ typedef enum {
 	LemonadepMhiSmmuNotBypass,    /* stream 0x1c01 would be translated or faulted */
 	LemonadepMhiSmmuNoFreeEntry,
 	LemonadepMhiSmmuWriteRefused, /* the SMR/S2CR read back differently */
+	LemonadepMhiSmmuCbInUse,      /* the bypass-emulation context bank is taken */
 	LemonadepMhiBhiError,         /* BHI_STATUS = error */
 	LemonadepMhiBhiTimeout,
 	LemonadepMhiReadyTimeout,
@@ -73,6 +74,9 @@ typedef struct {
 	int smr_free;                 /* first unused stream-map entry, -1: none */
 	bool smmu_bypass, smmu_written;
 	uint32_t smr_want, s2cr_want, smr_rb, s2cr_rb;
+	/* bypass emulated through a context bank (the Qualcomm quirk) */
+	bool smmu_quirk;
+	uint32_t id1, cb, cb_sctlr0, cbar0, cbar_rb;
 	/* BHI */
 	const char *fw_name;
 	uint64_t fw_pa;
@@ -227,6 +231,47 @@ lemonadep_wlan_mhi_up(const lemonadep_wlan_io *io, const lemonadep_mhi_params *p
 		MTRY(rd(io, WlanWinSmmu, SMMU_S2CR(n), &r->s2cr_rb));
 		MTRY(rd(io, WlanWinSmmu, SMMU_SMR(n), &r->smr_rb));
 		r->smmu_written = true;
+		if (r->smr_rb == r->smr_want && SMMU_S2CR_TYPE(r->s2cr_rb) == SMMU_S2CR_FAULT) {
+			/* The quirk: emulate bypass through the last context bank, as
+			 * mainline does -- after checking nobody uses that bank. */
+			r->smmu_quirk = true;
+			MTRY(rd(io, WlanWinSmmu, SMMU_ID1, &r->id1));
+			const uint32_t ncb = r->id1 & 0xffu;
+			const unsigned pgshift = (r->id1 >> 31) ? 16u : 12u;
+			const uint32_t numpage = 1u << (((r->id1 >> 28) & 7u) + 1u);
+			if (!ncb) {
+				return LemonadepMhiSmmuCbInUse;
+			}
+			r->cb = ncb - 1u;
+			const uint32_t gr1 = 1u << pgshift, cbpage = (numpage + r->cb) << pgshift;
+			if (cbpage + (1u << pgshift) > SMMU_APPS_BYTES) {
+				return LemonadepMhiSmmuCbInUse;
+			}
+			MTRY(rd(io, WlanWinSmmu, cbpage + SMMU_CB_SCTLR, &r->cb_sctlr0));
+			MTRY(rd(io, WlanWinSmmu, gr1 + SMMU_GR1_CBAR(r->cb), &r->cbar0));
+			if (r->cb_sctlr0 & 1u) {
+				return LemonadepMhiSmmuCbInUse;
+			}
+			for (unsigned k = 0; k < (r->id0 & 0xffu); ++k) {
+				uint32_t ksmr, ks2cr;
+				MTRY(rd(io, WlanWinSmmu, SMMU_SMR(k), &ksmr));
+				MTRY(rd(io, WlanWinSmmu, SMMU_S2CR(k), &ks2cr));
+				const bool kvalid = exids ? (ks2cr & SMMU_S2CR_EXIDVALID) : (ksmr & SMMU_SMR_VALID);
+				if (k != n && kvalid && SMMU_S2CR_TYPE(ks2cr) == 0 && (ks2cr & 0xffu) == r->cb) {
+					return LemonadepMhiSmmuCbInUse;
+				}
+			}
+			CHECKPOINT("apps SMMU bypass context bank + S2CR trans");
+			MTRY(wr(io, WlanWinSmmu, cbpage + SMMU_CB_SCTLR, 0));
+			MTRY(wr(io, WlanWinSmmu, gr1 + SMMU_GR1_CBAR(r->cb), SMMU_CBAR_S1_TRANS_S2_BYPASS));
+			r->s2cr_want = r->cb | (exids ? SMMU_S2CR_EXIDVALID : 0);    /* type TRANS, privcfg default */
+			MTRY(wr(io, WlanWinSmmu, SMMU_S2CR(n), r->s2cr_want));
+			MTRY(rd(io, WlanWinSmmu, gr1 + SMMU_GR1_CBAR(r->cb), &r->cbar_rb));
+			MTRY(rd(io, WlanWinSmmu, SMMU_S2CR(n), &r->s2cr_rb));
+			if (((r->cbar_rb >> 16) & 3u) != 1u) {
+				return LemonadepMhiSmmuWriteRefused;
+			}
+		}
 		if (r->s2cr_rb != r->s2cr_want || r->smr_rb != r->smr_want) {
 			return LemonadepMhiSmmuWriteRefused;
 		}
