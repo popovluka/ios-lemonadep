@@ -1030,6 +1030,26 @@ Fix for the next run:
 - Fix: all Wi-Fi windows now use `ml_io_map_unmappable(pa, size, VM_WIMG_IO)`, which allocates from kernel_map.
 - **Rule for every driver here:** big MMIO windows never go through `ml_io_map`.
 
+**Run with the io_map fix + auto-reboot (kernel CI 40094527584, sweetwlan=15, sweetreboot=150; `logs/lemonadep-wlan9.txt`), observed on the phone:**
+- **The auto-reboot works.** The phone booted at 14:43:58 and was back in fastboot by itself at 14:47:12. The SDAM APID is 89, owner 0.
+- **BAR0** is 2 MiB at 0x60400000. RC and EP command registers are both 0x100006 (memory + bus master).
+- **MHI registers:**
+
+  | Register | Value | Meaning |
+  |---|---|---|
+  | REGLEN | 0x100 | |
+  | CFG | 0x800080 | |
+  | BHIOFF | 0x100 | |
+  | BHIEOFF | 0x224 | |
+  | SOC_HW_VERSION | 0x400c0110 | major 1, so the chip needs **amss.bin** |
+  | EE | 0 | PBL |
+  | MHIVER | 0xdeadbeef | probably not readable before wake; to be checked |
+
+- **SMMU:** sCR0 = 0x270406, so USFCFG is set and unmatched streams fault. ID0 = 0x4c017e59 (89 SMRs). No SMR matches 0x1c01.
+  - The guard stopped before BHI (status 7). No DMA was attempted.
+- New stage 14 handles this case. It writes a bypass entry (S2CR bypass + NSH, then SMR valid|0x1c01, mask 0) into the first free slot, reads both back, and stops if either was refused. This mirrors arm-smmu.c `arm_smmu_write_sme` for a bypass domain; LOS-K uses S2CR bypass for those.
+- BHI is now stage 15 and READY is 16.
+
 Two other findings from the bisect:
 - `adb exec-out dd` can stall part-way on Windows, leaving a truncated log that looks stale. `tools/sweet-log-pull.sh` now runs dd into the recovery's /tmp and then `adb pull`s the file.
 - The 26 MB image (full firmware) was probably fine. Only the SBL slices are embedded now anyway; BHIe will read the rest from disk.

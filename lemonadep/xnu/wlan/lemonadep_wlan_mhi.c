@@ -29,6 +29,7 @@ typedef enum {
 	LemonadepMhiPhaseNone,
 	LemonadepMhiPhaseBar = 12,    /* bridge window, BAR0 sized + assigned, mem + master */
 	LemonadepMhiPhaseRegs,        /* MHI/BHI registers, chip version, SMMU probe */
+	LemonadepMhiPhaseSmmu,        /* a bypass stream-map entry for 0x1c01 if none */
 	LemonadepMhiPhaseBhi,         /* SBL over BHI */
 	LemonadepMhiPhaseReady,       /* MHI READY */
 	LemonadepMhiPhaseDone,
@@ -43,6 +44,8 @@ typedef enum {
 	LemonadepMhiBadEe,            /* not in PBL (or AMSS) at power-up */
 	LemonadepMhiNoFirmware,
 	LemonadepMhiSmmuNotBypass,    /* stream 0x1c01 would be translated or faulted */
+	LemonadepMhiSmmuNoFreeEntry,
+	LemonadepMhiSmmuWriteRefused, /* the SMR/S2CR read back differently */
 	LemonadepMhiBhiError,         /* BHI_STATUS = error */
 	LemonadepMhiBhiTimeout,
 	LemonadepMhiReadyTimeout,
@@ -67,7 +70,9 @@ typedef struct {
 	/* SMMU (read-only) */
 	uint32_t scr0, id0, sgfsr, smr, s2cr;
 	int smr_index;                /* -1: no SMR matches the stream */
-	bool smmu_bypass;
+	int smr_free;                 /* first unused stream-map entry, -1: none */
+	bool smmu_bypass, smmu_written;
+	uint32_t smr_want, s2cr_want, smr_rb, s2cr_rb;
 	/* BHI */
 	const char *fw_name;
 	uint64_t fw_pa;
@@ -127,6 +132,7 @@ lemonadep_wlan_mhi_up(const lemonadep_wlan_io *io, const lemonadep_mhi_params *p
 	}
 	*r = (lemonadep_mhi_result){0};
 	r->smr_index = -1;
+	r->smr_free = -1;
 
 	/* pci_assign_resource(): size BAR0 (all-ones, read back), place it at the
 	 * window's first aligned address. QCA6490's BAR0 is 64-bit memory. */
@@ -186,11 +192,14 @@ lemonadep_wlan_mhi_up(const lemonadep_wlan_io *io, const lemonadep_mhi_params *p
 		uint32_t smr, s2cr;
 		MTRY(rd(io, WlanWinSmmu, SMMU_SMR(n), &smr));
 		MTRY(rd(io, WlanWinSmmu, SMMU_S2CR(n), &s2cr));
-		if (smr_matches(smr, s2cr, exids, LEMONADEP_WLAN_SID)) {
+		const bool used = exids ? (s2cr & SMMU_S2CR_EXIDVALID) != 0 : (smr & SMMU_SMR_VALID) != 0;
+		if (!used && r->smr_free < 0) {
+			r->smr_free = (int)n;
+		}
+		if (r->smr_index < 0 && smr_matches(smr, s2cr, exids, LEMONADEP_WLAN_SID)) {
 			r->smr_index = (int)n;
 			r->smr = smr;
 			r->s2cr = s2cr;
-			break;
 		}
 	}
 	/* Bypass: client port disabled, or the matching S2CR says bypass, or no
@@ -198,10 +207,39 @@ lemonadep_wlan_mhi_up(const lemonadep_wlan_io *io, const lemonadep_mhi_params *p
 	r->smmu_bypass = (r->scr0 & SMMU_sCR0_CLIENTPD) ||
 	    (r->smr_index >= 0 ? SMMU_S2CR_TYPE(r->s2cr) == SMMU_S2CR_BYPASS : !(r->scr0 & SMMU_sCR0_USFCFG));
 
+	/* No entry for the stream and unmatched streams fault (what this phone's
+	 * bootloader leaves: logs/lemonadep-wlan9.txt): give it a bypass entry the
+	 * way arm-smmu.c arm_smmu_write_sme() does for a bypass domain -- S2CR
+	 * (type bypass, privcfg default, SHCFG non-shareable) first, then the SMR
+	 * (valid, ID, mask 0), each read back as arm_smmu_write_smr() does (the
+	 * write can be refused). An entry that already matches is left alone. */
+	MPHASE(LemonadepMhiPhaseRegs, LemonadepMhiPhaseSmmu);
+	if (!r->smmu_bypass && r->smr_index < 0) {
+		if (r->smr_free < 0) {
+			return LemonadepMhiSmmuNoFreeEntry;
+		}
+		const uint32_t n = (uint32_t)r->smr_free;
+		r->s2cr_want = SMMU_S2CR_BYPASS << 16 | SMMU_S2CR_SHCFG_NSH << 8 | (exids ? SMMU_S2CR_EXIDVALID : 0);
+		r->smr_want = (exids ? 0 : SMMU_SMR_VALID) | LEMONADEP_WLAN_SID;
+		CHECKPOINT("apps SMMU stream-map write (S2CR bypass, SMR 0x1c01)");
+		MTRY(wr(io, WlanWinSmmu, SMMU_S2CR(n), r->s2cr_want));
+		MTRY(wr(io, WlanWinSmmu, SMMU_SMR(n), r->smr_want));
+		MTRY(rd(io, WlanWinSmmu, SMMU_S2CR(n), &r->s2cr_rb));
+		MTRY(rd(io, WlanWinSmmu, SMMU_SMR(n), &r->smr_rb));
+		r->smmu_written = true;
+		if (r->s2cr_rb != r->s2cr_want || r->smr_rb != r->smr_want) {
+			return LemonadepMhiSmmuWriteRefused;
+		}
+		r->smr_index = (int)n;
+		r->smr = r->smr_rb;
+		r->s2cr = r->s2cr_rb;
+		r->smmu_bypass = true;
+	}
+
 	/* mhi_async_power_up(): BHI_INTVEC = 0, the device must be in PBL (or
 	 * already AMSS). mhi_fw_load_handler(): the image's first sbl_size bytes
 	 * over BHI. */
-	MPHASE(LemonadepMhiPhaseRegs, LemonadepMhiPhaseBhi);
+	MPHASE(LemonadepMhiPhaseSmmu, LemonadepMhiPhaseBhi);
 	if (r->ee != MHI_EE_PBL) {
 		return LemonadepMhiBadEe;
 	}

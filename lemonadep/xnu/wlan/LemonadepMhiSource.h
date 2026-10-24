@@ -94,4 +94,5 @@
 #define SMMU_S2CR_EXIDVALID     (1u << 10)   /* with EXIDS */
 #define SMMU_S2CR_TYPE(v)       (((v) >> 16) & 3u)   /* 0 trans, 1 bypass, 2 fault */
 #define SMMU_S2CR_BYPASS        1u
+#define SMMU_S2CR_SHCFG_NSH     3u           /* S2CR_SHCFG [9:8], what arm_smmu_write_s2cr() sets */
 #endif

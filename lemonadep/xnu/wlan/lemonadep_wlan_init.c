@@ -10,8 +10,9 @@
  *   7 PARF   8 PHY ready  9 PERST released  10 link up  11 read config ID
  * stage 2 (lemonadep_wlan_mhi.c), after a full stage 1:
  *   12 BAR0 assigned  13 MHI/BHI registers + apps SMMU probe (read only)
- *   14 SBL over BHI   15+ MHI READY
- * Steps 14+ need the firmware as payload blobs (mkpayload --extra-blob
+ *   14 a bypass stream-map entry for 0x1c01 (if it has none)
+ *   15 SBL over BHI   16+ MHI READY
+ * Steps 15+ need the firmware as payload blobs (mkpayload --extra-blob
  * wlanfw1:amss.bin --extra-blob wlanfw2:amss20.bin, lemonadep/fw-wlan/,
  * never committed); the chip DMAs straight from where the blob sits.
  * See lemonadep/HANDOFF.md "Wi-Fi, stage 1" and "Wi-Fi, stage 2".
@@ -120,6 +121,10 @@ wlan_stage2(void *arg, wait_result_t wr)
 		printf("SWEET WLAN: smmu scr0=%#x id0=%#x sgfsr=%#x sid %#x: smr[%d]=%#x s2cr=%#x -> %s\n",
 		    m.scr0, m.id0, m.sgfsr, LEMONADEP_WLAN_SID, m.smr_index, m.smr, m.s2cr,
 		    m.smmu_bypass ? "bypass" : "NOT bypass");
+	}
+	if (m.smmu_written) {
+		printf("SWEET WLAN: smmu wrote entry %d: s2cr %#x -> read %#x, smr %#x -> read %#x\n", m.smr_free,
+		    m.s2cr_want, m.s2cr_rb, m.smr_want, m.smr_rb);
 	}
 	if (m.phase >= LemonadepMhiPhaseBhi && m.fw_name) {
 		printf("SWEET WLAN: bhi %s pa=%#llx sbl=%#x status=%#x after %u ms errcode=%#x dbg=%#x/%#x/%#x\n",

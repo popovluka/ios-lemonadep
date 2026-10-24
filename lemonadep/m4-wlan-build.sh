@@ -3,7 +3,7 @@
 # plus sweetwlan=N, which stops QCA6490/PCIe0 bring-up cleanly after step N
 # (see bsd/dev/lemonadep_wlan.c; 11+ = through reading the chip's PCI ID).
 #   SWEETWLAN=N lemonadep/m4-wlan-build.sh KERNEL [CPUS]
-# Stages 1-13 need no firmware; 14+ embed amss.bin/amss20.bin (below).
+# Stages 1-14 need no firmware; 15+ embed amss.bin/amss20.bin (below).
 # Logs: TWRP + tools/sweet-log-pull.sh (needs ufsrw=1, set below).
 set -euo pipefail
 KERNEL=${1:?usage: SWEETWLAN=N m4-wlan-build.sh KERNEL [CPUS]}
@@ -29,11 +29,11 @@ if [ "${SWEETREBOOT:-300}" != 0 ]; then
 fi
 BOOTARGS="$BOOTARGS sweettouch=1 sweetkeys=1 sweetusb=0 sweetwlan=${SWEETWLAN:-1} wdt=-1 wdt_test=no_user_checkin"
 
-# Stage 2 (sweetwlan >= 14) hands the chip its firmware straight from where
+# Stage 2 (sweetwlan >= 15) hands the chip its firmware straight from where
 # these blobs land; pull them first with lemonadep/tools/pull-wlan-fw.sh.
 FW="$REPO/lemonadep/fw-wlan"
 BLOBS=()
-if [ "${SWEETWLAN:-1}" -ge 14 ]; then
+if [ "${SWEETWLAN:-1}" -ge 15 ]; then
 	for f in amss.bin amss20.bin; do
 		[ -f "$FW/$f" ] || { echo "error: $FW/$f missing (run lemonadep/tools/pull-wlan-fw.sh)" >&2; exit 1; }
 	done

@@ -24,7 +24,7 @@ static uint32_t *win[WlanWinCount];
 static uint32_t bar0_mask_lo, bar0, bar1; /* sizing state */
 static unsigned bhi_polls, ready_polls, reads_after_db;
 static uint32_t chip_ee, chip_major;
-static bool chip_bhi_fails;
+static bool chip_bhi_fails, smmu_ro;
 static uint64_t want_pa;
 static uint32_t want_size;
 
@@ -112,6 +112,7 @@ mwrite(void *c, unsigned w, uint32_t off, uint32_t v)
 		}
 		return 0;
 	}
+	if (w == WlanWinSmmu && smmu_ro) return 0;   /* hypervisor drops the write */
 	*reg(w, off) = v;
 	return 0;
 }
@@ -126,6 +127,7 @@ reset(void)
 	chip_ee = MHI_EE_PBL;
 	chip_major = 2;
 	chip_bhi_fails = false;
+	smmu_ro = false;
 	/* apps SMMU: 4 SMRs, unmatched streams bypass (USFCFG 0), SMR 1 = UFS-like */
 	*reg(WlanWinSmmu, SMMU_ID0) = 4;
 	*reg(WlanWinSmmu, SMMU_SMR(1)) = SMMU_SMR_VALID | 0x0080u;
@@ -186,11 +188,38 @@ main(void)
 	st = lemonadep_wlan_mhi_up(&io, &p, &r, LemonadepMhiPhaseNone);
 	CHECK(st == LemonadepMhiOk && r.smr_index == 2 && r.smmu_bypass);
 
-	/* ---- unmatched streams fault (USFCFG): no BHI ---- */
+	/* ---- unmatched streams fault (USFCFG), as on the phone: a bypass entry is
+	 * written into the first free slot (S2CR first), read back, then BHI ---- */
 	reset();
+	want_pa = p.fw_v2.pa;
 	*reg(WlanWinSmmu, SMMU_sCR0) = SMMU_sCR0_USFCFG;
 	st = lemonadep_wlan_mhi_up(&io, &p, &r, LemonadepMhiPhaseNone);
-	CHECK(st == LemonadepMhiSmmuNotBypass && r.smr_index == -1);
+	CHECK(st == LemonadepMhiOk && r.smmu_written && r.smr_index == 0 && r.smmu_bypass);
+	CHECK(*reg(WlanWinSmmu, SMMU_SMR(0)) == (SMMU_SMR_VALID | 0x1c01u));
+	CHECK(*reg(WlanWinSmmu, SMMU_S2CR(0)) == (1u << 16 | 3u << 8));
+	CHECK(*reg(WlanWinSmmu, SMMU_SMR(1)) == (SMMU_SMR_VALID | 0x0080u));   /* others untouched */
+
+	/* ---- same, stop after the SMMU step: nothing sent to BHI ---- */
+	reset();
+	*reg(WlanWinSmmu, SMMU_sCR0) = SMMU_sCR0_USFCFG;
+	st = lemonadep_wlan_mhi_up(&io, &p, &r, LemonadepMhiPhaseSmmu);
+	CHECK(st == LemonadepMhiOk && r.phase == LemonadepMhiPhaseSmmu && r.smmu_bypass);
+	CHECK(*reg(WlanWinMem, r.bar_pa - LEMONADEP_PCIE0_MEM_PA + BHIOFF + BHI_IMGTXDB) == 0);
+
+	/* ---- the write is refused: stop, no BHI ---- */
+	reset();
+	*reg(WlanWinSmmu, SMMU_sCR0) = SMMU_sCR0_USFCFG;
+	smmu_ro = true;
+	st = lemonadep_wlan_mhi_up(&io, &p, &r, LemonadepMhiPhaseNone);
+	CHECK(st == LemonadepMhiSmmuWriteRefused && r.smmu_written && !r.smmu_bypass);
+	CHECK(*reg(WlanWinMem, r.bar_pa - LEMONADEP_PCIE0_MEM_PA + BHIOFF + BHI_IMGTXDB) == 0);
+
+	/* ---- no free entry ---- */
+	reset();
+	*reg(WlanWinSmmu, SMMU_sCR0) = SMMU_sCR0_USFCFG;
+	for (unsigned n = 0; n < 4; ++n) *reg(WlanWinSmmu, SMMU_SMR(n)) = SMMU_SMR_VALID | (0x100u + n);
+	st = lemonadep_wlan_mhi_up(&io, &p, &r, LemonadepMhiPhaseNone);
+	CHECK(st == LemonadepMhiSmmuNoFreeEntry);
 
 	/* ---- no firmware blob for this version ---- */
 	reset();

@@ -43,4 +43,6 @@ until adb devices 2>/dev/null | grep -q recovery; do
 	[ "$t" -lt 120 ] || { echo "TWRP did not come up" >&2; exit 3; }
 done
 sleep 5
-bash "$REPO/tools/sweet-log-pull.sh" "$OUT"
+# relative path: under MSYS_NO_PATHCONV a /d/... script path reaches the
+# Windows python3 unconverted and the decode step fails
+(cd "$REPO" && bash tools/sweet-log-pull.sh "$OUT")
