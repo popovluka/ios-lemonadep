@@ -1005,6 +1005,23 @@ Next: MHI and firmware download (the firmware stays on the phone and is never co
 
 Not done yet: MHI context and rings, M0, BHIe (rest of the image), interrupts, the PCIe→DDR interconnect vote. If BHI times out with the SMMU in bypass, that vote is the first suspect.
 
+**Run 1 of stage 2 (kernel CI 40013326022, sweetwlan=15, 26 MB image with both firmware blobs): no log at all.**
+- The pulled ring was byte-identical to the previous boot's, flush #13 again. The new boot never flushed once.
+- Flushes come every `ufslogsecs` (10 s by default), so the SoC stopped, or the boot never got that far, within 10 s of the log starting.
+- Not yet known which of these it was:
+  - the bigger payload
+  - stage 1 (unchanged and proven, so unlikely)
+  - BAR0 sizing
+  - the first BAR0 read
+  - the apps SMMU GR0 read (the hypervisor may trap it)
+  - the BHI doorbell
+
+Fix for the next run:
+- Stage 2 now runs on its own thread after stage 1.
+- `wlan_checkpoint` logs `SWEET WLAN: next: <access>` and waits 2.5 s before each risky access.
+- The build sets `ufslogsecs=1`.
+- One boot now names the access that kills the SoC, and the stage-1 lines show whether the payload booted.
+
 ## Overlay 1009: four UI fixes from PixeliOS (2026-10-23)
 
 PixeliOS ([PixOS-Project/pixelios-kernel](https://github.com/PixOS-Project/pixelios-kernel)) is iOS 16 on the Pixel 6a, built on the same ios-sweet base. The four patches below touch files that are byte-identical to ours, so `lemonadep/xnu/gen-1009.sh` applies them unchanged at their commit 41198ee. check-overlay: ok.

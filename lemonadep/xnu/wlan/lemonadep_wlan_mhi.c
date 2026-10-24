@@ -79,6 +79,7 @@ typedef struct {
 } lemonadep_mhi_result;
 
 #define MTRY(expr) do { if (expr) return LemonadepMhiIoError; } while (0)
+#define CHECKPOINT(what) do { if (io->checkpoint) io->checkpoint(io->cookie, (what)); } while (0)
 #define MPHASE(from, to) do { \
 		if (stop_after != LemonadepMhiPhaseNone && stop_after == (from)) { return LemonadepMhiOk; } \
 		r->phase = (to); \
@@ -130,6 +131,7 @@ lemonadep_wlan_mhi_up(const lemonadep_wlan_io *io, const lemonadep_mhi_params *p
 	/* pci_assign_resource(): size BAR0 (all-ones, read back), place it at the
 	 * window's first aligned address. QCA6490's BAR0 is 64-bit memory. */
 	MPHASE(LemonadepMhiPhaseNone, LemonadepMhiPhaseBar);
+	CHECKPOINT("size BAR0 (config writes)");
 	uint32_t lo, hi;
 	MTRY(wr(io, WlanWinConf, PCI_BAR0, 0xffffffffu));
 	MTRY(wr(io, WlanWinConf, PCI_BAR1, 0xffffffffu));
@@ -159,6 +161,7 @@ lemonadep_wlan_mhi_up(const lemonadep_wlan_io *io, const lemonadep_mhi_params *p
 	/* MHI registers (all-ones = the BAR does not decode), the chip version,
 	 * the BHI block. Then the apps SMMU's stream mapping, read only. */
 	MPHASE(LemonadepMhiPhaseBar, LemonadepMhiPhaseRegs);
+	CHECKPOINT("first BAR0 read (MHI registers)");
 	MTRY(bar_rd(io, r, MHI_REGLEN, &r->reglen));
 	MTRY(bar_rd(io, r, MHI_VER, &r->ver));
 	MTRY(bar_rd(io, r, MHI_CFG, &r->cfg));
@@ -174,6 +177,7 @@ lemonadep_wlan_mhi_up(const lemonadep_wlan_io *io, const lemonadep_mhi_params *p
 	MTRY(bar_rd(io, r, r->bhioff + BHI_EXECENV, &r->ee));
 	MTRY(bar_rd(io, r, r->bhioff + BHI_STATUS, &r->bhi_status0));
 
+	CHECKPOINT("apps SMMU GR0 read");
 	MTRY(rd(io, WlanWinSmmu, SMMU_sCR0, &r->scr0));
 	MTRY(rd(io, WlanWinSmmu, SMMU_ID0, &r->id0));
 	MTRY(rd(io, WlanWinSmmu, SMMU_sGFSR, &r->sgfsr));
@@ -212,6 +216,7 @@ lemonadep_wlan_mhi_up(const lemonadep_wlan_io *io, const lemonadep_mhi_params *p
 		return LemonadepMhiSmmuNotBypass;
 	}
 	r->sbl_bytes = fw->bytes < LEMONADEP_MHI_SBL_BYTES ? fw->bytes : LEMONADEP_MHI_SBL_BYTES;
+	CHECKPOINT("BHI doorbell (chip DMA starts)");
 	MTRY(bar_wr(io, r, r->bhioff + BHI_INTVEC, 0));
 	MTRY(bar_wr(io, r, r->bhioff + BHI_STATUS, 0));
 	MTRY(bar_wr(io, r, r->bhioff + BHI_IMGADDR_HIGH, (uint32_t)(fw->pa >> 32)));

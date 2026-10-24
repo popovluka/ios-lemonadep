@@ -18,6 +18,9 @@ BOOTARGS="debug=0xc serial=3 cpus=$CPUS keepsyms=1 -enable_kprintf_spam -noprogr
 BOOTARGS="$BOOTARGS unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1"
 # ufsrw=1: the persistent log ring is only written by a read-write boot.
 BOOTARGS="$BOOTARGS ufsrw=1 sweetfb_noconsole=1"
+# Flush the log ring every second (default 10 s): stage 2 logs a checkpoint
+# before each risky access and waits for it to reach the disk.
+BOOTARGS="$BOOTARGS ufslogsecs=1"
 BOOTARGS="$BOOTARGS sweettouch=1 sweetkeys=1 sweetusb=0 sweetwlan=${SWEETWLAN:-1} wdt=-1 wdt_test=no_user_checkin"
 
 # Stage 2 (sweetwlan >= 14) hands the chip its firmware straight from where

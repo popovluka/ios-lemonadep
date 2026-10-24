@@ -36,6 +36,9 @@ typedef struct {
 	/* RPMh VRM vote: voltage, optional HPM, enable. 0 on success. */
 	int (*rpmh_vote)(void *cookie, const char *res, unsigned mv, int hpm);
 	void (*delay_us)(void *cookie, unsigned us);
+	/* Optional (stage 2): called before each access that could take the SoC
+	 * down, so the kernel can log it and let the log reach the disk first. */
+	void (*checkpoint)(void *cookie, const char *what);
 } lemonadep_wlan_io;
 
 typedef enum {
