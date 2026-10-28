@@ -1418,7 +1418,7 @@
 +#endif
 --- /dev/null
 +++ b/bsd/dev/lemonadep/lemonadep_gmu_mem.c
-@@ -0,0 +1,302 @@
+@@ -0,0 +1,303 @@
 +/* SPDX-License-Identifier: MIT */
 +/*
 + * lemonadep: the GMU's real memory -- what lets the GMU actually run its
@@ -1601,10 +1601,10 @@
 +		if (valid && type == 0 && (s2cr & 0xffu) < 64) {
 +			used_banks |= (uint64_t)1 << (s2cr & 0xffu);
 +		}
-+		/* Attachable exactly as ArmSmmu4KAttachStreams' preflight wants:
-+		 * not a live match, and S2CR already FAULT. */
-+		uint32_t exids_valid = p->exids ? 1u << 10 : 0;
-+		if (!valid && (s2cr & ~exids_valid) == (2u << 16) && p->free_slots < 2) {
++		/* FAULT is this SMMU's idle state, not "in use": the vendor's own
++		 * driver releases a stream by writing it, and the boot loader
++		 * leaves a stale context index in [7:0]. Match the type alone. */
++		if (!valid && type == 2u && p->free_slots < 2) {
 +			p->slots[p->free_slots++] = i;
 +		}
 +	}
@@ -1698,9 +1698,10 @@
 +	}
 +
 +	s->step = LemonadepGmuSmmuStepAttach;
-+	ArmSmmu4KStream streams[2] = {{p->slots[0], LEMONADEP_GMU_SMMU_SID},
-+	    {p->slots[1], LEMONADEP_GMU_SMMU_SID | LEMONADEP_GMU_SMMU_SID_MASK}};
-+	s->sid_count = (p->free_slots >= 2 && p->sid_bits >= 11) ? 2 : 1;
++	/* Fixed entries, as the vendor's driver and Linux use them on this SMMU:
++	 * table entry 0 belongs to the 3D core (stream 0), 1 and 2 to the GMU. */
++	ArmSmmu4KStream streams[2] = {{1u, LEMONADEP_GMU_SMMU_SID}, {2u, LEMONADEP_GMU_SMMU_SID | LEMONADEP_GMU_SMMU_SID_MASK}};
++	s->sid_count = (p->sid_bits >= 11) ? 2 : 1;
 +	if ((status = ArmSmmu4KAttachStreams(io, &s->streams, streams, s->sid_count, p->bank, &s->context,
 +	    &s->routes)) != ArmSmmu4KSuccess) {
 +		return status;
@@ -2979,7 +2980,7 @@
 +            unsigned live=valid(r->id0,smr,s2cr);
 +            if(attached) {
 +                if(smr!=(valid_smr(r->id0)|s[own].sid) || s2cr!=(bank|valid_s2cr(r->id0)))return ArmSmmu4KStateMismatch;
-+            } else if((s2cr&~valid_s2cr(r->id0))!=FAULT ||
++            } else if((s2cr&(UINT32_C(3)<<16))!=FAULT ||
 +                (live && smr!=(valid_smr(r->id0)|s[own].sid)))return ArmSmmu4KBusy;
 +            ++r->streams_verified;
 +        } else if(valid(r->id0,smr,s2cr)) {
