@@ -1681,18 +1681,20 @@
 
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -56,4 +56,6 @@
+@@ -56,7 +56,9 @@
  extern void lemonadep_gpu_init(void);
  extern void lemonadep_wlan_init(void);
  extern void lemonadep_reboot_arm(void);
  extern void lemonadep_reboot_poll(void);
 +extern void redwood_battery_init(void);
 +extern void redwood_dpu_init(void);
-@@ -810,5 +812,7 @@
- 	lemonadep_gpu_init();
+
+ #define REG_CAP         0x00
+ #define REG_IS          0x20
+@@ -670,4 +670,6 @@
  	lemonadep_wlan_init();
- 	lemonadep_reboot_arm();
 +	redwood_battery_init();         /* BQ28Z610 gauge + RedwoodBattery IOPMPowerSource */
 +	redwood_dpu_init();             /* DPU page-flip + DSI backlight (board=lemonadep) */
  	return 0;
  }
+
