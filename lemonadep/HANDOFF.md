@@ -1375,6 +1375,58 @@ look for:
 Kernel run: https://github.com/popovluka/ios-lemonadep/actions/runs/39853877374
 (cpus=4 boot image built from it by `m2-boot-build.sh ... 4`).
 
+## GPU, Phase 10: the GMU has an SMMU context — stage 8 fully clean on-device (2026-10-28 ~23:20)
+
+**Stage 8 passes end to end for the first time.** Kernel `569e1f1e` (CircleCI job 6,
+commit 74c1eb3), boot image `9696d03a`, `sweetgpu=8 cpus=8`:
+
+```
+SWEET GPU: smmu streams valid=0 trans=0 bypass=0 fault=6 banks_on=0 -> bank=0 slots=0,1 (2 free)
+SWEET GPU: GMU SMMU setup status=0 step=7 sids=2 tables=774 leaves=4111 program_phase=5 fsr=0x400 attach_phase=4
+SWEET GPU: GMU cold start status=0 phase=7
+SWEET GPU: stopped cleanly as requested (sweetgpu=8)
+```
+
+Before the fix the same hardware gave `(0 free)` and `status=6 step=0`. The rest of the
+boot is unaffected: 8/8 CPUs, gauge ok, touch `TCM bring-up ok`, 603 `exec`s, `sgfsr=0x0`,
+no panic. **Stages 1-8 are now all verified on-device.**
+
+**The bug was ours, not the hardware's.** Two places demanded a claimable stream-table
+entry's S2CR equal FAULT *exactly* (`(s2cr & ~exids_valid) == (2u << 16)` in the probe,
+`(s2cr & ~valid_s2cr(id0)) != FAULT` in ArmSmmu4K's `scan()`). S2CR keeps the context index
+in [7:0] and the boot loader leaves a stale one there, so no entry ever matched and all six
+idle entries were reported as "0 free". Both now compare the type field [17:16] alone.
+
+**FAULT is this SMMU's idle state, not a sign of ownership.** Confirmed from
+`furangelz/hackios-xnu-kernel` (`xnu/files/bsd/dev/redwood_adreno.c`, branch `lemonadep`),
+which runs an Adreno 660 on this same SoC: its `space_off()` *writes* `S2CR_FAULT` to
+release a stream, and it never searches for a free slot — it claims fixed entries, with
+`CORE_MATCH 0`/`CORE_STREAM 0` for the 3D core and `GMU_MATCH 1`/`GMU_STREAM 5` for the GMU
+(`SMMU_STREAM_MASK 0x400`, `SECOND_MATCH 2`). We now take entries 1 and 2 likewise. Our SID
+constants already matched theirs; only the entry choice was wrong.
+
+**Other facts worth keeping from that driver** (same SMMU, `kgsl-smmu@3da0000`, which is the
+address we already use): its streams are 0 the GPU, 1 its low-priority twin, 2 secure
+content, 5 the GMU; the node is `qcom,skip-init`, so the boot loader's table is left as
+found; the global registers (smr, s2cr, cbar, cba2r) are **the hypervisor's imitation**, so
+every write must be read back (ArmSmmu4KAttachStreams already does this and quarantines on
+mismatch); the SMMU needs its own clock vote (`GPUCC_SMMU_VOTE_CBCR 0x5000`); and the 3D
+core additionally needs TrustZone + the zap shader (their steps 11/12/19) while the GMU
+alone does not.
+
+**Open on this:** `fsr=0x400` on the GMU's context after programming (bit 10, not one of
+arm-smmu's named fault bits) — benign so far in that cold start still returned `status=0`,
+but unexplained. The context bank is still the probe's choice (bank 0, since none are
+enabled); furangelz reserve context 0 for the 3D core and give the GMU context 1, so this
+needs revisiting before the core is brought up.
+
+**Next:** stage 8 stops at `StartProbe` because `stage_stop[8]` says so; the GMU has not
+been released from reset. Going further means a full run (`stop_after = None`, through
+`StartReady`/`Done`), which is **the exact step that produced the XBL ramdump / SoC-level
+fault before**. The diagnosed cause of that fault — the 54476-byte icache block unmapped
+and no GMU SMMU context — is what this phase fixed, so the attempt is now justified, but it
+is still the riskiest step in this series and should be its own stage, not a silent default.
+
 ## KERNEL BUILDS AGAIN — moved CI to CircleCI, off GitHub macOS runners (2026-10-28 ~20:30)
 
 A kernel with patch 1011 in it now exists and is verified:
