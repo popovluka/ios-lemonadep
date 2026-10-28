@@ -1,6 +1,6 @@
 --- a/iokit/DriverKit/IORPC.h
 +++ b/iokit/DriverKit/IORPC.h
-@@ -224,6 +224,15 @@ struct IORPC {
+@@ -224,6 +224,16 @@ struct IORPC {
  	IORPCMessageMach * reply;
  	uint32_t           sendSize;
  	uint32_t           replySize;
@@ -16,3 +16,4 @@
 +#endif /* KERNEL */
  };
  typedef struct IORPC IORPC;
+ 

@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/bsd/sys/redwood_input.h
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,26 @@
 +/*
 + * redwood_input.h: types shared between bsd/dev/redwood_battery.c and
 + * iokit/Kernel/arm/RedwoodBattery.cpp (which cannot include BSD headers).
