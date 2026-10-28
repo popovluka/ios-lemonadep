@@ -1375,6 +1375,45 @@ look for:
 Kernel run: https://github.com/popovluka/ios-lemonadep/actions/runs/39853877374
 (cpus=4 boot image built from it by `m2-boot-build.sh ... 4`).
 
+## GPU, Phase 11: the GMU leaves reset without faulting the SoC; firmware never reports ready (2026-10-28 ~23:45)
+
+**The SoC-level fault is gone.** Stage 9 (new: full run, `stop_after = None`) on kernel
+`d938f84d` (CircleCI pipeline 8, commit 7780169), image `e3703d34`, `sweetgpu=9 cpus=8`:
+
+```
+SWEET GPU: stage=9 stop_after=0
+SWEET GPU: GMU SMMU setup status=0 step=7 sids=2 tables=774 leaves=4111 program_phase=5 fsr=0x400 attach_phase=4
+SWEET GPU: GMU cold start status=3 phase=8
+```
+
+`status=3` is `LemonadepGmuTimeout`; phase 8 is `LemonadepGmuPhaseStartReady`, which writes
+`CM3_SYSRESET=1`, `PWR_COL_CP_RESP=0`, `CM3_SYSRESET=0` — **releasing the GMU from reset** —
+then polls `CM3_FW_INIT_RESULT` for the pattern the probe chose. The phone stayed up for
+minutes afterwards with the kernel in charge (no XBL ramdump, no reboot, no fall back to
+Android), and the rest of the boot was normal. The earlier attempt at this same step is what
+produced the ramdump, so the Phase 10 diagnosis (unmapped icache block + no GMU SMMU
+context) is confirmed as its cause.
+
+**What is unknown now** is why the firmware does not signal init. Nothing is printed to tell
+them apart, and that is the next thing to fix before changing any behaviour:
+- the probe value read at `CM3_DTCM_START + LEMONADEP_A660_GMU_START_PROBE_OFFSET`, which
+  selects between the LOW and HIGH `ready_mask`/`ready_val` pairs. If that read returns a
+  stale or zero value the wrong pattern is selected and the poll can never match even if the
+  GMU initialised correctly.
+- the last value `poll_core()` actually saw in `CM3_FW_INIT_RESULT` (it is captured in
+  `value` but discarded when `TRY` returns).
+Add both to the log line first; it costs one boot and no risk.
+
+Other candidates after that: whether the icache block's *content* lands where the GMU's
+stub expects (the mapping exists, the placement is unverified), and whether blocks other
+than the 54476-byte icache one still need delivering.
+
+**Also fixed here:** `stage_stop[]`'s bounds check used
+`stage < count ? stage_stop[stage] : LemonadepGmuPhaseNone`, and `None` means "never stop",
+so *any* out-of-range `sweetgpu=` — a typo like 99 included — already ran the full
+GMU-from-reset path unannounced. Stage 9 now has its own entry and an unknown stage leaves
+the GPU alone.
+
 ## GPU, Phase 10: the GMU has an SMMU context — stage 8 fully clean on-device (2026-10-28 ~23:20)
 
 **Stage 8 passes end to end for the first time.** Kernel `569e1f1e` (CircleCI job 6,
