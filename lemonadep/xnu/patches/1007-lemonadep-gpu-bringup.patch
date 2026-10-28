@@ -34,7 +34,7 @@
 
 --- /dev/null
 +++ b/bsd/dev/lemonadep_gpu.c
-@@ -0,0 +1,330 @@
+@@ -0,0 +1,335 @@
 +/*
 + * lemonadep: GPU bring-up, first on-device slice. Real register writes
 + * only: CX GDSC + the seven GMU clock branches (lemonadep_gpu_reserve.c),
@@ -351,6 +351,11 @@
 +	lemonadep_gmu_status gmu_status = lemonadep_gmu_cold_start(&gmu_io, &fw, hfi_iova, log_iova,
 +	    LEMONADEP_GMU_LOG_BYTES, &gmu_phase, stop_after);
 +	printf("SWEET GPU: GMU cold start status=%d phase=%d\n", gmu_status, gmu_phase);
++	if (lemonadep_gmu_start_ready.seen) {
++		printf("SWEET GPU: GMU start-ready probe=0x%x -> mask=0x%x want=0x%x, FW_INIT_RESULT=0x%x\n",
++		    lemonadep_gmu_start_ready.probe, lemonadep_gmu_start_ready.mask,
++		    lemonadep_gmu_start_ready.want, lemonadep_gmu_start_ready.fw_init);
++	}
 +	if (gmu_status == LemonadepGmuOk && gmu_phase == LemonadepGmuPhaseDone) {
 +		printf("SWEET GPU: GMU reports ready. Stopping before CP ring/CP_ME_INIT "
 +		    "(needs SMMU context + real IOVA-backed memory, not yet wired)\n");
@@ -991,7 +996,7 @@
 +}
 --- /dev/null
 +++ b/bsd/dev/lemonadep/lemonadep_gmu_coldstart.c
-@@ -0,0 +1,354 @@
+@@ -0,0 +1,373 @@
 +/*
 + * lemonadep: Adreno 660 GMU cold start -- CX GDSC enable, RSC/PDC handshake,
 + * firmware load, HFI bring-up through the bandwidth table. Every register
@@ -1253,6 +1258,15 @@
 + * icache-target bytes already copied into the icache buffer by the caller
 + * (see load_firmware's LemonadepGmuFwTargetIcache case).
 + */
++/* StartReady debugging. A LemonadepGmuTimeout there says only that the GMU
++ * never reported ready; it cannot say whether the firmware failed to init or
++ * whether the DTCM probe picked the wrong pattern to wait for. Record both so
++ * the caller can print them -- this file is #included into lemonadep_gpu.c,
++ * which has printf; this one is kept freestanding for its host test. */
++static struct {
++	uint32_t probe, mask, want, fw_init, seen;
++} lemonadep_gmu_start_ready;
++
 +lemonadep_gmu_status
 +lemonadep_gmu_cold_start(const lemonadep_gmu_io *io, const lemonadep_gmu_firmware *fw,
 +    uint64_t hfi_iova, uint64_t log_iova, uint32_t log_size_bytes, lemonadep_gmu_phase *phase,
@@ -1334,11 +1348,21 @@
 +	    LEMONADEP_A660_GMU_START_MASK_LOW : LEMONADEP_A660_GMU_START_MASK_HIGH;
 +	uint32_t ready_val = value <= LEMONADEP_A660_GMU_START_PROBE_THRESHOLD ?
 +	    LEMONADEP_A660_GMU_START_READY_LOW : LEMONADEP_A660_GMU_START_READY_HIGH;
++	lemonadep_gmu_start_ready.probe = value;
++	lemonadep_gmu_start_ready.mask = ready_mask;
++	lemonadep_gmu_start_ready.want = ready_val;
 +	NEXT_PHASE(LemonadepGmuPhaseStartProbe, LemonadepGmuPhaseStartReady);
 +	TRY(io_write(io, LemonadepGmuWindowCore, A660_GMU_CM3_SYSRESET, 1));
 +	TRY(io_write(io, LemonadepGmuWindowCore, A660_GPU_GMU_CX_GMU_PWR_COL_CP_RESP, 0));
 +	TRY(io_write(io, LemonadepGmuWindowCore, A660_GMU_CM3_SYSRESET, 0));
-+	TRY(poll_core(io, A660_GMU_CM3_FW_INIT_RESULT, ready_mask, ready_val, 2000, &value));
++	/* Not TRY: on a timeout the last FW_INIT_RESULT is the whole point. */
++	value = 0;
++	lemonadep_gmu_status ready = poll_core(io, A660_GMU_CM3_FW_INIT_RESULT, ready_mask, ready_val, 2000, &value);
++	lemonadep_gmu_start_ready.fw_init = value;
++	lemonadep_gmu_start_ready.seen = 1;
++	if (ready != LemonadepGmuOk) {
++		return ready;
++	}
 +	NEXT_PHASE(LemonadepGmuPhaseStartReady, LemonadepGmuPhaseDone);
 +	/* HFI table is already armed (QTBL_INFO=1 was written in fw_start above);
 +	 * the caller now runs a6xx_hfi_start()'s message sequence (perf_table,
