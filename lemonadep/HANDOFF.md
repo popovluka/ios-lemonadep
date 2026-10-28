@@ -1375,6 +1375,48 @@ look for:
 Kernel run: https://github.com/popovluka/ios-lemonadep/actions/runs/39853877374
 (cpus=4 boot image built from it by `m2-boot-build.sh ... 4`).
 
+## GPU, Phase 12: the GMU's firmware does not execute — FW_INIT_RESULT stays 0 (2026-10-29 ~00:20)
+
+Kernel `94e7ed70` (pipeline 10, commit 5b796b1) adds the StartReady diagnostics. Stage 9:
+
+```
+SWEET GPU: GMU cold start status=3 phase=8
+SWEET GPU: GMU start-ready probe=0x173daf1f -> mask=0xffffffff want=0xbabeface, FW_INIT_RESULT=0x0
+```
+
+**The pattern was never the problem.** `0xbabeface` is the real a6xx "firmware
+initialised" magic, and the DTCM probe (`0x173daf1f`, well above the threshold) selected it
+correctly. `FW_INIT_RESULT=0x0` means the GMU wrote nothing: it is out of reset and not
+executing.
+
+**Ruled out this round**, all verified against the log and the code:
+- the icache *is* copied — `lemonadep_gmu_icache_load()` is called (lemonadep_gpu.c), returns
+  the 54476 bytes the log reports, and `lemonadep_clean_to_poc()` flushes it;
+- its address is right — `LEMONADEP_GMU_ICACHE_IOVA` is `0x4000`, the GMU VA the firmware
+  block targets;
+- the SMMU context is good — `GMU SMMU setup status=0`, `sgfsr=0x0`, stream 5 on entries 1/2.
+
+**Still open, in rough order of suspicion:**
+- the CM3 boot configuration before SYSRESET is released (does anything set CM3_CFG /
+  BOOT_CONFIG for a non-secure boot out of the icache? compare `a6xx_gmu_fw_start()`);
+- the DTCM write offset in `load_firmware()`: `A660_GMU_CM3_DTCM_START + (b->addr -
+  0x10004000u)`, a magic constant that is worth re-deriving against the real firmware's
+  block addresses;
+- the context bank: we use bank 0, furangelz give the GMU context 1 and keep 0 for the 3D
+  core;
+- `fsr=0x400` on that context, still unexplained.
+
+**Scope reality check, recorded so it is not rediscovered.** A running GMU is not GPU
+acceleration and does not by itself change anything the user can see. The GMU is the
+Adreno's power-management microcontroller; after it comes the 3D core (CP ring, ME_INIT,
+microcode, and the zap shader through TrustZone — furangelz's steps 11/12/19). And even a
+fully working kernel-side GPU would not make iOS draw with it: CoreAnimation reaches the
+GPU through a userland driver, and furangelz's working acceleration is **Mesa/OpenGL ES
+injected into their userland** (`USERLAND_VARS="GL=1"`), which their architecture allows
+because they build a RAM userland image. This port runs stock iOS from a real UFS root and
+has no injection path, so acceleration here needs that built too. Do not promise GPU
+acceleration as "a few stages away".
+
 ## GPU, Phase 11: the GMU leaves reset without faulting the SoC; firmware never reports ready (2026-10-28 ~23:45)
 
 **The SoC-level fault is gone.** Stage 9 (new: full run, `stop_after = None`) on kernel
