@@ -1,0 +1,35 @@
+name: cache-xcode15
+
+# macOS 14 Actions runners are being retired 2026-11-02 (brownouts since
+# 2026-10-05); macOS 15+ runners only ship Xcode 16+/26+, whose iig does not
+# match the xnu-8796 IORPC ABI the sweet/lemonadep kernel build needs.
+# One-shot: grab the still-pre-installed Xcode 15.x off a macos-14 runner
+# while any are still assignable, so the kernel build can restore it onto a
+# current runner image instead of depending on macos-14 at all.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  cache-xcode:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - name: Locate + package the lowest installed Xcode (15.x)
+        run: |
+          set -e
+          XC=$(ls -d /Applications/Xcode_*.app | sort -V | head -1)
+          echo "packaging $XC"
+          "$XC/Contents/Developer/usr/bin/xcodebuild" -version
+          ditto -c -k --sequesterRsrc --keepParent "$XC" "$RUNNER_TEMP/xcode-cache.zip"
+          ls -lh "$RUNNER_TEMP/xcode-cache.zip"
+          basename "$XC" > "$RUNNER_TEMP/xcode-name.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xcode-15-cache
+          path: |
+            ${{ runner.temp }}/xcode-cache.zip
+            ${{ runner.temp }}/xcode-name.txt
+          retention-days: 90
+          if-no-files-found: error
