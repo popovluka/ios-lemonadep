@@ -34,7 +34,7 @@
 
 --- /dev/null
 +++ b/bsd/dev/lemonadep_gpu.c
-@@ -0,0 +1,335 @@
+@@ -0,0 +1,345 @@
 +/*
 + * lemonadep: GPU bring-up, first on-device slice. Real register writes
 + * only: CX GDSC + the seven GMU clock branches (lemonadep_gpu_reserve.c),
@@ -355,6 +355,16 @@
 +		printf("SWEET GPU: GMU start-ready probe=0x%x -> mask=0x%x want=0x%x, FW_INIT_RESULT=0x%x\n",
 +		    lemonadep_gmu_start_ready.probe, lemonadep_gmu_start_ready.mask,
 +		    lemonadep_gmu_start_ready.want, lemonadep_gmu_start_ready.fw_init);
++		/* Did CM3 run at all? If it fetched from the icache and the SMMU
++		 * refused, its context records a translation fault and the address;
++		 * a silent, all-zero context means it never issued a transaction. */
++		uint32_t cb = (uint32_t)((probe.pages + probe.bank) * probe.stride);
++		uint32_t fsr = 0, far_lo = 0, far_hi = 0;
++		(void)smmu_io.read32(smmu_io.cookie, cb + 0x58u, &fsr);
++		(void)smmu_io.read32(smmu_io.cookie, cb + 0x60u, &far_lo);
++		(void)smmu_io.read32(smmu_io.cookie, cb + 0x64u, &far_hi);
++		printf("SWEET GPU: GMU context bank %u: FSR=0x%x FAR=0x%x%08x\n",
++		    probe.bank, fsr, far_hi, far_lo);
 +	}
 +	if (gmu_status == LemonadepGmuOk && gmu_phase == LemonadepGmuPhaseDone) {
 +		printf("SWEET GPU: GMU reports ready. Stopping before CP ring/CP_ME_INIT "
@@ -796,7 +806,7 @@
 + * an A740 simplification -- confirmed by reading a6xx_gmu_start() directly).
 + * val<=0x20010004 -> mask=0xffffffff, ready=0xbabeface; else -> mask=0x1ff,
 + * ready=0x100. */
-+#define LEMONADEP_A660_GMU_START_PROBE_OFFSET 0xff8u  /* add to DTCM_START */
++#define LEMONADEP_A660_GMU_START_PROBE_OFFSET 0x3fe0u /* bytes: Linux's 0xff8 is a dword index */
 +#define LEMONADEP_A660_GMU_START_PROBE_THRESHOLD 0x20010004u
 +#define LEMONADEP_A660_GMU_START_MASK_LOW 0xffffffffu
 +#define LEMONADEP_A660_GMU_START_READY_LOW 0xbabefaceu
