@@ -34,7 +34,7 @@
 
 --- /dev/null
 +++ b/bsd/dev/lemonadep_gpu.c
-@@ -0,0 +1,319 @@
+@@ -0,0 +1,330 @@
 +/*
 + * lemonadep: GPU bring-up, first on-device slice. Real register writes
 + * only: CX GDSC + the seven GMU clock branches (lemonadep_gpu_reserve.c),
@@ -196,9 +196,20 @@
 +		LemonadepGmuPhaseStartProbe,
 +		LemonadepGmuPhaseStartProbe, /* 7: + memory prep, read-only SMMU probe */
 +		LemonadepGmuPhaseStartProbe, /* 8: + GMU SMMU context programmed */
++		/* 9: no stop. Releases the GMU from reset and runs to Done -- the
++		 * step whose earlier attempt ended in an XBL ramdump, when the
++		 * firmware's icache block was unmapped and no GMU SMMU context
++		 * existed. Stage 8 now establishes both; this is still the one
++		 * stage that can fault the SoC, so it is asked for by name. */
++		LemonadepGmuPhaseNone,
 +	};
-+	const lemonadep_gmu_phase stop_after =
-+	    stage < sizeof(stage_stop) / sizeof(stage_stop[0]) ? stage_stop[stage] : LemonadepGmuPhaseNone;
++	/* Out of range must not mean "no stop": that is stage 9's behaviour and
++	 * it is the riskiest, so a typo in sweetgpu= would otherwise run it. */
++	if (stage >= sizeof(stage_stop) / sizeof(stage_stop[0])) {
++		printf("SWEET GPU: sweetgpu=%u is not a stage (1..9); leaving the GPU alone\n", stage);
++		return;
++	}
++	const lemonadep_gmu_phase stop_after = stage_stop[stage];
 +	printf("SWEET GPU: stage=%u stop_after=%d\n", stage, stop_after);
 +
 +	uint64_t fw_pa = 0;
