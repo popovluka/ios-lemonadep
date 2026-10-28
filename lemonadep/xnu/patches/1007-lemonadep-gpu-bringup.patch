@@ -34,7 +34,7 @@
 
 --- /dev/null
 +++ b/bsd/dev/lemonadep_gpu.c
-@@ -0,0 +1,345 @@
+@@ -0,0 +1,353 @@
 +/*
 + * lemonadep: GPU bring-up, first on-device slice. Real register writes
 + * only: CX GDSC + the seven GMU clock branches (lemonadep_gpu_reserve.c),
@@ -100,6 +100,11 @@
 +#include "lemonadep/lemonadep_gpu_smmu_map.c"
 +#include "lemonadep/lemonadep_gmu_mem.c"
 +#include "lemonadep/vendor/ArmSmmu4K/ArmSmmu4KMmio.h"
++
++/* Set where the SMMU probe is in scope, so the cold-start report further
++ * down -- an outer block -- can still read that context's fault registers. */
++static const ArmSmmu4KIo *lemonadep_gmu_cb_io;
++static uint32_t lemonadep_gmu_cb_off;
 +
 +/* Clean [va, va+bytes) to the point of coherency. The Adreno SMMU is
 + * dma-coherent, so this is belt and braces for tables and GMU memory the
@@ -298,6 +303,8 @@
 +		    "-> bank=%d slots=%u,%u (%u free)\n", probe.smr_valid, probe.s2cr_trans,
 +		    probe.s2cr_bypass, probe.s2cr_fault, probe.banks_enabled, (int)probe.bank,
 +		    probe.slots[0], probe.slots[1], probe.free_slots);
++		lemonadep_gmu_cb_io = &smmu_io;
++		lemonadep_gmu_cb_off = (uint32_t)((probe.pages + probe.bank) * probe.stride);
 +
 +		if (stage >= 8) {
 +			static lemonadep_gmu_smmu gmu_smmu;
@@ -358,13 +365,14 @@
 +		/* Did CM3 run at all? If it fetched from the icache and the SMMU
 +		 * refused, its context records a translation fault and the address;
 +		 * a silent, all-zero context means it never issued a transaction. */
-+		uint32_t cb = (uint32_t)((probe.pages + probe.bank) * probe.stride);
-+		uint32_t fsr = 0, far_lo = 0, far_hi = 0;
-+		(void)smmu_io.read32(smmu_io.cookie, cb + 0x58u, &fsr);
-+		(void)smmu_io.read32(smmu_io.cookie, cb + 0x60u, &far_lo);
-+		(void)smmu_io.read32(smmu_io.cookie, cb + 0x64u, &far_hi);
-+		printf("SWEET GPU: GMU context bank %u: FSR=0x%x FAR=0x%x%08x\n",
-+		    probe.bank, fsr, far_hi, far_lo);
++		if (lemonadep_gmu_cb_io != NULL) {
++			const ArmSmmu4KIo *cb = lemonadep_gmu_cb_io;
++			uint32_t fsr = 0, far_lo = 0, far_hi = 0;
++			(void)cb->read32(cb->cookie, lemonadep_gmu_cb_off + 0x58u, &fsr);
++			(void)cb->read32(cb->cookie, lemonadep_gmu_cb_off + 0x60u, &far_lo);
++			(void)cb->read32(cb->cookie, lemonadep_gmu_cb_off + 0x64u, &far_hi);
++			printf("SWEET GPU: GMU context FSR=0x%x FAR=0x%x%08x\n", fsr, far_hi, far_lo);
++		}
 +	}
 +	if (gmu_status == LemonadepGmuOk && gmu_phase == LemonadepGmuPhaseDone) {
 +		printf("SWEET GPU: GMU reports ready. Stopping before CP ring/CP_ME_INIT "
