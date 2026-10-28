@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/bsd/sys/redwood_input.h
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,25 @@
 +/*
 + * redwood_input.h: types shared between bsd/dev/redwood_battery.c and
 + * iokit/Kernel/arm/RedwoodBattery.cpp (which cannot include BSD headers).
@@ -22,6 +22,10 @@
 +};
 +extern void redwood_battery_report(const struct redwood_battery_state *b);
 +extern void redwood_gauge_start(void);
++/* defined in redwood_dpu.c / lemonadep_hackios_glue.c; redwood_gauge.c calls them */
++extern void redwood_dpu_note(unsigned line, const char *text);
++extern void redwood_adsp_stop(void);
++extern int redwood_battmgr_usb(int *usb_type, int *usb_uv, int *usb_ua);
 +#endif /* _SYS_REDWOOD_INPUT_H_ */
 
 --- /dev/null

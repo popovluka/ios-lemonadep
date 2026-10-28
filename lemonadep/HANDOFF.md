@@ -1374,3 +1374,35 @@ look for:
 
 Kernel run: https://github.com/popovluka/ios-lemonadep/actions/runs/39853877374
 (cpus=4 boot image built from it by `m2-boot-build.sh ... 4`).
+
+## Patch 1011 (battery + DPU) CI-green; kernel build hit another macOS-runner drought (2026-10-28)
+
+Overlay patch 1011 (`redwood_battery`/`redwood_gauge`/`redwood_dpu` + RedwoodBattery.cpp,
+porting furangelz's hackios drivers onto our ios-sweet tree) finally passed
+`check-overlay.sh` after three rounds of hunk fixes, all `git apply` context/line-count
+bugs, not logic bugs:
+
+- `bsd/conf/files` / `iokit/conf/files.arm64`: wrong `@@` line numbers (commit bab8dc6).
+- `bsd/dev/sweet_ufs.c` hunk 2: call-site context assumed `reboot_arm()` was adjacent to
+  `gpu_init()`/`wlan_init()`; it's ~140 lines away (fixed before this session).
+- `bsd/dev/sweet_ufs.c` hunk 1: **`git apply` requires at least one trailing context
+  line to anchor a hunk whose insertion isn't at EOF** -- `@@ -56,4 +56,6 @@` with 0
+  trailing context failed to locate text that was verbatim present; adding 3 trailing
+  context lines (`@@ -56,7 +56,9 @@`) fixed it (commit bab7d70). Worth remembering for
+  any future hand-written hunk.
+
+CI green on run 40674361007. Triggered the kernel build (`gh workflow run lemonadep.yml
+-f build_kernel=true`) twice -- runs 40674761758 and 40677147114 -- and **both kernel
+jobs were cancelled after ~15 min with `runner_name: ""` (never assigned)**, same
+signature as the drought on 2026-10-22 above. The `ubuntu-24.04` shim job in the same
+runs got a real runner (`GitHub Actions 1000000191`) in under a second both times, so
+this is macos-14-pool-specific, not account/billing. Per the 2026-10-22 precedent, this
+can last hours; retrying every 15 min just burns queue attempts. **Don't loop
+retry-and-sleep on this** -- check `gh api repos/popovluka/ios-lemonadep/actions/jobs/<id>
+--jq .runner_name` on the most recent kernel job before re-dispatching, and only
+re-dispatch once it's non-empty somewhere, or after a long (hour+) gap.
+
+NEXT: re-run `gh workflow run lemonadep.yml -f build_kernel=true` once a macOS runner is
+confirmed available again, then `gh run download <id> -n xnu-kernel-lemonadep`, then
+boot via `lemonadep/m5-battery-dpu-build.sh` with `board=lemonadep battery=1
+backlight=1` (temporary `fastboot boot`, confirm with user first).
