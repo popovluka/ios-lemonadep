@@ -49,10 +49,30 @@ jobs:
             xcodebuild -version
             xcrun --find iig
       - run:
+          # No -k: stop at the first real failure instead of letting every
+          # parallel compiler job keep going, which produced >50MB of
+          # byte-interleaved warning noise (CircleCI's per-step cap) with the
+          # actual error buried and unreadable. The full log is still saved
+          # as an artifact below for cases where that's not enough.
           name: Build
           command: |
             cd dxb
-            MAKEFLAGS=-k bash build.sh
+            bash build.sh > /tmp/build.log 2>&1; echo $? > /tmp/build-exit
+      - run:
+          name: Report build result
+          when: always
+          command: |
+            mkdir -p /tmp/artifacts
+            cp /tmp/build.log /tmp/artifacts/build.log 2>/dev/null || true
+            EXIT=$(cat /tmp/build-exit 2>/dev/null || echo 1)
+            if [ "$EXIT" != "0" ]; then
+              echo "=== build.sh exited $EXIT; tail of log ==="
+              tail -c 20000 /tmp/build.log
+            fi
+            exit "$EXIT"
+      - store_artifacts:
+          path: /tmp/artifacts
+          destination: build-log
       - run:
           name: Collect
           when: always
