@@ -1375,6 +1375,70 @@ look for:
 Kernel run: https://github.com/popovluka/ios-lemonadep/actions/runs/39853877374
 (cpus=4 boot image built from it by `m2-boot-build.sh ... 4`).
 
+## KERNEL BUILDS AGAIN — moved CI to CircleCI, off GitHub macOS runners (2026-10-28 ~20:30)
+
+A kernel with patch 1011 in it now exists and is verified:
+`kernel.development.sweet`, 16,795,472 bytes, Mach-O 64 (`0xfeedfacf`),
+sha256 `4a0bf9e614dd503f34a38fa4e0debf43af062b91aff1ba2c1f07582986684b73`.
+CircleCI job 4 (pipeline 4, commit 23c7ba9):
+https://circleci.com/gh/popovluka/ios-lemonadep/4
+Overlay confirmed compiled in by scanning the binary: `BQ28Z610` (the
+gauge chip from 1011), `redwood_dpu` x10, `lemonadep` x35, `sweet_fbcon`,
+`sweet_early`. NOT yet booted on the device.
+
+**Why CI moved.** GitHub-hosted macOS runners stopped assigning jobs
+entirely — `runner_name: ""` and "The job was not acquired by Runner of
+type hosted even after multiple attempts" on every dispatch, for the full
+15-minute timeout. `macos-14` is in its retirement brownout (fully retired
+2026-11-02), but `macos-15` arm64 failed identically, so switching labels
+does not help. CircleCI is a separate pool: free plan gives 30,000
+macOS credits/month on `m4pro.medium`, and it picked up a runner in
+~6 seconds every time. Config: `.circleci/config.yml` (kernel only; the
+ubuntu `shim` job still runs fine on GitHub Actions).
+
+**Xcode 16 compatibility (patch 0082).** CircleCI's m4pro class only has
+Xcode 16+/26 — Xcode 15 is gone industry-wide — and Xcode 16's `iig`
+emits dispatchers that read `rpc.kernelContent`, a field xnu-8796's
+`IORPC` lacks (added in xnu-10063+). Patch 0082 declares it, unused.
+Two traps here, both of which cost a run each:
+- xnu-8796 has **two byte-identical copies** of the header,
+  `iokit/DriverKit/IORPC.h` and `iokit/IOKit/IORPC.h`. Both must be
+  patched; the DriverKit-side `iig` output includes the latter.
+- Do **not** guard the field with `#ifdef KERNEL`. xnu installs these
+  headers through `unifdef` in both a `-DKERNEL` and a `-UKERNEL` flavor,
+  so a guarded field is stripped from the exported copy that the
+  generated code actually includes.
+The sibling fork `nmtm82g6zw-commits/ios-sweet-grus` has this same patch
+(as their 0135) but guarded and on one file only — their workflow is
+still pinned to `macos-14` despite the commit message, so their version
+was never actually compiled. Don't trust it as prior art.
+
+**darwin-xnu-build silently skips non-applying patches** (warning only).
+That turned two of my own off-by-one hunk counts into confusing
+downstream compile errors instead of patch errors:
+- 0082 declared `old=6` with 5 old lines -> "corrupt patch at line 19" ->
+  skipped -> `no member named 'kernelContent' in 'IORPC'`.
+- 1011's `bsd/sys/redwood_input.h` hunk declared 25 lines but had 26, so
+  `git apply` dropped the closing `#endif` ->
+  "redwood_input.h:6:2: error: unterminated conditional directive".
+`.circleci/config.yml` now fails the build if any `0xxx-`/`1xxx-` patch
+is skipped, and greps the finished kernel for overlay symbols. Before
+spending a run, validate hunk arithmetic AND dry-run against real xnu
+source (`git apply --check` on the files fetched from
+`apple-oss-distributions/xnu` at tag `xnu-8796.141.3`) — hunk math alone
+would not have caught the wrong-file/guard problem.
+
+**CircleCI log gotcha.** `MAKEFLAGS=-k` plus parallel jobs produced >50MB
+of byte-interleaved output, which hit CircleCI's per-step cap and made
+the real error unreadable. The config now drops `-k` and redirects the
+build to a log file stored as an artifact.
+
+Next concrete action: build a boot image from this kernel
+(`lemonadep/m5-battery-dpu-build.sh`, boot args
+`board=lemonadep battery=1 backlight=1`) and temporary-`fastboot boot` it
+to see whether the battery gauge and DPU backlight come up. Needs
+`ufsrw=1` for test boots; pull logs with TWRP + `sweet-log-pull.sh`.
+
 ## Patch 1011 (battery + DPU) CI-green; kernel build hit another macOS-runner drought (2026-10-28)
 
 Overlay patch 1011 (`redwood_battery`/`redwood_gauge`/`redwood_dpu` + RedwoodBattery.cpp,

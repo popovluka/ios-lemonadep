@@ -70,6 +70,32 @@ jobs:
               tail -c 20000 /tmp/build.log
             fi
             exit "$EXIT"
+      - run:
+          # darwin-xnu-build only warns when a patch doesn't apply, so a bad
+          # hunk count silently drops the patch and surfaces later as a
+          # confusing compile error somewhere else. Fail here instead.
+          name: Fail if any sweet/lemonadep patch was skipped
+          when: always
+          command: |
+            if grep "Skipping patch" /tmp/build.log \
+               | grep -E '/(0[0-9]{3}|1[0-9]{3})-' ; then
+              echo "a sweet/lemonadep patch did not apply (see above)" >&2
+              exit 1
+            fi
+            echo "all sweet/lemonadep patches applied"
+      - run:
+          name: Verify lemonadep overlay is in the built kernel
+          when: always
+          command: |
+            K=dxb/fakeroot/System/Library/Kernels/kernel.development.sweet
+            [ -f "$K" ] || { echo "no kernel produced" >&2; exit 1; }
+            for sym in redwood_dpu lemonadep sweet_early BQ28Z610; do
+              if grep -qa "$sym" "$K"; then
+                echo "ok: $sym"
+              else
+                echo "missing from kernel: $sym" >&2; exit 1
+              fi
+            done
       - store_artifacts:
           path: /tmp/artifacts
           destination: build-log
