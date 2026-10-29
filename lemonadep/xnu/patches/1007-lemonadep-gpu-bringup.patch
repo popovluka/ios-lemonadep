@@ -1,10 +1,11 @@
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -111,6 +111,12 @@
+@@ -111,6 +111,13 @@
  bsd/dev/sweet_rpmh.c			standard
  bsd/dev/sweet_spmi.c			standard
  bsd/dev/sweet_usb.c			standard
 +bsd/dev/lemonadep_gpu.c		standard
++bsd/dev/hakios_adreno.c		standard
 +bsd/dev/lemonadep/vendor/ArmSmmu4K/ArmSmmu4KLive.c		standard
 +bsd/dev/lemonadep/vendor/ArmSmmu4K/ArmSmmu4KProgram.c		standard
 +bsd/dev/lemonadep/vendor/ArmSmmu4K/ArmSmmu4KContext.c		standard
@@ -15,20 +16,23 @@
  bsd/dev/unix_startup.c			standard
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -50,6 +50,7 @@
+@@ -50,6 +50,8 @@
  extern void sweet_keys_init(void);
  extern void sweet_touch_init(void);
  extern void sweet_usb_probe(void);
 +extern void lemonadep_gpu_init(void);
++extern void hakios_adreno_init(void);
 
  #define REG_CAP         0x00
  #define REG_IS          0x20
-@@ -659,6 +660,8 @@
+@@ -659,6 +660,10 @@
  	sweet_keys_init();
  	sweet_touch_init();
  	sweet_usb_probe();
 +	/* GPU bring-up (lemonadep/HANDOFF.md "GPU, Phase 8"/"Phase 9"). */
 +	lemonadep_gpu_init();
++	/* HakiOS's Adreno driver, adreno=N (patch 1012; sweetgpu=0 with it). */
++	hakios_adreno_init();
  	return 0;
  }
 

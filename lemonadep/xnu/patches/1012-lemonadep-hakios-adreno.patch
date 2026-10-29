@@ -1,29 +1,3 @@
---- a/bsd/conf/files
-+++ b/bsd/conf/files
-@@ -116,3 +116,4 @@
- bsd/dev/lemonadep/vendor/ArmSmmu4K/ArmSmmu4KStreams.c		standard
- bsd/dev/lemonadep/vendor/ArmSmmu4K/ArmSmmu4KMmio.c		standard
-+bsd/dev/hakios_adreno.c		standard
- bsd/dev/mem.c				standard
---- a/bsd/dev/sweet_ufs.c
-+++ b/bsd/dev/sweet_ufs.c
-@@ -51,6 +51,7 @@
- extern void sweet_touch_init(void);
- extern void sweet_usb_probe(void);
- extern void lemonadep_gpu_init(void);
-+extern void hakios_adreno_init(void);
- 
- #define REG_CAP         0x00
- #define REG_IS          0x20
-@@ -662,6 +663,8 @@
- 	sweet_usb_probe();
- 	/* GPU bring-up (lemonadep/HANDOFF.md "GPU, Phase 8"/"Phase 9"). */
- 	lemonadep_gpu_init();
-+	/* HakiOS's Adreno driver, adreno=N (HANDOFF.md, the HakiOS GPU port). */
-+	hakios_adreno_init();
- 	return 0;
- }
- 
 --- /dev/null
 +++ b/bsd/dev/hakios_adreno.c
 @@ -0,0 +1,3987 @@

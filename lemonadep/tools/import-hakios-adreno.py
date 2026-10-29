@@ -320,35 +320,13 @@ def main():
     if lines and lines[-1] == "":
         lines.pop()
 
-    # Wire-up. The context is the tree as patch 1007 leaves it, so 1012 applies
-    # after it; git apply absorbs any line-number drift.
+    # Only the new file. The build wire-up (bsd/conf/files and the
+    # hakios_adreno_init() call in sweet_ufs.c) lives in patch 1007, which
+    # already edits both files: a hunk written here would have to guess at the
+    # line numbers 1007 leaves behind, and the first attempt guessed wrong --
+    # "patch failed: bsd/conf/files:116", and darwin-xnu-build only *warns*
+    # when a patch does not apply, so it nearly passed silently.
     out = [
-        "--- a/bsd/conf/files",
-        "+++ b/bsd/conf/files",
-        "@@ -116,3 +116,4 @@",
-        " bsd/dev/lemonadep/vendor/ArmSmmu4K/ArmSmmu4KStreams.c\t\tstandard",
-        " bsd/dev/lemonadep/vendor/ArmSmmu4K/ArmSmmu4KMmio.c\t\tstandard",
-        "+bsd/dev/hakios_adreno.c\t\tstandard",
-        " bsd/dev/mem.c\t\t\t\tstandard",
-        "--- a/bsd/dev/sweet_ufs.c",
-        "+++ b/bsd/dev/sweet_ufs.c",
-        "@@ -51,6 +51,7 @@",
-        " extern void sweet_touch_init(void);",
-        " extern void sweet_usb_probe(void);",
-        " extern void lemonadep_gpu_init(void);",
-        "+extern void hakios_adreno_init(void);",
-        " ",
-        " #define REG_CAP         0x00",
-        " #define REG_IS          0x20",
-        "@@ -662,6 +663,8 @@",
-        " \tsweet_usb_probe();",
-        " \t/* GPU bring-up (lemonadep/HANDOFF.md \"GPU, Phase 8\"/\"Phase 9\"). */",
-        " \tlemonadep_gpu_init();",
-        "+\t/* HakiOS's Adreno driver, adreno=N (HANDOFF.md, the HakiOS GPU port). */",
-        "+\thakios_adreno_init();",
-        " \treturn 0;",
-        " }",
-        " ",
         "--- /dev/null",
         f"+++ b/{DEST}",
         f"@@ -0,0 +1,{len(lines)} @@",
