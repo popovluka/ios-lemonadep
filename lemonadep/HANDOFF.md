@@ -1375,6 +1375,46 @@ look for:
 Kernel run: https://github.com/popovluka/ios-lemonadep/actions/runs/39853877374
 (cpus=4 boot image built from it by `m2-boot-build.sh ... 4`).
 
+## Upstream restructured into HakiOS — evaluation notes (2026-10-29 ~01:20)
+
+`github.com/oosexgang` is now **HakiOS**, with docs at hackios-web.vercel.app. What exists
+publicly: `hakios-xnu-kernel` (the common repo, 186 MB), `hakios-sm7325` (POCO X5 Pro
+device repo, 3 MB), `hakios-uefi`, `hakios-metal`, `hakios-mt6768` (a MediaTek device).
+The `hakios` common repo the docs name does not exist yet — the docs run ahead of the code.
+
+**On redwood (SC7280 / Adreno 642L), from its own `device.conf`:** display, touch, buttons,
+8 cores with `bootcpu=7 cpufreq=1` (big core 2.4 GHz), **GPU via Mesa OpenGL ES** (`gpu=1`),
+**UFS with `/private/var` kept across runs** (`var_store=1 ufs_write=1`), audio in and out
+through the ADSP, haptics, camera, **Wi-Fi (WCN6750, ath11k)**. Partial: battery level only,
+torch, thermal, cellular (modem up, no registration). Missing: Bluetooth. Metal is
+**partial and draws nothing** — buffers and libraries only, checked on a Mac.
+
+**What porting lemonadep there would actually involve:**
+- it is a documented, scaffolded process (`tools/hakios-device.py new ... --soc ... --fdt`),
+  with a prescribed driver order (CPUFREQ/THERMAL → buttons/touch → UFS → ADRENO → ADSP/
+  battery/audio → Wi-Fi → camera/modem/BT) and a "done when" for each step;
+- but **SM8350 is not a SoC HakiOS knows** (only SC7280), so it needs a new SoC layer as well
+  as a new device repo;
+- `xnu/files/bsd/dev/hakios.adreno.c` is written for redwood's Adreno 642L, with its clock
+  and GDSC addresses from `gcc-sc7280.c`/`gpucc-sc7280.c` and `qcom,yupik-gpucc` — the a6xx
+  GMU/firmware logic generalises (it already loads `a660_gmu.bin`, `a660_zap.mdt`,
+  `a660_sqe.fw`), the SoC plumbing does not;
+- it also has a **zap shader step through TrustZone**, which this port has never done and
+  which the 3D core is likely to need;
+- it runs in **QEMU**, so driver work can be iterated without the phone.
+
+**The real asset is furangelz's existing SM8350 work**: their `redwood_adreno.c` on the
+`lemonadep` branch is 189 KB — the Adreno 660 adaptation of exactly this driver, with GL
+working on this phone. But their branch is at `2a9e6691` (2026-10-25), **before** the
+restructure, so it is not a drop-in to current HakiOS either and would need rebasing.
+
+**What this port has that HakiOS does not:** a full persistent iOS root on UFS. HakiOS keeps
+`/private/var` and runs the system from RAM; installation is still a design document.
+
+**What it costs to switch:** the whole sweet/lemonadep patch series (0001-0082, 1001-1011)
+does not transfer — different kernel tree, different boot chain (our shim + `fastboot boot`
+vs their Mu-Silicium UEFI + `xnuloader`).
+
 ## GPU, Phase 12: the GMU's firmware does not execute — FW_INIT_RESULT stays 0 (2026-10-29 ~00:20)
 
 Kernel `94e7ed70` (pipeline 10, commit 5b796b1) adds the StartReady diagnostics. Stage 9:
