@@ -5,40 +5,37 @@
  bsd/dev/sweet_spmi.c			standard
  bsd/dev/sweet_usb.c			standard
 +bsd/dev/lemonadep_gpu.c		standard
-+bsd/dev/hakios_adreno.c		standard
 +bsd/dev/lemonadep/vendor/ArmSmmu4K/ArmSmmu4KLive.c		standard
 +bsd/dev/lemonadep/vendor/ArmSmmu4K/ArmSmmu4KProgram.c		standard
 +bsd/dev/lemonadep/vendor/ArmSmmu4K/ArmSmmu4KContext.c		standard
 +bsd/dev/lemonadep/vendor/ArmSmmu4K/ArmSmmu4KStreams.c		standard
 +bsd/dev/lemonadep/vendor/ArmSmmu4K/ArmSmmu4KMmio.c		standard
++bsd/dev/hakios_adreno.c		standard
  bsd/dev/mem.c				standard
  bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -50,6 +50,8 @@
+@@ -50,6 +50,7 @@
  extern void sweet_keys_init(void);
  extern void sweet_touch_init(void);
  extern void sweet_usb_probe(void);
 +extern void lemonadep_gpu_init(void);
-+extern void hakios_adreno_init(void);
 
  #define REG_CAP         0x00
  #define REG_IS          0x20
-@@ -659,6 +660,10 @@
+@@ -659,6 +660,8 @@
  	sweet_keys_init();
  	sweet_touch_init();
  	sweet_usb_probe();
 +	/* GPU bring-up (lemonadep/HANDOFF.md "GPU, Phase 8"/"Phase 9"). */
 +	lemonadep_gpu_init();
-+	/* HakiOS's Adreno driver, adreno=N (patch 1012; sweetgpu=0 with it). */
-+	hakios_adreno_init();
  	return 0;
  }
 
 --- /dev/null
 +++ b/bsd/dev/lemonadep_gpu.c
-@@ -0,0 +1,632 @@
+@@ -0,0 +1,641 @@
 +/*
 + * lemonadep: GPU bring-up, first on-device slice. Real register writes
 + * only: CX GDSC + the seven GMU clock branches (lemonadep_gpu_reserve.c),
@@ -101,6 +98,11 @@
 +
 +extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 +extern vm_offset_t phystokv(uint64_t);
++/* HakiOS's Adreno driver (patch 1012). Called from here rather than from
++ * sweet_ufs.c because patches 1008, 1010 and 1011 use that file's init block
++ * as patch context, and inserting a line into it makes all three stop
++ * applying -- which darwin-xnu-build only warns about. */
++extern void hakios_adreno_init(void);
 +
 +#include "lemonadep/LemonadepGmuSource.h"
 +#include "lemonadep/lemonadep_gpu_reserve.c"
@@ -424,6 +426,10 @@
 +lemonadep_gpu_init(void)
 +{
 +	uint32_t stage = 0;
++	/* HakiOS's Adreno driver first: it has its own boot-arg (adreno=N) and
++	 * returns at once unless asked for. Run it with sweetgpu=0, or the two
++	 * reach for the same GMU, SMMU and clocks in one boot. */
++	hakios_adreno_init();
 +	(void)PE_parse_boot_argn("sweetgpu", &stage, sizeof(stage));
 +	if (!stage) {
 +		printf("SWEET GPU: disabled (sweetgpu=N, N>=1, to enable; unverified on hardware)\n");

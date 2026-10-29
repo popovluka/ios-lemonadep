@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/bsd/dev/hakios_adreno.c
-@@ -0,0 +1,3987 @@
+@@ -0,0 +1,3983 @@
 +/*
 + * Imported into ios-sweet from HakiOS by lemonadep/tools/import-hakios-adreno.py.
 + *
@@ -133,19 +133,15 @@
 +extern vm_offset_t phystokv(uint64_t pa);
 +
 +/*
-+ * HakiOS is built against a newer XNU than this tree. ios-sweet builds
-+ * xnu-8796 (macOS 13.5, the iOS 16 era), where kmem_alloc() is
-+ * (map, addrp, size, tag), the flag-taking form is kmem_alloc_flags()
-+ * with the tag before the flags, and KMA_DATA does not exist yet -- it
-+ * arrived with the later data/pointer split. All three call sites here pass
-+ * the same flags, so one macro adapts them rather than editing each one, and
-+ * the version gap stays visible in a single place.
++ * No kmem_alloc adaptation is needed, and an earlier version of this generator
++ * was wrong to add one. xnu-8796.101.5 (macOS 13.5, what this tree builds)
++ * already has KMA_DATA and the five-argument kmem_alloc() that HakiOS uses --
++ * osfmk/vm/vm_kern.h:578 and :643, the latter an inline over
++ * kernel_memory_allocate(). The guard tried was `#ifndef KMA_DATA`, which is
++ * always true because KMA_DATA is an enum constant and not a macro, so the
++ * compatibility path fired on a tree that did not want it and called a
++ * kmem_alloc_flags() that does not exist here.
 + */
-+#ifndef KMA_DATA
-+#define KMA_DATA 0
-+#define kmem_alloc(map, addrp, size, flags, tag) \
-+	kmem_alloc_flags((map), (addrp), (size), (tag), (flags))
-+#endif
 +
 +/*
 + * The prototypes sys/hakios.input.h gave this file. That header is HakiOS's own

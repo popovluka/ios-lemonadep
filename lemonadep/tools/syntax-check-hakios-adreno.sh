@@ -64,14 +64,14 @@ EOF
 cat > "$STUB/vm/vm_kern.h" <<'EOF'
 #pragma once
 #include <mach/mach_types.h>
-/* xnu-8796's shapes: kmem_alloc_flags takes the tag before the flags, and
-   there is no KMA_DATA (the generator's compat macro supplies it). */
+/* xnu-8796.101.5's shapes (osfmk/vm/vm_kern.h): KMA_* are enum constants, not
+   macros, and kmem_alloc() takes the flags then the tag -- an inline over
+   kernel_memory_allocate(). No compatibility shim is needed for this tree. */
 #define KERN_SUCCESS 0
-#define KMA_KOBJECT 0x04
-#define KMA_ZERO 0x80
+enum { KMA_NONE = 0, KMA_KOBJECT = 0x04, KMA_ZERO = 0x80, KMA_DATA = 0x100 };
 #define VM_KERN_MEMORY_IOKIT 10
 extern vm_offset_t kernel_map;
-int kmem_alloc_flags(vm_offset_t map, vm_offset_t *addrp, vm_size_t size, int tag, int flags);
+int kmem_alloc(vm_offset_t map, vm_offset_t *addrp, vm_size_t size, int flags, int tag);
 vm_size_t round_page(vm_size_t);
 size_t strlcpy(char *, const char *, size_t);
 EOF
