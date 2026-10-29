@@ -92,12 +92,6 @@ RedwoodGPUStop(void)
 {
 }
 
-vm_offset_t
-pe_arm_get_soc_base_phys(void)
-{
-	return 0;                               /* start_by_itself()'s gpu=1 path is unused: we pass adreno=N */
-}
-
 static const uint8_t *
 image_file(const char *directory, const char *name, uint64_t *size)
 {
@@ -142,7 +136,9 @@ def edits(text):
 		(r'extern void MiniIOMobileFramebufferShow\([^)]*\);\n', "MiniIOMobileFramebufferShow extern"),
 		(r'extern void RedwoodGPUStart\(void\);\n', "RedwoodGPUStart extern"),
 		(r'extern void RedwoodGPUStop\(void\);[^\n]*\n', "RedwoodGPUStop extern"),
-		(r'extern vm_offset_t pe_arm_get_soc_base_phys\(void\);\n', "pe_arm_get_soc_base_phys extern"),
+		# pe_arm_get_soc_base_phys's extern is left in place: the real XNU tree already
+		# defines it (pexpert/pe_identify_machine.c); redefining it here is a duplicate
+		# symbol at link time.
 	]:
 		text, n = re.subn(pattern, '', text, count=1)
 		assert n == 1, f"{desc} not found"

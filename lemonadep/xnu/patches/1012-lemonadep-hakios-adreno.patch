@@ -8,7 +8,7 @@
  bsd/dev/mem.c				standard
 --- /dev/null
 +++ b/bsd/dev/hakios_adreno.c
-@@ -0,0 +1,4292 @@
+@@ -0,0 +1,4287 @@
 +/*
 + * The GPU of the POCO X5 Pro (redwood), an Adreno 642L, woken step by step up to a picture that
 + * it fills and the panel shows. Every address below belongs to this phone, and nothing here is
@@ -196,12 +196,6 @@
 +void
 +RedwoodGPUStop(void)
 +{
-+}
-+
-+vm_offset_t
-+pe_arm_get_soc_base_phys(void)
-+{
-+	return 0;                               /* start_by_itself()'s gpu=1 path is unused: we pass adreno=N */
 +}
 +
 +static const uint8_t *
@@ -4153,6 +4147,7 @@
 + */
 +#define REDWOOD_SOC_BASE        0x00400000ul    /* where the loader says the phone's peripherals begin (its "redwood") */
 +
++extern vm_offset_t pe_arm_get_soc_base_phys(void);
 +
 +static bool
 +start_by_itself(void)
