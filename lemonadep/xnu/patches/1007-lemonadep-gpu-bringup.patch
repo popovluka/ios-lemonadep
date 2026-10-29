@@ -1390,7 +1390,7 @@
 +}
 --- /dev/null
 +++ b/bsd/dev/lemonadep/lemonadep_gpu_smmu_map.c
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,59 @@
 +/* SPDX-License-Identifier: MIT */
 +/*
 + * lemonadep: incremental SMMU mapping of the GMU's five fixed regions
@@ -1428,11 +1428,15 @@
 +			.iova = regions[i].iova,
 +			.physical = regions[i].physical,
 +			.bytes = regions[i].bytes,
-+			/* Normal DMA-coherent data buffers (not GMU-executable --
-+			 * the GMU core fetches icache contents into its own
-+			 * internal cache, it does not execute through this SMMU
-+			 * mapping), matching the context's coherent_walk=1. */
-+			.permissions = ArmSmmu4KRead | ArmSmmu4KWrite,
++			/* The GMU does fetch instructions through this mapping:
++			 * stage 9 faulted with FSR=0x80000408 (PF) at FAR=0x4000,
++			 * the icache's own IOVA, disproving the assumption that
++			 * it only pulls the icache into an internal cache. Without
++			 * Execute, pte() sets PXN|UXN (bits 53/54) and the fetch is
++			 * refused. Only the icache is executable; the data regions
++			 * (dummy/debug/log/hfi) stay execute-never. */
++			.permissions = ArmSmmu4KRead | ArmSmmu4KWrite |
++			    (regions[i].iova == LEMONADEP_GMU_ICACHE_IOVA ? ArmSmmu4KExecute : 0u),
 +			.writeback = 1,
 +			.shareability = 3,
 +		};
