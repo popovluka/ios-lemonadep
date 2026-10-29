@@ -1,3 +1,11 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -123,4 +123,5 @@
+ bsd/dev/redwood_gauge.c			standard
+ bsd/dev/redwood_battery.c		standard
+ bsd/dev/lemonadep_hackios_glue.c	standard
++bsd/dev/hakios_adreno.c		standard
+ bsd/dev/mem.c				standard
 --- /dev/null
 +++ b/bsd/dev/hakios_adreno.c
 @@ -0,0 +1,3983 @@

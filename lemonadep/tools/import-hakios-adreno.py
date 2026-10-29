@@ -316,13 +316,26 @@ def main():
     if lines and lines[-1] == "":
         lines.pop()
 
-    # Only the new file. The build wire-up (bsd/conf/files and the
-    # hakios_adreno_init() call in sweet_ufs.c) lives in patch 1007, which
-    # already edits both files: a hunk written here would have to guess at the
-    # line numbers 1007 leaves behind, and the first attempt guessed wrong --
-    # "patch failed: bsd/conf/files:116", and darwin-xnu-build only *warns*
-    # when a patch does not apply, so it nearly passed silently.
+    # bsd/conf/files has to be edited here, by the last patch of the series,
+    # and not in 1007. Each overlay uses the lines the previous ones added as
+    # its own context, so an insertion anywhere earlier in that block breaks
+    # the ones after it: putting this line in 1007 after ArmSmmu4KMmio.c stopped
+    # 1011 applying, because 1011's hunk has ArmSmmu4KMmio.c followed directly
+    # by bsd/dev/mem.c, and putting it mid-block stopped 1008 and 1010. Nothing
+    # applies after 1012, so anchoring on the finished block is safe.
+    #
+    # The line numbers are the tree with 1007 (+6), 1008 (+1), 1010 (+1) and
+    # 1011 (+4) applied, which puts bsd/dev/mem.c at 126. The tabs match the
+    # column the surrounding entries use.
     out = [
+        "--- a/bsd/conf/files",
+        "+++ b/bsd/conf/files",
+        "@@ -123,4 +123,5 @@",
+        " bsd/dev/redwood_gauge.c\t\t\tstandard",
+        " bsd/dev/redwood_battery.c\t\tstandard",
+        " bsd/dev/lemonadep_hackios_glue.c\tstandard",
+        "+bsd/dev/hakios_adreno.c\t\tstandard",
+        " bsd/dev/mem.c\t\t\t\tstandard",
         "--- /dev/null",
         f"+++ b/{DEST}",
         f"@@ -0,0 +1,{len(lines)} @@",

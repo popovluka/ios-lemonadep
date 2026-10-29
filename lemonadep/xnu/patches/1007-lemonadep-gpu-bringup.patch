@@ -1,6 +1,6 @@
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -111,6 +111,13 @@
+@@ -111,6 +111,12 @@
  bsd/dev/sweet_rpmh.c			standard
  bsd/dev/sweet_spmi.c			standard
  bsd/dev/sweet_usb.c			standard
@@ -10,7 +10,6 @@
 +bsd/dev/lemonadep/vendor/ArmSmmu4K/ArmSmmu4KContext.c		standard
 +bsd/dev/lemonadep/vendor/ArmSmmu4K/ArmSmmu4KStreams.c		standard
 +bsd/dev/lemonadep/vendor/ArmSmmu4K/ArmSmmu4KMmio.c		standard
-+bsd/dev/hakios_adreno.c		standard
  bsd/dev/mem.c				standard
  bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
