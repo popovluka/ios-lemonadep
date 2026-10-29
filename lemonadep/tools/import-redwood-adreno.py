@@ -74,12 +74,47 @@ redwood_tl(const char *format, ...)
 	printf("%s", line);
 }
 
+/* The boot loader's framebuffer (shim/board.h FB_PHYS/FB_SIZE for lemonadep): the display
+ * engine's vig0/vig1 pipes read it continuously (patch 1011's redwood_dpu.c) and send it to
+ * the panel on every tearing-effect pulse, so writing here shows up with no further "present"
+ * step. ml_io_map_unmappable, not ml_io_map: that one's whole-kernel budget is 8 MiB
+ * (lemonadep-smmu-context/io_map notes), far under this ~10 MB picture. VM_WIMG_IO (0x7), the
+ * same flag patches 1008/1010 use for their own big windows: correct and simple beats fast here. */
+#define LEMONADEP_FB_PHYS 0xe4d00000UL
+#define LEMONADEP_FB_SIZE 0x1700000UL
+#define LEMONADEP_FB_STRIDE (1080u * 4u)
+#define LEMONADEP_FB_ROWS 2412u
+#define ADRENO_VM_WIMG_IO 0x7u
+extern vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, uint32_t);
+
 void
 MiniIOMobileFramebufferShow(const uint8_t *pixels, uint32_t width, uint32_t height, uint32_t row_bytes)
 {
-	(void)pixels;
-	printf("adreno: a %ux%u picture (stride %u) is drawn; not yet shown on the panel (phase 2)\\n",
-	    width, height, row_bytes);
+	static uint8_t *fb;
+	static bool fb_failed;
+	uint32_t copy_bytes = width * 4;
+	uint32_t rows = height;
+
+	if (fb == NULL && !fb_failed) {
+		fb = (uint8_t *)ml_io_map_unmappable(LEMONADEP_FB_PHYS, LEMONADEP_FB_SIZE, ADRENO_VM_WIMG_IO);
+		fb_failed = fb == NULL;
+	}
+	if (fb == NULL) {
+		printf("adreno: a %ux%u picture (stride %u) is drawn; ml_io_map_unmappable of the panel "
+		    "framebuffer failed, so it is not shown\\n", width, height, row_bytes);
+		return;
+	}
+	if (copy_bytes > LEMONADEP_FB_STRIDE) {
+		copy_bytes = LEMONADEP_FB_STRIDE;
+	}
+	if (rows > LEMONADEP_FB_ROWS) {
+		rows = LEMONADEP_FB_ROWS;
+	}
+	for (uint32_t y = 0; y < rows; y++) {
+		memcpy(fb + (uint64_t)y * LEMONADEP_FB_STRIDE, pixels + (uint64_t)y * row_bytes, copy_bytes);
+	}
+	printf("adreno: a %ux%u picture (stride %u) copied to the panel framebuffer at %#lx\\n",
+	    width, height, row_bytes, (unsigned long)LEMONADEP_FB_PHYS);
 }
 
 void
