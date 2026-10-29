@@ -421,7 +421,7 @@
 +}
 --- /dev/null
 +++ b/bsd/dev/lemonadep/LemonadepGmuSource.h
-@@ -0,0 +1,165 @@
+@@ -0,0 +1,178 @@
 +/* SPDX-License-Identifier: MIT */
 +#ifndef LEMONADEP_GMU_SOURCE_H
 +#define LEMONADEP_GMU_SOURCE_H
@@ -517,6 +517,19 @@
 + * sets before enabling the GMU -- and 500 MHz from PLL1 (src 3). */
 +#define LEMONADEP_GPUCC_GMU_CMD_RCGR_OFFSET 0x1120u
 +#define LEMONADEP_GPUCC_GMU_CFG_RCGR_OFFSET 0x1124u
++/* clk_rcg2 field layout: UPDATE is CMD_RCGR bit 0, and CFG_RCGR carries
++ * src_sel in a 3-bit field at bit 8 with src_div in hid_width bits at 0.
++ * The 200 MHz entry is src 6 (P_GPLL0_OUT_MAIN_DIV) with div 1.5, encoded
++ * as 2 * 1.5 - 1 = 2. */
++#define LEMONADEP_RCG_UPDATE_BIT (1u << 0)
++#define LEMONADEP_RCG_CFG_SRC_SEL_MASK (7u << 8)
++#define LEMONADEP_RCG_CFG_SRC_DIV_MASK 0x1fu
++#define LEMONADEP_GPUCC_GMU_CFG_200MHZ ((6u << 8) | 2u)
++/* gcc_gpu_gpll0_div_clk_src (gcc-sm8350.c:1625), the GCC gate feeding that
++ * source. BRANCH_HALT_DELAY, so it is set and delayed, never polled. Inside
++ * the GCC window this driver already maps (0x52000 < 0x72000). */
++#define LEMONADEP_GCC_GPU_GPLL0_DIV_ENABLE_OFFSET 0x52000u
++#define LEMONADEP_GCC_GPU_GPLL0_DIV_ENABLE_BIT (1u << 16)
 +#define LEMONADEP_CLK_ENABLE_BIT (1u << 0)
 +#define LEMONADEP_CLK_OFF_BIT (1u << 31)
 +#define LEMONADEP_CLK_HWCG_BIT (1u << 1)
@@ -917,7 +930,7 @@
 +#endif
 --- /dev/null
 +++ b/bsd/dev/lemonadep/lemonadep_gpu_reserve.c
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,206 @@
 +/*
 + * lemonadep: GPU power/clock reserve -- CX GDSC enable and the seven real
 + * clock branches the GMU needs (qcom,adreno-gmu-660.1 node's own clocks
@@ -1040,8 +1053,59 @@
 +		}
 +	}
 +
-+	/* GPUCC branches (window Gpucc). */
 +	lemonadep_pwr_status status;
++
++	/* Set the GMU clock root to 200 MHz before enabling its branch, the
++	 * order a6xx_gmu_resume() uses: clk_set_rate(gmu->core_clk, 200000000)
++	 * and only then clk_bulk_prepare_enable(). On-device the boot loader
++	 * leaves gpu_cc_gmu_clk_src at CFG_RCGR=0 -- src_sel 0 is P_BI_TCXO
++	 * with divider 1, so 19.2 MHz -- which was the last divergence from
++	 * the real sequence (HANDOFF.md "GPU, Phase 16").
++	 *
++	 * src 6 is P_GPLL0_OUT_MAIN_DIV in gpu_cc_parent_map_0, fed by the GCC
++	 * gate gcc_gpu_gpll0_div_clk_src, so that gate is enabled first: switch
++	 * the mux to a source that is not running and the GMU would be left
++	 * with no clock at all, which is worse than a slow one. */
++	if (io->read32(io->cookie, LemonadepPwrWindowGcc,
++	    LEMONADEP_GCC_GPU_GPLL0_DIV_ENABLE_OFFSET, &value)) {
++		return LemonadepPwrIoError;
++	}
++	if (io->write32(io->cookie, LemonadepPwrWindowGcc,
++	    LEMONADEP_GCC_GPU_GPLL0_DIV_ENABLE_OFFSET,
++	    value | LEMONADEP_GCC_GPU_GPLL0_DIV_ENABLE_BIT)) {
++		return LemonadepPwrIoError;
++	}
++	if (io->wait_us(io->cookie, 10)) {
++		return LemonadepPwrIoError;
++	}
++	/* clk_rcg2_configure() with mnd_width 0: rewrite src_sel/src_div in
++	 * CFG_RCGR, then request the update and wait for the hardware to take
++	 * it, exactly as clk_rcg2's update_config() does. The mux is
++	 * glitch-free, so doing this while the branch is still parked on TCXO
++	 * is safe. */
++	if (io->read32(io->cookie, LemonadepPwrWindowGpucc,
++	    LEMONADEP_GPUCC_GMU_CFG_RCGR_OFFSET, &value)) {
++		return LemonadepPwrIoError;
++	}
++	value &= ~(LEMONADEP_RCG_CFG_SRC_SEL_MASK | LEMONADEP_RCG_CFG_SRC_DIV_MASK);
++	if (io->write32(io->cookie, LemonadepPwrWindowGpucc,
++	    LEMONADEP_GPUCC_GMU_CFG_RCGR_OFFSET, value | LEMONADEP_GPUCC_GMU_CFG_200MHZ)) {
++		return LemonadepPwrIoError;
++	}
++	if (io->read32(io->cookie, LemonadepPwrWindowGpucc,
++	    LEMONADEP_GPUCC_GMU_CMD_RCGR_OFFSET, &value)) {
++		return LemonadepPwrIoError;
++	}
++	if (io->write32(io->cookie, LemonadepPwrWindowGpucc,
++	    LEMONADEP_GPUCC_GMU_CMD_RCGR_OFFSET, value | LEMONADEP_RCG_UPDATE_BIT)) {
++		return LemonadepPwrIoError;
++	}
++	if ((status = poll_clear(io, LemonadepPwrWindowGpucc,
++	    LEMONADEP_GPUCC_GMU_CMD_RCGR_OFFSET, LEMONADEP_RCG_UPDATE_BIT)) != LemonadepPwrOk) {
++		return status;
++	}
++
++	/* GPUCC branches (window Gpucc). */
 +	if ((status = enable_branch(io, LemonadepPwrWindowGpucc,
 +	    LEMONADEP_GPUCC_AHB_CLK_OFFSET, false, false)) != LemonadepPwrOk) {
 +		return status;

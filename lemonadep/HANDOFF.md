@@ -1375,6 +1375,60 @@ look for:
 Kernel run: https://github.com/popovluka/ios-lemonadep/actions/runs/39853877374
 (cpus=4 boot image built from it by `m2-boot-build.sh ... 4`).
 
+## GPU, Phase 17: ITCM is perfect, the GMU clock was at 19.2 MHz — set the RCG to 200 MHz (2026-10-29)
+
+Commit `e63dea9` (pipeline 23, kernel `9aee9098`, image `f6b225ec`) answered both questions:
+
+```
+SWEET GPU: gpucc gmu_rcg cmd=0x0 cfg=0x0 cx_gmu=0x6221 ahb=0x0 gdsc_cx=0xf8222000
+SWEET GPU: GMU itcm=0x10007f80,0x105,0x145,0x159 (want 0x10007f80,0x105,0x145,0x159)
+```
+
+**ITCM is byte-perfect** — the expected Cortex-M3 vector table, exactly. Together with the
+DTCM proof in Phase 16, the *entire* firmware load path (ITCM, DTCM, icache) is now verified
+on real hardware. The M3 has valid code at its reset vector. That closes the hypothesis that
+outranked everything else; do not revisit the TCM load.
+
+**The GMU core clock was wrong.** `cfg=0x0` decodes as src_sel 0 (`P_BI_TCXO`) with divider 1,
+i.e. **19.2 MHz**, where `a6xx_gmu_resume()` does `clk_set_rate(gmu->core_clk, 200000000)`
+before enabling anything. Supporting reads all healthy, which is what makes the rate the
+outlier rather than a symptom:
+
+- `cmd=0x0` — ROOT_OFF (bit 31) clear, so the root really is running.
+- `cx_gmu=0x6221` — CLK_ENABLE (bit 0) set, CLK_OFF (bit 31) clear: the branch is live.
+- `gdsc_cx=0xf8222000` — PWR_ON (bit 31) set, SW_COLLAPSE (bit 0) clear: the rail is on.
+
+Also cleared along the way: the HWCG escape hatch in `enable_branch()` is **not** silently
+accepting a halted GMU branch. It is gated on a per-branch `hwcg_capable` argument that only
+the two GCC branches pass, so `cx_gmu` is polled strictly and genuinely cleared CLK_OFF.
+
+**The change.** Program `gpu_cc_gmu_clk_src` (`cmd_rcgr 0x1120`) to the table's 200 MHz entry
+before the branch enables, in upstream's order (rate, then enable):
+
+1. Enable `gcc_gpu_gpll0_div_clk_src` — GCC `0x52000` bit 16, `BRANCH_HALT_DELAY`, so set and
+   delay 10 µs rather than poll (gcc-sm8350.c:1625). **This has to come first**: src 6 is
+   `P_GPLL0_OUT_MAIN_DIV`, and switching the mux to a source that is not running would leave
+   the GMU with no clock at all — worse than a slow one. Its parent is `gcc_gpll0_out_even`,
+   a postdiv of the SoC's main PLL, already up on any booted device.
+2. `clk_rcg2_configure()` with `mnd_width 0`: rewrite `CFG_RCGR` src_sel `[10:8]` = 6 and
+   src_div `[4:0]` = 2 (`2 * 1.5 - 1`, `hid_width 5`) → `cfg = 0x602`, then set `CMD_RCGR`
+   bit 0 (UPDATE) and poll it clear, as `update_config()` does. The mux is glitch-free, so
+   reprogramming it while the branch is parked on TCXO is safe.
+
+`0x52000` is inside the GCC window this driver already maps (`0x100000 + 0x72000`), so no new
+`ml_io_map` — which matters, see [[xnu-io-map-limit]].
+
+Reading the next log: `cfg=0x602` confirms the rate took. If `FW_INIT_RESULT` moves off zero,
+the clock was the blocker. If it stays zero with `cfg=0x602`, the GMU sequence itself is now a
+faithful match to upstream on every point checked so far, and the next candidates are the HFI
+programming (`HFI_QTBL_ADDR`/`QTBL_INFO`, which point at IOVAs the GMU must translate) and the
+`PWR_COL_CP_MSG` log-buffer pointer.
+
+One known cosmetic oddity, not worth a boot by itself: `ahb=0x0` means `gpu_cc_ahb_clk`'s
+CLK_ENABLE bit reads back clear even though `enable_branch()` set it. CLK_OFF is also clear, so
+the clock runs (GPUCC register access demonstrably works), which suggests that branch is
+hardware-controlled on this part. Noted in case it matters later.
+
 ## GPU, Phase 16: the M3 never executes — ITCM and the GMU clock RCG are the two unchecked paths (2026-10-29)
 
 Commit `6a3dc4a` (pipeline 22, kernel `3d9e3eb4`, image `e2a9ab01`) on-device:
