@@ -1375,7 +1375,58 @@ look for:
 Kernel run: https://github.com/popovluka/ios-lemonadep/actions/runs/39853877374
 (cpus=4 boot image built from it by `m2-boot-build.sh ... 4`).
 
-## HakiOS loader: reproduced with everything verified; the screen is the only thing left (2026-10-29)
+## HakiOS loader: FOUND A REAL BUG — mkxnuimg.py hardcoded the boot header version (2026-10-29)
+
+The user's observation that the phone **stayed in fastboot** was the decisive clue, and it
+contradicted what `xl` reported. `xl enter` says `state: absent` because `fastboot boot` makes the
+phone re-enumerate, which drops the usbip attachment — so WSL sees nothing whether the phone died
+or not. The phone itself had booted the image, the bootloader refused it, and it fell **back to
+fastboot**. A rejection, not a hang, and nothing in `xl`'s output said so.
+
+Comparing the two images on this phone made it obvious:
+
+| image | header_version | detail |
+|---|---|---|
+| `xnu-usb.img` (HakiOS) | **1** | kernel load `0x10008000`, tags `0x10000100`, page_size 2048 |
+| `m5-battery-dpu-boot.img` (ios-sweet, **boots every time**) | **3** | — |
+
+And `lemonadep.toml` already asks for the right thing:
+
+```toml
+[boot_image]
+header_version = 3
+```
+
+**`mkxnuimg.py` never reads it.** Line 92 was literally
+`'--header_version', '1', '-o', args.output` — redwood's value, hardcoded, with no per-device
+lookup anywhere in the file. A OnePlus 9 Pro's bootloader (Android 11+, lahaina) wants v3 and
+refuses the v1 image.
+
+Fixed by `lemonadep/tools/hakios-mkxnuimg-header-version.py`, which adds a `_header_version()`
+reading `[boot_image] header_version` from `Resources/Configs/<DEVICE>.toml` and defaults to 1, so
+redwood is unaffected. **This belongs upstream** in `oosexgang/hakios-xnu-kernel`: any device whose
+toml disagrees with redwood hits it, and the symptom (a silent return to fastboot, while `xl` says
+"loader did not come up on USB") gives no hint of the cause.
+
+### Result on hardware
+
+Rebuilt: `xnu-usb.img` 2654208 bytes, header_version **3** confirmed. `fastboot boot` taken, and
+the phone then went **off the USB bus entirely and did not return to fastboot** — a different
+outcome from every previous attempt, where it bounced straight back. So the bootloader now
+*accepts and executes* the image. That is the first forward movement this blocker has had.
+
+The loader still does not appear (`fastboot devices` and `adb devices` both empty for ~2 minutes),
+so UEFI is now running and either hanging or failing to hand over to the XNU loader. Next: the
+panel, which is a genuine discriminator now that `DisplayDxe` and `SimpleFbDxe` are confirmed in
+the firmware — a running UEFI should show the boot logo. Then `[uefi_fd] base = 0x9FD00000` and
+`lemonadepPkg/Library/MemoryMapLib/MemoryMapLib.c`, neither ever checked against this phone.
+
+Operational notes: `fastboot boot` drops the usbip attachment, so for this test boot from Windows
+and poll `fastboot getvar product` for `xnuloader` — no passthrough needed until the loader is
+actually up. Windows must not hold the device when attaching to WSL (`adb kill-server` first);
+in Android the phone is `18d1:d001` and the attach fails, in fastboot it is `18d1:d00d`.
+
+## HakiOS loader: reproduced with everything verified; the screen was the only thing left (2026-10-29)
 
 Ran the documented flow properly, from WSL with the phone passed through:
 
