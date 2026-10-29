@@ -1375,6 +1375,79 @@ look for:
 Kernel run: https://github.com/popovluka/ios-lemonadep/actions/runs/39853877374
 (cpus=4 boot image built from it by `m2-boot-build.sh ... 4`).
 
+## HAKIOS GPU PORT: step 1 runs clean on lemonadep (2026-10-29)
+
+Patch 1012 (HakiOS's `hakios.adreno.c`, imported by
+`lemonadep/tools/import-hakios-adreno.py`) is in a kernel built for this phone and its first
+step ran on hardware. Kernel `138af1b3`, image `db366fe3`, boot-args `adreno=1 sweetgpu=0`.
+
+```
+adreno: step 1: read the GPU's clocks in the global clock controller
+adreno: 1: gcc pll votes (0x152000) = 0xe0057f
+adreno: 1: gcc gpu_cfg_ahb (0x171004) = 0x1
+adreno: 1: gcc gpu_memnoc_gfx (0x17100c) = 0x80004221
+adreno: 1: gcc gpu_snoc_dvm_gfx (0x171018) = 0x80000001
+adreno: 1: gcc ddrss_gpu_axi (0x171154) = 0x300001
+adreno: step 1: look up the GPU's supply rails in the boot loader's list of RPMh resources
+adreno: 1: RPMh has "gfx.lvl" at 0x30050; levels: 0 64 80 128 144 192 224 256 320 384 416 432
+adreno: 1: RPMh has "cx.lvl"  at 0x30000; levels: 0 16 64 128 192 256 384 400 416 432 464
+adreno: 1: RPMh has "mx.lvl"  at 0x30010; levels: 0 16 128 192 224 256 320 384 416 464
+adreno: step 1: done
+adreno: alive 20 s after step 1; nothing written
+adreno: over; the system goes on starting
+```
+
+Every value is sensible, and two things are proved beyond the port building:
+
+- **Someone else's driver reads this phone's hardware correctly, unmodified.** The GCC clock
+  offsets, written for SM7325, are right for SM8350 — `gpu_cfg_ahb = 0x1` means the register bus
+  is on, and the three NoC branches read as enabled.
+- **The cmd-db parse works**, so `CMD_DB_PHYS 0x80860000` is lemonadep's. And it found `gfx.lvl`,
+  `cx.lvl` and `mx.lvl` with their full level lists — **these are the ARC votes that "GPU, Phase
+  18" called a research subsystem this driver has no code for.** It has the code; the votes come
+  straight out of RPMh's own table. The perf table that blocked our hand-written HFI is solved
+  here already.
+
+Also confirmed in the finished kernel before booting: 132 occurrences of `adreno`, plus
+`a660_sqe.fw`, `HakiosGPU` and `zapb02` — the last from the generator's own blob-lookup shim, so
+the firmware path is linked in too. All four blobs were placed: `gmufw` at `0x10251c000`, `sqefw`
+at `0x10252c000`, `zapmdt` at `0x102538000`, `zapb02` at `0x10253c000`.
+
+### What it cost to get here, and what to avoid repeating
+
+Three CI failures, all mine, all worth recording:
+
+1. **A `kmem_alloc` compatibility shim that was not needed and broke the build.**
+   xnu-8796.101.5 already has `KMA_DATA` and the five-argument `kmem_alloc`
+   (`osfmk/vm/vm_kern.h:578` and `:643`). The guard was `#ifndef KMA_DATA`, which is always true
+   because **`KMA_DATA` is an enum constant, not a macro**, so the shim fired on a tree that did
+   not want it. Read the header; do not infer our XNU from theirs.
+2. **Dropping `#include <sys/hakios.input.h>` as "unused".** Nothing referenced `input_`, but it
+   declares `hakios_gpu_done` and the rest of the interface this file *defines*. The shims restore
+   those prototypes.
+3. **Registering the new file anywhere but the last patch.** Every overlay uses the lines the
+   earlier ones added as its own patch context, so an insertion in that block breaks whatever
+   comes after: mid-block stopped 1008 and 1010; the end of the block stopped **1011**, whose
+   hunk has `ArmSmmu4KMmio.c` followed directly by `bsd/dev/mem.c`. The entry belongs in 1012,
+   the last patch, anchored on the finished block. `hakios_adreno_init()` is called from
+   `lemonadep_gpu.c` instead of `sweet_ufs.c` for the same reason — 1007 creates that file, so no
+   other patch reads it.
+
+And the guard added earlier today — CircleCI's "fail if any sweet/lemonadep patch was skipped" —
+caught all of (3). `darwin-xnu-build` only *warns*, so without it the kernel would have built
+happily without the Adreno driver, and once without the battery/DPU patch either.
+
+### Next
+
+Steps 1-3 and 6-10 only read; 4 and 5 write (the CX power switch, then the clocks), and 10 writes
+two words into the GMU's memory and reads them back. All of that is ground this project has
+already covered with its own driver today, so `adreno=10` is a justified jump rather than a
+gamble. After it: 11-12 are TrustZone (the zap shader's signature), 13-15 bring the GMU up,
+16-17 are HFI and the 3D core, 18-21 the ring, microcode and secure mode, 22 the drawn picture.
+
+Use `lemonadep/m6-hakios-gpu-build.sh KERNEL 8 STEPS`. Keep `sweetgpu=0`: our own GPU driver and
+this one both reach for the same GMU, SMMU and clocks.
+
 ## UEFI RUNS ON THE PHONE (2026-10-29) — Project Silicium's screen is up
 
 After the header-version fix, the phone **shows Project Silicium's screen**. That is the first
