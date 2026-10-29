@@ -1375,6 +1375,75 @@ look for:
 Kernel run: https://github.com/popovluka/ios-lemonadep/actions/runs/39853877374
 (cpus=4 boot image built from it by `m2-boot-build.sh ... 4`).
 
+## HakiOS port started: a lemonadep kernel builds and runs user space (2026-10-29 ~01:50)
+
+**Where it is.** `~/hakios/hakios-xnu-kernel` inside the **LemonadepLab WSL distro** (not /mnt/d:
+D: is 96% full with 41 GB, WSL's own filesystem has 918 GB, and native-FS builds avoid the 9p
+tax). Branch **`hakios`**, not `main` — `main` is still the pre-restructure layout with no
+`configs/` and no `hakios-device.py`, so following the docs against it will not work.
+
+**The device repository exists**: `devices/lemonadep` (its own git repo, 2 commits), made with
+`tools/hakios-device.py new lemonadep --soc sm8350 --soc-title "Snapdragon 888 (SM8350,
+lahaina)" --title "OnePlus 9 Pro" --vendor OnePlus --fdt <the phone's tree>`. It read **13 of
+16 `soc_*` values straight out of lemonadep's own device tree**; the three it missed are now
+filled in and `hakios-device.py check` passes:
+- `soc_cmd_db=0x80860000` — the scan looks for a reserved-memory node *named* `cmd_db`;
+  lemonadep calls it `reserved-memory@80860000` (`compatible = "qcom,cmd-db"`). This is also
+  what ios-sweet read at runtime (`SWEET RPMH: cmd-db ... pa=0x80860000`), so tree and
+  hardware agree;
+- `soc_mpss_mem=0x8b800000` (`modem_region@8b800000`), `modem_ipa_fw_at=0x8b500000`
+  (`pil_ipa_fw_region@8b500000`).
+Two of the auto-read values also match ios-sweet's own findings: `soc_rsc=0x18220000`
+(= `SWEET RPMH: rsc=0x18220000`) and `soc_apps_smmu=0x15000000` (= patch 1008's constant).
+
+**It builds on Linux. No macOS, no Xcode, no CI.** theos + its Linux cctools + the
+`iPhoneOS16.5.sdk` (theos's own installer pins `swift-toolchain-linux` **v2.3.0 /
+swift-5.8-ubuntu20.04**, not the newer tags), then `xnu-deps/setup.sh` lays out the rest.
+`make doctor` is green apart from the IPSW and the phone's firmware.
+
+**Two environment gaps cost a build each, neither in `make doctor`:**
+1. `uuid/uuid.h` not found — XNU's host SETUP tools need **`uuid-dev`**;
+2. then `ld: library not found for -lfirehose_kernel`. The Makefile guard is
+   `[ -e xnu-deps/host/bin/ld64 ] || xnu-deps/setup.sh`, and stage 1 had already created
+   `ld64` before the uuid failure, so setup was skipped from then on and **stage 2 never
+   ran** — it is what builds `libfirehose_kernel.a` and `libpthread_kext.a` against the
+   kernel's exported headers. `xnu-deps/setup.sh --stage2` fixes it. (Same library that
+   needed `arm64` added to darwin-xnu-build's `ARCHS` in ios-sweet.)
+
+**Result: `hakios-kernel`, 14,365,016 bytes, Mach-O 64-bit arm64 (NOUNDEFS|PIE), Darwin
+Kernel Version 22.5.0 / xnu-8796.121.2.** `make qemu-open` boots it with no Apple software
+at all and it reaches user space:
+
+```
+hakios-kernel: 4 drivers built in (.config): virtio_sound virtio_input virtio_net virtio_blk
+hakios-kernel: version 2.1.13-hakios-darwin22.5-sm8350-g7867dc14
+load_init_program: attempting to load /sbin/launchd
+Hello from user space on Darwin!   I am process 1, uid 0, console fd 0.
+pid 1 exited (signal 0, exit 0)    panic: initproc failed to start
+```
+
+That panic **is the expected end** of `qemu-open`: mockfs presents `userland/hello` as
+`/sbin/launchd`, it prints and exits, and XNU always panics when init exits. The four virtio
+drivers and the `sm8350` version string confirm the kernel was built from our own config.
+Only the LLDB debug-macro packaging fails in `make kernel`; the kernel itself links clean, so
+copy it from `xnu-src/.../BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837` to
+`hakios-kernel` when that step stops the build.
+
+**The UEFI does not need writing.** furangelz has a full lemonadep package at
+`uefi/files/Platforms/OnePlus/lemonadepPkg` (DSC/FDF/Drivers/Library/Binaries) plus
+`Resources/DTBs/lemonadep.dtb` on their `lemonadep` branch — their README is stale and still
+says "UEFI for redwood", which is why it is easy to miss. **Their `prebuilt/uefi/` is
+redwood's build** (it ships `redwood.dtb`), so the package has to be compiled, not copied.
+Mu-Silicium upstream has `Platforms/OnePlus/lemonadePkg`, which is the OnePlus **9**
+(`sm8350-oneplus-lemonade.dtb`) — a sibling on the same SoC, and a cleaner reference than the
+`lisa`/`KodiakPkg` one furangelz had to follow. A search for "lemonadep" matches "lemonade**P**kg"
+by accident; do not take that as upstream support for the Pro.
+
+**Next**: step 2 of docs/porting — the first boot on the phone with nothing of the phone's,
+which needs the lemonadep UEFI built and `make loader`/`make phone`. Then drivers in the
+documented order (CPUFREQ/THERMAL/SOCINFO → buttons/touch → UFS → ADRENO → ADSP/battery/audio
+→ Wi-Fi → the rest).
+
 ## Upstream restructured into HakiOS — evaluation notes (2026-10-29 ~01:20)
 
 `github.com/oosexgang` is now **HakiOS**, with docs at hackios-web.vercel.app. What exists
