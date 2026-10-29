@@ -1375,6 +1375,44 @@ look for:
 Kernel run: https://github.com/popovluka/ios-lemonadep/actions/runs/39853877374
 (cpus=4 boot image built from it by `m2-boot-build.sh ... 4`).
 
+## UEFI RUNS ON THE PHONE (2026-10-29) — Project Silicium's screen is up
+
+After the header-version fix, the phone **shows Project Silicium's screen**. That is the first
+time this port has put anything on the panel from UEFI. It means: the v3 boot image is accepted,
+the boot shim ran, the UEFI FD started, `DisplayDxe` works, and the memory map is good enough to
+reach the Boot Manager. The blocker is now narrow — UEFI runs and does not hand over to the XNU
+loader.
+
+Things ruled out by inspection, so nobody re-checks them:
+
+- **The memory map is fine.** `lemonadepPkg/Library/MemoryMapLib/MemoryMapLib.c` already carries
+  `{"XNU Payload", 0xF0000000, 0x04000000, AddMem, SYS_MEM, SYS_MEM_CAP, Reserv, WRITE_BACK_XN}`,
+  byte-identical to redwood's. `XnuLoader.h` requires exactly that region to be reserved.
+- All 94 vendor drivers, `XnuLoader.c` compiled into the Boot Manager, `BootShim.bin` newer than
+  the patched `BootShim.S`, and the payload built and included (see the retraction below).
+
+**A real gap, though:** `hakios.patch` touches five files and only **three** are applied in
+furangelz's Mu-Silicium tree — `BootShim.S`, `BootManagerLib.inf` and `BootManager.c` are
+modified, while **`SiliciumPkg/Sec/Sec.c` and `SiliciumPkg.dsc.inc` are not**
+(`LahainaPkg/.../PlatformSec.c` is modified instead, which is furangelz's own separate change).
+That explains the missing `HakiOS` string in the FD. Whether `SiliciumPkg.dsc.inc` carries
+anything the hand-over needs is the next thing to read — it is the only part of HakiOS's UEFI
+changes known to be absent.
+
+### There is a log, and it has never been read
+
+`XnuLoader.c` logs `[payload] base=%lx magic=%08x size=%x` and writes its text log to a **raw GPT
+partition named `logdump`** (`XNU_LOG_PARTITION L"logdump"` in `XnuLoader.h`). So the loader's own
+account of whether it found `XNU_PAYLOAD_MAGIC` ("XNUP", `0x50554E58`) at `0xF0000000` is
+recoverable from TWRP with `dd`, exactly like the SWEET kernel ring. Read that before changing
+anything: it says directly whether the shim's copy arrived.
+
+Interpreting it: a sane `magic=50554e58` with a plausible `size` means the shim did its job and
+the failure is after the payload check; `magic=00000000` or garbage means the shim's copy never
+landed at `0xF0000000`, and the suspect becomes the shim's idea of where it was loaded — a v3
+boot image is loaded at the bootloader's own fixed address, not the `0x10008000` the old v1
+header named.
+
 ## HakiOS loader: FOUND A REAL BUG — mkxnuimg.py hardcoded the boot header version (2026-10-29)
 
 The user's observation that the phone **stayed in fastboot** was the decisive clue, and it
