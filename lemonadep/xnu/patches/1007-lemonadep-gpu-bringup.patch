@@ -34,7 +34,7 @@
 
 --- /dev/null
 +++ b/bsd/dev/lemonadep_gpu.c
-@@ -0,0 +1,384 @@
+@@ -0,0 +1,632 @@
 +/*
 + * lemonadep: GPU bring-up, first on-device slice. Real register writes
 + * only: CX GDSC + the seven GMU clock branches (lemonadep_gpu_reserve.c),
@@ -71,7 +71,11 @@
 + *        reserved gpumem region) and a READ-ONLY Adreno SMMU probe, logged
 + *   8: + program the GMU SMMU context, attach SIDs 5/0x405, map the
 + *        icache/dummy/debug/log/hfi regions (still before SYSRESET)
-+ *   9+: full run, including the SYSRESET toggle and ready-poll
++ *   9: full cold start, including the SYSRESET toggle and ready-poll
++ *   10: + the HFI handshake (CTRL_INIT) and the table-free messages
++ *        fw_version/core_fw_start/start. PERF_TABLE and BW_TABLE are
++ *        skipped: the first needs ARC votes out of RPMh's cmd-db, which
++ *        this driver cannot build yet. See HANDOFF.md "GPU, Phase 18".
 + * Stages 7+ need the reserved region: mkpayload --extra-blob gpumem:zero:SIZE
 + * (lemonadep/m3-gpu-build.sh does it). See HANDOFF.md "GPU, Phase 9".
 + *
@@ -105,6 +109,10 @@
 + * down -- an outer block -- can still read that context's fault registers. */
 +static const ArmSmmu4KIo *lemonadep_gmu_cb_io;
 +static uint32_t lemonadep_gmu_cb_off;
++/* CPU side of the HFI region, for the same reason: the queues are set up
++ * inside the stage>=7 block but the HFI exchange happens after the cold
++ * start returns, an outer block where `gpumem` is already out of scope. */
++static volatile uint32_t *lemonadep_hfi_base;
 +
 +/* Clean [va, va+bytes) to the point of coherency. The Adreno SMMU is
 + * dma-coherent, so this is belt and braces for tables and GMU memory the
@@ -119,6 +127,26 @@
 +	const uintptr_t end = (uintptr_t)va + bytes;
 +	for (; a < end; a += line) {
 +		__asm__ volatile("dc cvac, %0" :: "r"(a) : "memory");
++	}
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
++/* Clean *and* invalidate [va, va+bytes). Needed before reading anything the
++ * GMU wrote: a plain read of the HFI reply queue can otherwise return the
++ * zeros lemonadep_hfi_table_init() left in our own cache. "civac" writes
++ * back whatever of ours is still dirty before invalidating, so it is safe on
++ * memory both sides touch -- which the queue headers are, since the GMU owns
++ * write_index while we own read_index in the very same cache line. */
++static void
++lemonadep_flush_from_poc(const volatile void *va, size_t bytes)
++{
++	uint64_t ctr;
++	__asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
++	const uintptr_t line = (uintptr_t)4 << ((ctr >> 16) & 0xf);
++	uintptr_t a = (uintptr_t)va & ~(line - 1);
++	const uintptr_t end = (uintptr_t)va + bytes;
++	for (; a < end; a += line) {
++		__asm__ volatile("dc civac, %0" :: "r"(a) : "memory");
 +	}
 +	__asm__ volatile("dsb sy" ::: "memory");
 +}
@@ -182,6 +210,212 @@
 +	return 0;
 +}
 +
++/*
++ * HFI queue geometry, exactly as lemonadep_hfi_table_init() laid it out and
++ * a6xx_hfi_init() defines it: a 6-dword table header, three 12-dword queue
++ * headers, then three 4 KiB queues at 4/8/12 KiB into the 16 KiB HFI region.
++ * Queue 0 is host-to-GMU commands, queue 1 the GMU's replies.
++ */
++enum {
++	LemonadepHfiTableWords = 6,
++	LemonadepHfiHeaderWords = 12,
++	LemonadepHfiQueueBytes = 4096u,
++	LemonadepHfiQueueWords = LemonadepHfiQueueBytes / 4u,
++	LemonadepHfiCmdQueue = 0,
++	LemonadepHfiReplyQueue = 1,
++	/* Dword indices inside a queue header (struct a6xx_hfi_queue_header). */
++	LemonadepHfiHdrReadIndex = 10,
++	LemonadepHfiHdrWriteIndex = 11,
++};
++
++static volatile uint32_t *
++lemonadep_hfi_hdr(unsigned q)
++{
++	return lemonadep_hfi_base + LemonadepHfiTableWords + q * LemonadepHfiHeaderWords;
++}
++
++static volatile uint32_t *
++lemonadep_hfi_data(unsigned q)
++{
++	return lemonadep_hfi_base + LemonadepHfiQueueWords * (q + 1u);
++}
++
++/*
++ * a6xx_hfi_send_msg() + a6xx_hfi_queue_write() + a6xx_hfi_wait_for_ack(),
++ * without the interrupt handler: write the message into the command queue,
++ * ring the doorbell, poll for MSGQ, then read the reply queue. `msg[0]` is
++ * overwritten with the header this builds. `reply` must hold at least four
++ * dwords (header, ret_header, error, and one payload word).
++ *
++ * Not a faithful copy of the upstream retry loop: that one keeps reading
++ * past an F2H_MSG_ERROR or a mismatched sequence number, because a long-lived
++ * driver can have stale responses queued. This is a cold queue that has never
++ * carried a message, so anything unexpected is reported rather than skipped --
++ * on a first bring-up the unexpected packet is the interesting one.
++ */
++static lemonadep_gmu_status
++lemonadep_hfi_send(const lemonadep_gmu_io *io, unsigned id, uint32_t *msg, unsigned dwords,
++    uint32_t *reply, unsigned reply_dwords, uint32_t *out_intr)
++{
++	static uint32_t seq_counter;
++	if (!lemonadep_hfi_base || !msg || !reply || reply_dwords < 4 || dwords < 1) {
++		return LemonadepGmuBadArg;
++	}
++	volatile uint32_t *hdr = lemonadep_hfi_hdr(LemonadepHfiCmdQueue);
++	volatile uint32_t *data = lemonadep_hfi_data(LemonadepHfiCmdQueue);
++	const uint32_t seq = (++seq_counter) % 0xfffu;
++	uint32_t index = hdr[LemonadepHfiHdrWriteIndex] % LemonadepHfiQueueWords;
++
++	/* First dword is the header: seqnum, HFI_MSG_CMD (0), size, id. */
++	msg[0] = (seq << 20) | (dwords << 8) | id;
++	for (unsigned i = 0; i < dwords; ++i) {
++		data[index] = msg[i];
++		index = (index + 1u) % LemonadepHfiQueueWords;
++	}
++	/* "Cookify any non used data at the end of the write buffer" -- the
++	 * firmware uses this to tell padding from a real message. */
++	for (; index % 4u; index = (index + 1u) % LemonadepHfiQueueWords) {
++		data[index] = 0xfafafafau;
++	}
++	lemonadep_clean_to_poc(data, LemonadepHfiQueueBytes);
++	hdr[LemonadepHfiHdrWriteIndex] = index;
++	lemonadep_clean_to_poc(hdr, LemonadepHfiHeaderWords * 4u);
++	if (io_write(io, LemonadepGmuWindowCore, A660_GMU_HOST2GMU_INTR_SET, 1) !=
++	    LemonadepGmuOk) {
++		return LemonadepGmuIoError;
++	}
++
++	/* Upstream allows a full second here, far beyond poll_core()'s hard
++	 * 10 ms cap, so this polls directly rather than reusing it. */
++	uint64_t start = 0, now = 0;
++	uint32_t info = 0;
++	if (io->now_us(io->cookie, &start)) {
++		return LemonadepGmuIoError;
++	}
++	for (;;) {
++		if (io_read(io, LemonadepGmuWindowCore, A660_GMU_GMU2HOST_INTR_INFO, &info) !=
++		    LemonadepGmuOk) {
++			return LemonadepGmuIoError;
++		}
++		if (info & LEMONADEP_GMU2HOST_INTR_MSGQ) {
++			break;
++		}
++		if (io->now_us(io->cookie, &now) || now < start) {
++			return LemonadepGmuIoError;
++		}
++		if (now - start >= 1000000) {
++			if (out_intr) {
++				*out_intr = info;
++			}
++			return LemonadepGmuTimeout;
++		}
++		if (io->wait_us(io->cookie, 100)) {
++			return LemonadepGmuIoError;
++		}
++	}
++	if (out_intr) {
++		*out_intr = info;
++	}
++	if (io_write(io, LemonadepGmuWindowCore, A660_GMU_GMU2HOST_INTR_CLR,
++	    LEMONADEP_GMU2HOST_INTR_MSGQ) != LemonadepGmuOk) {
++		return LemonadepGmuIoError;
++	}
++
++	/* a6xx_hfi_queue_read(): the dword at read_index is the response header
++	 * and counts towards the size in its [15:8]; read_index is then realigned
++	 * to a 4-dword boundary. Invalidate first -- the GMU wrote this. */
++	volatile uint32_t *rhdr = lemonadep_hfi_hdr(LemonadepHfiReplyQueue);
++	volatile uint32_t *rdata = lemonadep_hfi_data(LemonadepHfiReplyQueue);
++	lemonadep_flush_from_poc(rhdr, LemonadepHfiHeaderWords * 4u);
++	lemonadep_flush_from_poc(rdata, LemonadepHfiQueueBytes);
++	const uint32_t r = rhdr[LemonadepHfiHdrReadIndex] % LemonadepHfiQueueWords;
++	if (r == (rhdr[LemonadepHfiHdrWriteIndex] % LemonadepHfiQueueWords)) {
++		/* MSGQ fired but the queue is empty. Upstream waits again here;
++		 * say so instead, because on a cold queue it means the firmware
++		 * signalled something this driver does not understand yet. */
++		return LemonadepGmuStateMismatch;
++	}
++	const unsigned rsize = (rdata[r] >> 8) & 0xffu;
++	for (unsigned i = 0; i < reply_dwords; ++i) {
++		reply[i] = (i < rsize) ? rdata[(r + i) % LemonadepHfiQueueWords] : 0u;
++	}
++	uint32_t next = (r + rsize) % LemonadepHfiQueueWords;
++	next = ((next + 3u) & ~3u) % LemonadepHfiQueueWords;
++	rhdr[LemonadepHfiHdrReadIndex] = next;
++	lemonadep_clean_to_poc(rhdr, LemonadepHfiHeaderWords * 4u);
++	return LemonadepGmuOk;
++}
++
++/* One message, fully reported. Returns true only on an ACK with error 0. */
++static bool
++lemonadep_hfi_step(const lemonadep_gmu_io *io, const char *what, unsigned id,
++    uint32_t *msg, unsigned dwords)
++{
++	uint32_t reply[8] = {0};
++	uint32_t intr = 0;
++	lemonadep_gmu_status st = lemonadep_hfi_send(io, id, msg, dwords, reply, 8, &intr);
++	printf("SWEET GPU: HFI %s status=%d intr=0x%x hdr=0x%x ret=0x%x err=0x%x "
++	    "payload=0x%x,0x%x\n", what, st, intr, reply[0], reply[1], reply[2],
++	    reply[3], reply[4]);
++	if (st != LemonadepGmuOk) {
++		return false;
++	}
++	if ((reply[0] & 0xffu) == LEMONADEP_HFI_F2H_MSG_ERROR) {
++		printf("SWEET GPU: HFI %s: firmware error packet, code=0x%x\n", what, reply[1]);
++		return false;
++	}
++	if (reply[2] != 0u) {
++		printf("SWEET GPU: HFI %s: acked with error 0x%x\n", what, reply[2]);
++		return false;
++	}
++	return true;
++}
++
++/*
++ * Stage 10. a6xx_gmu_fw_start() ends with a6xx_gmu_hfi_start() -- CTRL_INIT=1
++ * and a wait on CTRL_STATUS bit 0 -- which stage 9 never did; the
++ * HFI_CTRL_STATUS=0x1 it reported was the firmware's own doing, so the
++ * handshake is still owed. After it, a6xx_hfi_start()'s message sequence.
++ *
++ * Only the three messages that carry no tables are sent. PERF_TABLE and
++ * BW_TABLE come first in upstream's order, and both are skipped here on
++ * purpose: PERF_TABLE needs per-level ARC votes read out of RPMh's cmd-db,
++ * which this driver has no code for yet, and sending a half-made table is
++ * worse than sending none. So CORE_FW_START and START may well be refused
++ * for being out of order -- and that is still worth knowing, because a
++ * refusal is a *reply*, which is what this stage is really testing.
++ */
++static void
++lemonadep_gpu_hfi_stage(const lemonadep_gmu_io *io)
++{
++	uint32_t val = 0;
++	if (io_write(io, LemonadepGmuWindowCore, A660_GMU_HFI_CTRL_INIT, 1) != LemonadepGmuOk) {
++		printf("SWEET GPU: HFI ctrl_init write failed\n");
++		return;
++	}
++	lemonadep_gmu_status st = poll_core(io, A660_GMU_HFI_CTRL_STATUS, 1u, 1u, 200, &val);
++	printf("SWEET GPU: HFI ctrl_init status=%d ctrl_status=0x%x\n", st, val);
++	if (st != LemonadepGmuOk) {
++		return;
++	}
++
++	uint32_t fw_version[2] = {0, LEMONADEP_HFI_FW_VERSION_SUPPORTED};
++	if (!lemonadep_hfi_step(io, "fw_version", LEMONADEP_HFI_H2F_MSG_FW_VERSION,
++	    fw_version, 2)) {
++		return;
++	}
++	uint32_t core_fw_start[2] = {0, 0}; /* header, handle */
++	if (!lemonadep_hfi_step(io, "core_fw_start", LEMONADEP_HFI_H2F_MSG_CORE_FW_START,
++	    core_fw_start, 2)) {
++		return;
++	}
++	uint32_t start[1] = {0};
++	if (!lemonadep_hfi_step(io, "start", LEMONADEP_HFI_H2F_MSG_START, start, 1)) {
++		return;
++	}
++	printf("SWEET GPU: HFI is up -- every message acked\n");
++}
++
 +void
 +lemonadep_gpu_init(void)
 +{
@@ -207,11 +441,14 @@
 +		 * existed. Stage 8 now establishes both; this is still the one
 +		 * stage that can fault the SoC, so it is asked for by name. */
 +		LemonadepGmuPhaseNone,
++		/* 10: stage 9, then the HFI handshake and messages. Needs a GMU
++		 * that reached Done, so it runs the same cold start first. */
++		LemonadepGmuPhaseNone,
 +	};
 +	/* Out of range must not mean "no stop": that is stage 9's behaviour and
 +	 * it is the riskiest, so a typo in sweetgpu= would otherwise run it. */
 +	if (stage >= sizeof(stage_stop) / sizeof(stage_stop[0])) {
-+		printf("SWEET GPU: sweetgpu=%u is not a stage (1..9); leaving the GPU alone\n", stage);
++		printf("SWEET GPU: sweetgpu=%u is not a stage (1..10); leaving the GPU alone\n", stage);
 +		return;
 +	}
 +	const lemonadep_gmu_phase stop_after = stage_stop[stage];
@@ -295,6 +532,7 @@
 +		    fw.bytes, fw.length);
 +		lemonadep_clean_to_poc(gpumem + LEMONADEP_GPUMEM_ICACHE_OFF, LEMONADEP_GPUMEM_BYTES -
 +		    LEMONADEP_GPUMEM_ICACHE_OFF);
++		lemonadep_hfi_base = (volatile uint32_t *)(gpumem + LEMONADEP_GPUMEM_HFI_OFF);
 +		printf("SWEET GPU: hfi table at iova 0x%x, icache firmware %u bytes\n",
 +		    (uint32_t)LEMONADEP_GMU_HFI_IOVA, icache_bytes);
 +		if (icache_bytes == 0) {
@@ -406,8 +644,18 @@
 +		}
 +	}
 +	if (gmu_status == LemonadepGmuOk && gmu_phase == LemonadepGmuPhaseDone) {
-+		printf("SWEET GPU: GMU reports ready. Stopping before CP ring/CP_ME_INIT "
-+		    "(needs SMMU context + real IOVA-backed memory, not yet wired)\n");
++		printf("SWEET GPU: GMU reports ready.\n");
++		if (stage >= 10) {
++			if (lemonadep_hfi_base == NULL) {
++				printf("SWEET GPU: no HFI mapping, cannot run stage 10\n");
++			} else {
++				lemonadep_gpu_hfi_stage(&gmu_io);
++			}
++		} else {
++			printf("SWEET GPU: stopping before HFI (sweetgpu=10 runs it)\n");
++		}
++		printf("SWEET GPU: stopping before CP ring/CP_ME_INIT (the 3D core is "
++		    "not wired yet; this is not GPU acceleration)\n");
 +	} else if (gmu_status == LemonadepGmuOk) {
 +		printf("SWEET GPU: stopped cleanly as requested (sweetgpu=%u)\n", stage);
 +	}
@@ -602,7 +850,7 @@
 +#endif
 --- /dev/null
 +++ b/bsd/dev/lemonadep/LemonadepA660HwInit.h
-@@ -0,0 +1,325 @@
+@@ -0,0 +1,351 @@
 +/* SPDX-License-Identifier: MIT */
 +#ifndef LEMONADEP_A660_HWINIT_H
 +#define LEMONADEP_A660_HWINIT_H
@@ -866,6 +1114,32 @@
 +#define A660_GMU_GENERAL_1 0x014718            /* dword 0x1f9c6 */
 +#define A660_GMU_HFI_CTRL_STATUS 0x014600      /* dword 0x1f980 */
 +#define A660_GMU_HFI_VERSION_INFO 0x014604     /* dword 0x1f981 */
++
++/* HFI (stage 10). a6xx_gmu_hfi_start() arms the queues with CTRL_INIT=1 and
++ * waits for CTRL_STATUS bit 0; a6xx_hfi_queue_write() rings the doorbell at
++ * HOST2GMU_INTR_SET, and a6xx_hfi_wait_for_msg_interrupt() polls
++ * GMU2HOST_INTR_INFO for MSGQ and clears it through GMU2HOST_INTR_CLR.
++ * Offsets by the usual conversion, anchored on HFI_QTBL_ADDR (dword 0x1f985
++ * -> 0x14614), which this driver already used. */
++#define A660_GMU_HFI_CTRL_INIT 0x014618        /* dword 0x1f986 */
++#define A660_GMU_GMU2HOST_INTR_CLR 0x014644    /* dword 0x1f991 */
++#define A660_GMU_GMU2HOST_INTR_INFO 0x014648   /* dword 0x1f992 */
++#define A660_GMU_HOST2GMU_INTR_SET 0x014650    /* dword 0x1f994 */
++/* a6xx_gmu.xml's own bitfields for GMU2HOST_INTR_INFO. Note the interrupt
++ * line stays masked during bring-up (A6XX_HFI_IRQ_MASK is CM3_FAULT alone),
++ * yet upstream polls MSGQ here, so INTR_INFO is raw status and this driver
++ * never has to touch GMU2HOST_INTR_MASK. */
++#define LEMONADEP_GMU2HOST_INTR_MSGQ (1u << 0)
++#define LEMONADEP_GMU2HOST_INTR_CM3_FAULT (1u << 23)
++
++/* HFI message ids and the one payload value a query needs (a6xx_hfi.h, and
++ * a6xx_hfi_send_fw_version()'s supported_version). HFI_MSG_CMD is 0, so the
++ * type field of an outgoing header contributes nothing and is left out. */
++#define LEMONADEP_HFI_H2F_MSG_FW_VERSION 1u
++#define LEMONADEP_HFI_H2F_MSG_START 10u
++#define LEMONADEP_HFI_H2F_MSG_CORE_FW_START 14u
++#define LEMONADEP_HFI_F2H_MSG_ERROR 100u
++#define LEMONADEP_HFI_FW_VERSION_SUPPORTED ((1u << 28) | (1u << 19) | (1u << 17))
 +
 +/* a6xx_gmu_power_config() + a6xx_gmu_start(): the real tail of fw_start,
 + * after the GBIF writes -- RPMH_CTRL's GPU-client vote enable is

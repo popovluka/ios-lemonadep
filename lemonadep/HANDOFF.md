@@ -1375,6 +1375,91 @@ look for:
 Kernel run: https://github.com/popovluka/ios-lemonadep/actions/runs/39853877374
 (cpus=4 boot image built from it by `m2-boot-build.sh ... 4`).
 
+## GPU, Phase 18: HFI transport written as stage 10 (2026-10-29)
+
+Stage 10 = stage 9's cold start, then the HFI handshake and the messages that
+need no tables. `sweetgpu=10`.
+
+**What stage 9 still owed.** `a6xx_gmu_fw_start()` ends with `a6xx_gmu_hfi_start()`:
+`GMU_HFI_CTRL_INIT = 1`, then poll `GMU_HFI_CTRL_STATUS` bit 0. This driver never did
+that — the `hfi_status=0x1` Phase 17 reported was the firmware's own doing, not ours. Stage
+10 does it first, in the same place upstream does (right after the cold start reaches Done).
+
+**Transport.** `lemonadep_hfi_send()` is `a6xx_hfi_send_msg` + `queue_write` +
+`wait_for_ack` without an interrupt handler:
+
+- Header dword is `(seqnum << 20) | (HFI_MSG_CMD << 16) | (dwords << 8) | id`, and
+  `HFI_MSG_CMD` is 0, so the type field contributes nothing.
+- Write into command queue 0, wrapping on the 1024-dword size, then pad to the next
+  4-dword boundary with `0xfafafafa` — upstream's "cookify" step, which is how the
+  firmware tells padding from a message.
+- Ring `HOST2GMU_INTR_SET = 1`, poll `GMU2HOST_INTR_INFO` for MSGQ, clear via
+  `GMU2HOST_INTR_CLR`. Upstream allows a **full second** here, far beyond `poll_core()`'s
+  hard 10 ms cap, so this polls directly instead of reusing it.
+- Read reply queue 1: the dword at `read_index` is the response header and counts
+  towards the size in its `[15:8]`; `read_index` is then realigned to 4 dwords.
+
+Two things verified rather than assumed:
+
+- **The queue table was already right.** I suspected `lemonadep_hfi_table_init()` was wrong
+  (3 queues of 4 KiB, `tx_request=0`) and nearly "fixed" it. Current upstream is
+  `HFI_MAX_QUEUES 3`, three `SZ_4K` queues at 4/8/12 KiB, `tx_request = 0`, type
+  `10 << 8 | id` with ids 0/1/2 — exactly what it does, 168-byte table and all. Left alone.
+- **The interrupt mask needs no write.** `A6XX_HFI_IRQ_MASK` is `CM3_FAULT` alone, so MSGQ
+  stays *masked* while upstream polls `INTR_INFO` for it. INTR_INFO is therefore raw status,
+  and this driver never touches `GMU2HOST_INTR_MASK`. That avoids a risky write.
+
+**Cache maintenance: a new `lemonadep_flush_from_poc()` (`dc civac`).** Phase 16 noted the
+kernel had only a clean (`dc cvac`) and no invalidate, which made a GMU-memory dump a
+false-negative risk. Reading the reply queue has exactly that problem, so this is no longer
+optional. `civac` writes back anything of ours still dirty before invalidating, which matters
+because the GMU owns `write_index` while we own `read_index` in the *same cache line*.
+
+**What is deliberately not sent.** `PERF_TABLE` and `BW_TABLE` come first in upstream's
+order and are both skipped. `PERF_TABLE` needs per-level ARC votes read out of RPMh's
+cmd-db (`a6xx_gmu_rpmh_votes_init()`), which this driver has no code for, and sending a
+half-made table is worse than sending none. `a660_build_bw_table()`'s data is already
+transcribed here as `LemonadepA660BwTable_`, so BW_TABLE is the cheaper of the two to add
+next. **So `CORE_FW_START` and `START` may well be refused as out of order — and that is
+still a success for this stage, because a refusal is a reply, and a reply is what is being
+tested.** Each message is reported separately for that reason.
+
+Also confirmed while reading: `probe` is `GMU_CORE_FW_VERSION` (Phase 16), `a660`'s
+`gbif_cx = a640_gbif` so the GBIF QSB writes belong in fw_start, and `gmu_chipid` is absent
+from the a660 catalog entry so upstream computes `0x06060100` — our constant.
+
+**Not yet run on hardware.** It builds and passes `lemonadep/tools/syntax-check-gpu.sh`
+(see below), nothing more.
+
+### New local tooling (commit `1517017`)
+
+- `lemonadep/tools/check-patch-hunks.py` — validates every `@@` header against its body.
+  It was re-derived from scratch across sessions; it is in the repo now.
+- `lemonadep/tools/extract-patch-tree.py` + `syntax-check-gpu.sh` — materialise the patch's
+  new files and run `clang -fsyntax-only` over `lemonadep_gpu.c` with stub XNU headers.
+  Catches typos, bad types and bad printf formats in seconds. It caught a real breakage in
+  this very change: an edit left an orphaned `void` and made `lemonadep_gpu_init` static
+  although it is declared `extern`. Stub `uint64_t` is `unsigned long` on a Linux host, so
+  the three `%llx` warnings it prints are expected and are on pre-existing lines.
+
+### Reading the next log
+
+```
+SWEET GPU: HFI ctrl_init status=0 ctrl_status=0x1
+SWEET GPU: HFI fw_version status=0 intr=0x1 hdr=... ret=... err=0x0 payload=...
+SWEET GPU: HFI core_fw_start ...
+SWEET GPU: HFI start ...
+SWEET GPU: HFI is up -- every message acked
+```
+
+- `fw_version status=0 err=0x0` is the real milestone: queue layout, header encoding,
+  doorbell, interrupt and reply read are all correct.
+- `status=3` (Timeout) means no MSGQ within a second — the doorbell or the queue table is
+  wrong. `status=4` (StateMismatch) means MSGQ fired but the queue was empty.
+- `err` non-zero, or `hdr & 0xff == 100` (`F2H_MSG_ERROR`), means the transport works and
+  the firmware rejected the message — most likely the missing tables, which is expected for
+  `core_fw_start`/`start` and would be a surprise for `fw_version`.
+
 ## GMU MILESTONE REACHED (2026-10-29) — the GMU executes its firmware and reports ready
 
 Commit `936ac6e` (pipeline 24, kernel `a458ac3e`, image `3daea6fb`), on real hardware:
