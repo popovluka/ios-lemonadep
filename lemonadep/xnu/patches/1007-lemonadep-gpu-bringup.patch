@@ -34,7 +34,7 @@
 
 --- /dev/null
 +++ b/bsd/dev/lemonadep_gpu.c
-@@ -0,0 +1,353 @@
+@@ -0,0 +1,355 @@
 +/*
 + * lemonadep: GPU bring-up, first on-device slice. Real register writes
 + * only: CX GDSC + the seven GMU clock branches (lemonadep_gpu_reserve.c),
@@ -358,6 +358,8 @@
 +	lemonadep_gmu_status gmu_status = lemonadep_gmu_cold_start(&gmu_io, &fw, hfi_iova, log_iova,
 +	    LEMONADEP_GMU_LOG_BYTES, &gmu_phase, stop_after);
 +	printf("SWEET GPU: GMU cold start status=%d phase=%d\n", gmu_status, gmu_phase);
++	printf("SWEET GPU: FAL10 veto fal=0x%x falnext=0x%x\n",
++	    lemonadep_gmu_start_ready.fal, lemonadep_gmu_start_ready.falnext);
 +	if (lemonadep_gmu_start_ready.seen) {
 +		printf("SWEET GPU: GMU start-ready probe=0x%x -> mask=0x%x want=0x%x, FW_INIT_RESULT=0x%x\n",
 +		    lemonadep_gmu_start_ready.probe, lemonadep_gmu_start_ready.mask,
@@ -550,7 +552,7 @@
 +#endif
 --- /dev/null
 +++ b/bsd/dev/lemonadep/LemonadepA660HwInit.h
-@@ -0,0 +1,303 @@
+@@ -0,0 +1,313 @@
 +/* SPDX-License-Identifier: MIT */
 +#ifndef LEMONADEP_A660_HWINIT_H
 +#define LEMONADEP_A660_HWINIT_H
@@ -793,6 +795,16 @@
 + * GMU_HFI_SFR_ADDR (A660's real register; NOT GMU_GENERAL_10, the A7XX/A8XX one). */
 +#define LEMONADEP_A660_GMU_CHIPID 0x06060100u
 +
++/* a6xx_gmu_fw_start()'s very first writes on an A650-family part (A660 is
++ * one: adreno_is_a650_family() is family >= ADRENO_6XX_GEN3 and A660 is
++ * GEN4): "Vote veto for FAL10". Offsets from a6xx_gmu.xml, which numbers
++ * registers in dwords from the GPU base, converted the same way as every
++ * other constant here -- byte = (dword << 2) - 0x6a000, the GMU window's
++ * offset into that space (checked against GPU_GMU_CX_GMU_PWR_COL_CP_MSG,
++ * dword 0x1f900 -> 0x14400, which this driver already used). */
++#define A660_GPU_GMU_CX_GMU_CX_FAL_INTF 0x0143c0      /* dword 0x1f8f0 */
++#define A660_GPU_GMU_CX_GMU_CX_FALNEXT_INTF 0x0143c4  /* dword 0x1f8f1 */
++
 +/* a6xx_gmu_power_config() + a6xx_gmu_start(): the real tail of fw_start,
 + * after the GBIF writes -- RPMH_CTRL's GPU-client vote enable is
 + * unconditional for A660 (not idle-level-gated), and the CM3 reset must
@@ -1014,7 +1026,7 @@
 +}
 --- /dev/null
 +++ b/bsd/dev/lemonadep/lemonadep_gmu_coldstart.c
-@@ -0,0 +1,373 @@
+@@ -0,0 +1,386 @@
 +/*
 + * lemonadep: Adreno 660 GMU cold start -- CX GDSC enable, RSC/PDC handshake,
 + * firmware load, HFI bring-up through the bandwidth table. Every register
@@ -1283,6 +1295,7 @@
 + * which has printf; this one is kept freestanding for its host test. */
 +static struct {
 +	uint32_t probe, mask, want, fw_init, seen;
++	uint32_t fal, falnext;
 +} lemonadep_gmu_start_ready;
 +
 +lemonadep_gmu_status
@@ -1298,6 +1311,18 @@
 +		return LemonadepGmuBadArg;
 +	}
 +	NEXT_PHASE(LemonadepGmuPhaseNone, LemonadepGmuPhasePrecheck);
++	/* "Vote veto for FAL10", a6xx_gmu_fw_start()'s first act on an
++	 * A650-family part. This driver never did it, and without the veto the
++	 * CX rail's FAL10 low-power state is not blocked while the GMU boots.
++	 * Read both back: these live in the GMU CX block, so a read-back of 0
++	 * would mean the window is not what we think it is rather than that
++	 * the veto was refused. */
++	TRY(io_write(io, LemonadepGmuWindowCore, A660_GPU_GMU_CX_GMU_CX_FALNEXT_INTF, 1));
++	TRY(io_write(io, LemonadepGmuWindowCore, A660_GPU_GMU_CX_GMU_CX_FAL_INTF, 1));
++	TRY(io_read(io, LemonadepGmuWindowCore, A660_GPU_GMU_CX_GMU_CX_FAL_INTF,
++	    &lemonadep_gmu_start_ready.fal));
++	TRY(io_read(io, LemonadepGmuWindowCore, A660_GPU_GMU_CX_GMU_CX_FALNEXT_INTF,
++	    &lemonadep_gmu_start_ready.falnext));
 +	/* Reset/idle precondition checks (ShengGmu.c's validate() shape). */
 +	TRY(io_read(io, LemonadepGmuWindowCore, A660_GMU_CM3_FW_INIT_RESULT, &value));
 +	/* TCM retention: A660 writes GMU_GENERAL_7, NOT CX_MISC_TCM_RET_CNTL

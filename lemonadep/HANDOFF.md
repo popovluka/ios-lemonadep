@@ -1375,6 +1375,75 @@ look for:
 Kernel run: https://github.com/popovluka/ios-lemonadep/actions/runs/39853877374
 (cpus=4 boot image built from it by `m2-boot-build.sh ... 4`).
 
+## GPU, Phase 14: the permission fault is FIXED; next suspect is the missing FAL10 veto (2026-10-29)
+
+Commit `d6ed11b` (CircleCI pipeline 20, kernel `362af471…`, boot image `864453ac…`, boot-args
+`cpus=8 … sweetgpu=9`) **cleared the fault**:
+
+```
+SWEET GPU: GMU context FSR=0x400 FAR=0x1dcefcf132aa9     (was FSR=0x80000408 FAR=0x000004000)
+```
+
+PF (bit 3) and MULTI (bit 31) are both gone; `0x400` is the bit already present at setup time,
+before any GMU access, i.e. the boot loader's, and FAR is stale garbage because no fault is
+recorded. **The GMU's instruction fetch at IOVA `0x4000` now succeeds.** Phase 13's diagnosis —
+AP[1]=1 forces PXN regardless of bit 53 — was correct.
+
+What is left is no longer downstream of a fault, so it is now a problem in its own right:
+
+```
+SWEET GPU: GMU cold start status=3 phase=8      (Timeout in StartReady)
+SWEET GPU: GMU start-ready probe=0x30010008 -> mask=0x1ff want=0x100, FW_INIT_RESULT=0x0
+```
+
+**What this run rules out.** Four things previously unverified are now positively confirmed:
+
+- *The TCM load works.* `probe` is read from `CM3_DTCM_START + 0xff8` (dwords) = byte `0x3fe0`,
+  which is inside the firmware block we write at `0x10007fdc`. A plausible non-zero value
+  (`0x30010008`) coming back means our ITCM/DTCM register writes land where intended.
+- *`probe` is `GMU_CORE_FW_VERSION`.* a6xx_gmu.xml puts that register at dword `0x1d3f8`, and
+  `DTCM_START` is dword `0x1c400`; the difference is exactly `0xff8`. Linux's "DTCM probe" is
+  literally a firmware-version read, so we are already logging it — no extra diagnostic needed.
+- *`probe` takes the right branch.* `0x30010008 > 0x20010004`, so `mask=0x1ff want=0x100`
+  (rather than `0xffffffff`/`0xbabeface`) is what upstream would choose too.
+- *The GBIF CX writes belong here.* a6xx_catalog.c gives the a660 entry (chip_id `0x06060001`)
+  `.gbif_cx = a640_gbif`, so writing `GBIF_QSB_SIDE0..3` inside fw_start is correct for this
+  part and not a downstream invention. Likewise `gmu_chipid` is absent from that entry, so
+  upstream computes it — and the formula yields `0x06060100`, exactly our constant.
+
+**The gap found.** `a6xx_gmu_fw_start()` opens, on any A650-family part, with
+
+```c
+	/* Vote veto for FAL10 */
+	if (adreno_is_a650_family(adreno_gpu) || adreno_is_a7xx(adreno_gpu)) {
+		gmu_write(gmu, REG_A6XX_GPU_GMU_CX_GMU_CX_FALNEXT_INTF, 1);
+		gmu_write(gmu, REG_A6XX_GPU_GMU_CX_GMU_CX_FAL_INTF, 1);
+	}
+```
+
+A660 is A650-family (`adreno_is_a650_family()` is `family >= ADRENO_6XX_GEN3`; A660 is GEN4),
+and **this driver has never written either register** — `grep -i fal` over patch 1007 found
+nothing. Without the veto, FAL10 is not blocked on the CX rail while the GMU boots. Patch 1007
+now writes both first, before the `GENERAL_7` retention write, and logs a read-back
+(`SWEET GPU: FAL10 veto fal=… falnext=…`) so a `0x0` read tells us the window is wrong rather
+than that the veto was refused.
+
+Offsets, derived not guessed: a6xx_gmu.xml numbers registers in dwords from the GPU base, and
+every constant in this driver is `byte = (dword << 2) - 0x6a000`. Checked against a register
+the driver already used — `GPU_GMU_CX_GMU_PWR_COL_CP_MSG`, dword `0x1f900` → `0x14400`, which
+matches `A660_GPU_GMU_CX_GMU_PWR_COL_CP_MSG`. So `FAL_INTF` dword `0x1f8f0` → `0x143c0` and
+`FALNEXT_INTF` dword `0x1f8f1` → `0x143c4`.
+
+Still unverified in the fw_start sequence, in the order I would check them next if the veto is
+not enough: whether `rsc_pdc_handshake()` really matches `a6xx_rpmh_start()` (upstream polls
+`RSCC_SEQ_BUSY_DRV0`, we have a `RSC_STATUS0_DRV0` constant — not obviously the same register),
+and whether `A660_GMU_RPMH_CTRL`'s vote-enable mask is right.
+
+Operational note: `tools/sweet-log-pull.sh` does not run under Git Bash — it rewrites
+`/dev/block/sda20` and `/tmp/...` into Windows paths and `blockdev` then rejects its argument.
+Export `MSYS_NO_PATHCONV=1` (and `MSYS2_ARG_CONV_EXCL='*'`) first, or run the `dd`/`adb pull`
+by hand. Same for every `wsl.exe -- bash /mnt/...` invocation.
+
 ## GPU, Phase 13: the icache fault is root-caused — the mapping is unprivileged (2026-10-29)
 
 The stage-9 log from commit `6621fef` (built and booted 2026-10-29, log pulled today) is
