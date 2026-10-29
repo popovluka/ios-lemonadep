@@ -1375,7 +1375,69 @@ look for:
 Kernel run: https://github.com/popovluka/ios-lemonadep/actions/runs/39853877374
 (cpus=4 boot image built from it by `m2-boot-build.sh ... 4`).
 
-## HakiOS loader: root-caused — the UEFI has no vendor drivers and no HakiOS changes (2026-10-29)
+## HakiOS loader: the previous section's root cause is WRONG — the firmware is fine (2026-10-29)
+
+**Retracting the section below.** It says the built UEFI has no vendor drivers and no HakiOS
+changes. Both claims are false, and both came from the same mistake: running `strings` on
+`SILICIUM_UEFI.fd`, whose inner firmware volume is **LZMA-compressed**, so no driver name or
+string inside it is visible that way. A compressed volume reads as empty and I called it empty.
+
+Checked properly, by extracting the volume (`fvextract.py`, see below) and by reading the build
+log:
+
+| claim in the section below | truth |
+|---|---|
+| no vendor drivers in the firmware | **94 drivers are in it**, including `UsbConfigDxe`, `UsbfnDwc3Dxe`, `XhciDxe`, `UsbDeviceDxe`, `UsbInitDxe`, `UFSDxe`, `PILDxe`, `SimpleFbDxe`, `TzDxeLA` |
+| the vendor tree is absent | `Mu-Silicium/Binaries` is **its own git checkout** and was fully populated; they are lemonade's own (`OppoProject`, `QcomChargerDxeLA` are OnePlus-specific), not a sibling's |
+| the HakiOS Boot Manager is not in it | `BootManagerLib.inf` lists `XnuLoader.c` and the build log shows `XnuLoader.c` → `XnuLoader.obj`: **it was compiled in** |
+| the build failed | the `Error 1` lines are all `(ignored)` — `cp: cannot stat '*.pdb'`, a CLANGPDB quirk in RELEASE builds |
+| `BootShim.bin` is stale | `BootShim.S` (02:05, patched, contains the `XNUP` handling) is **older** than `BootShim.bin`/`.elf` (03:27), so the shim was rebuilt after the patch |
+
+Only one small part of `hakios.patch` is genuinely not in: no `HakiOS` string in the FD in either
+ASCII or UTF-16, and `Silicon/Qualcomm/LahainaPkg/Library/PlatformSecLib/PlatformSec.c` is
+modified where the patch targets `SiliciumPkg/Sec/Sec.c`. That is the banner and vendor string —
+cosmetic, not the loader.
+
+**Damage done and undone.** Acting on the wrong diagnosis I extracted the lahaina drivers from
+Mu-Silicium's prebuilt `Mu-vili.img` (Xiaomi Mi 11T Pro, same SoC) into
+`Binaries/lemonade/QcomPkg/Drivers/`, which **overwrote 49 of lemonade's own tracked vendor
+binaries** (`ClockDxe.efi`, `DisplayDxe.efi`, `PILDxe.efi`, `ButtonsDxe.*` among them) and added
+61 directories. Restored with `git -C Binaries checkout -- .` (0 modified afterwards); my 61
+additions were **moved** to the scratch directory, not deleted. `Binaries` is clean. Note for
+anyone tempted by the same shortcut: `lemonadepPkg/Binaries/ClockDxe/patch.py` patches by **file
+offset** against the OnePlus 9's binary, so substituting another device's ClockDxe silently
+corrupts it.
+
+### So what is actually wrong
+
+Eliminated: vendor drivers, the HakiOS boot manager, the boot shim, and the build. What is left,
+in order of likelihood:
+
+1. **The image has no payload.** `mkxnuimg.py` builds `gzip(BootShim + UEFI FD + ["XNUP"
+   container]) + DTB`. Every attempt so far called it without `-p`, so there is no `XNUP`
+   container for `XnuLoader.c` to find and nothing for the Boot Manager to start — which is
+   consistent with no `xnuloader` ever appearing on USB. `lemonadep.toml` also declares
+   `[boot_shim] requires_kernel_header = true`. This was noted as a lead hours ago and never
+   tested; test it first, via the documented `./xl enter` flow, which builds the payload itself
+   rather than being handed a bare FD.
+2. `header_version = 3` in `lemonadep.toml` where redwood's is `1`.
+3. UEFI not starting at all — now less likely, since `SimpleFbDxe` and `DisplayDxe` are both in
+   the firmware, so a running UEFI should put something on the panel.
+
+### New tool
+
+`fvextract.py` (in the scratch directory) walks every `_FVH` volume in a raw FD, a Qualcomm xbl
+ELF or an Android boot image, follows nested and LZMA-compressed sections, and writes each driver
+as `<Name>/<Name>.efi` + `.depex` + a Mu-Silicium-style `.inf`. Written because UEFIReader needs a
+.NET 8 SDK build that is not available here. It is what settled all of the above, and it is the
+right instrument for any "what is really in this firmware" question — `strings` is not.
+
+Our own `xbl_a` was also dumped (6 MiB, slot `a`, `/dev/block/sdb1`) and its UEFI volume found at
+offset `0x97000`, but its DXE drivers sit compressed inside XBL Core, which needs the
+Qualcomm-specific handling UEFIReader has. Not needed, since the vendor tree was already present.
+Both dumps are proprietary and stay out of git.
+
+## HakiOS loader: root-caused — the UEFI has no vendor drivers and no HakiOS changes (RETRACTED, see above) (2026-10-29)
 
 `xl enter` reporting "loader did not come up on USB" with the phone presenting **no USB at all** is
 now explained, with two independent defects confirmed by inspection of the built firmware
