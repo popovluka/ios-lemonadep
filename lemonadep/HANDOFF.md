@@ -1375,6 +1375,71 @@ look for:
 Kernel run: https://github.com/popovluka/ios-lemonadep/actions/runs/39853877374
 (cpus=4 boot image built from it by `m2-boot-build.sh ... 4`).
 
+## GPU, Phase 16: the M3 never executes — ITCM and the GMU clock RCG are the two unchecked paths (2026-10-29)
+
+Commit `6a3dc4a` (pipeline 22, kernel `3d9e3eb4`, image `e2a9ab01`) on-device:
+
+```
+SWEET GPU: GMU m3 fw_busy=0x0 sysreset=0x0 fence_status=0x0 seq_busy=0x0 general0=0x0 general1=0x0 hfi_status=0x0 hfi_ver=0x0
+```
+
+Every read zero, and each zero rules something out:
+
+- `sysreset=0x0` — our `1 -> 0` toggle **did** take; the M3 is not held in reset.
+- `fence_status=0x0` — the AHB fence refused nothing, so the `0xa`/`0xa0` fence range is fine.
+- `seq_busy=0x0` — the RSC sequencer is not stuck.
+- `general0/1`, `hfi_status`, `hfi_ver` all zero — nothing firmware-written has been written.
+
+Reads through that window work (the probe returns `0x30010008` in the same sequence), so these
+are real values, not a dead window. The M3 is out of reset and is doing nothing.
+
+**The poll is not too short.** `poll_core()` has a hard 10 ms wall-clock cap and a 100 µs
+sleep, which is exactly upstream's `gmu_poll_timeout(…, 100, 10000)`. Ruled out; do not revisit.
+
+**The firmware image is intact and the DTCM path is byte-perfect.** Decoding `a660_gmu.bin`
+locally against the block table in `LemonadepGmuSource.h`:
+
+| block | addr | bytes | first words |
+|---|---|---|---|
+| ITCM | `0x00000000` | 476 | `0x10007f80 0x00000105 0x00000145 0x00000159` |
+| icache | `0x00004000` | 54476 | `0xbd1fb51f 0xbd10b510 …` |
+| DTCM | `0x10007f98` | 40 | all zero |
+| DTCM | `0x10007fdc` | 24 | `0xffffffff 0x30010008 0xffffffff 0x30000009 0x0 0x20010000` |
+
+ITCM word 0 is a Cortex-M3 initial SP (`0x10007f80`, landing in DTCM just below the two blocks
+loaded there) and word 1 a Thumb reset vector (`0x105`) — a sane vector table. The icache block
+opens with real Thumb (`b51f push` / `bd1f pop`). And the word at `0x10007fe0` is `0x30010008`,
+**exactly** what the on-device probe reads back, which proves the DTCM write path end to end.
+
+**So two paths remain unverified, and this commit instruments both in one boot.**
+
+1. *ITCM.* The M3 reset-fetches its vector table from ITCM word 0, and nothing has ever read
+   ITCM back. `A660_GMU_CM3_ITCM_START` (`0x3000`) is almost certainly right — DTCM at `0x7000`
+   is confirmed twice over (independently from `CORE_FW_VERSION = DTCM + 0xff8`, dword
+   `0x1d3f8 - 0xff8 = 0x1c400`), and `0x3000`/`0x7000` are exactly 16 KiB apart, matching
+   `SZ_16K` ITCM — but "almost certainly" is what this project keeps paying for. New line:
+   `SWEET GPU: GMU itcm=…,…,…,… (want 0x10007f80,0x105,0x145,0x159)`.
+
+2. *The GMU clock rate.* `gpu_cc_cx_gmu_clk` (`0x1098`, matching gpucc-sm8350.c exactly) is
+   enabled and its `CLK_OFF` polls clear, so a clock does arrive — and the HWCG escape hatch in
+   `enable_branch()` is **not** implicated, because it is gated on a per-branch `hwcg_capable`
+   flag that only the two GCC branches set. But this driver never programs the RCG that feeds
+   the branch: `gpu_cc_gmu_clk_src`, `cmd_rcgr 0x1120`, whose table is 19.2 MHz from TCXO
+   (src 0), 200 MHz from `P_GPLL0_OUT_MAIN_DIV` (src 6, div 1.5 → cfg `0x602`) and 500 MHz from
+   PLL1 (src 3). Upstream calls `clk_set_rate(gmu->core_clk, 200000000)` before enabling; we
+   inherit whatever the boot loader left. New line:
+   `SWEET GPU: gpucc gmu_rcg cmd=… cfg=… cx_gmu=… ahb=… gdsc_cx=…`, with ROOT_OFF in
+   `cmd` bit 31 and src_sel `[10:8]` / `(2*div - 1)` `[4:0]` in `cfg`.
+
+Reading the rest of the next log: `cfg=0x602` means the rate is already right and the clock is
+not the problem; `cfg=0x0` means TCXO, and programming the RCG to 200 MHz becomes the next
+change. ITCM reading back zero outranks both — it would mean the M3 has nothing to execute and
+every symptom above follows from it.
+
+Note `FW_BUSY` is weaker evidence than it looks: it may only assert while the M3 processes an
+HFI message rather than during init, so `fw_busy=0` alone does not prove non-execution. The
+ITCM read-back and the firmware-written registers are the trustworthy signals.
+
 ## GPU, Phase 15: the FAL10 veto lands but changes nothing; instrumenting the M3 (2026-10-29)
 
 Commit `4eed8d2` (pipeline 21, kernel `6e6f607f`, image `63b8c2f4`) on-device:

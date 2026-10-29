@@ -34,7 +34,7 @@
 
 --- /dev/null
 +++ b/bsd/dev/lemonadep_gpu.c
-@@ -0,0 +1,361 @@
+@@ -0,0 +1,384 @@
 +/*
 + * lemonadep: GPU bring-up, first on-device slice. Real register writes
 + * only: CX GDSC + the seven GMU clock branches (lemonadep_gpu_reserve.c),
@@ -252,6 +252,26 @@
 +		return;
 +	}
 +
++	/* What the boot loader actually left the GMU's clock at. The branch
++	 * (cx_gmu) is enabled above and its CLK_OFF polls clear, so a clock
++	 * does arrive -- but this driver never programs the RCG that feeds it,
++	 * so the rate is whatever the boot loader chose. ROOT_OFF in cmd and
++	 * src_sel/div in cfg say which; 0x602 would be the 200 MHz upstream
++	 * sets, 0x0 would be TCXO at 19.2 MHz. */
++	uint32_t rcg_cmd = 0, rcg_cfg = 0, br_gmu = 0, br_ahb = 0, gdsc_cx = 0;
++	(void)pwr_io.read32(pwr_io.cookie, LemonadepPwrWindowGpucc,
++	    LEMONADEP_GPUCC_GMU_CMD_RCGR_OFFSET, &rcg_cmd);
++	(void)pwr_io.read32(pwr_io.cookie, LemonadepPwrWindowGpucc,
++	    LEMONADEP_GPUCC_GMU_CFG_RCGR_OFFSET, &rcg_cfg);
++	(void)pwr_io.read32(pwr_io.cookie, LemonadepPwrWindowGpucc,
++	    LEMONADEP_GPUCC_CX_GMU_CLK_OFFSET, &br_gmu);
++	(void)pwr_io.read32(pwr_io.cookie, LemonadepPwrWindowGpucc,
++	    LEMONADEP_GPUCC_AHB_CLK_OFFSET, &br_ahb);
++	(void)pwr_io.read32(pwr_io.cookie, LemonadepPwrWindowGpucc,
++	    LEMONADEP_GPUCC_GDSC_CX_OFFSET, &gdsc_cx);
++	printf("SWEET GPU: gpucc gmu_rcg cmd=0x%x cfg=0x%x cx_gmu=0x%x ahb=0x%x gdsc_cx=0x%x\n",
++	    rcg_cmd, rcg_cfg, br_gmu, br_ahb, gdsc_cx);
++
 +	/*
 +	 * Stages 7+: the GMU's real memory. Power first -- the SMMU sits in
 +	 * the CX GDSC domain and needs its vote clock, both enabled above.
@@ -360,6 +380,9 @@
 +	printf("SWEET GPU: GMU cold start status=%d phase=%d\n", gmu_status, gmu_phase);
 +	printf("SWEET GPU: FAL10 veto fal=0x%x falnext=0x%x\n",
 +	    lemonadep_gmu_start_ready.fal, lemonadep_gmu_start_ready.falnext);
++	printf("SWEET GPU: GMU itcm=0x%x,0x%x,0x%x,0x%x (want 0x10007f80,0x105,0x145,0x159)\n",
++	    lemonadep_gmu_start_ready.itcm[0], lemonadep_gmu_start_ready.itcm[1],
++	    lemonadep_gmu_start_ready.itcm[2], lemonadep_gmu_start_ready.itcm[3]);
 +	if (lemonadep_gmu_start_ready.seen) {
 +		printf("SWEET GPU: GMU start-ready probe=0x%x -> mask=0x%x want=0x%x, FW_INIT_RESULT=0x%x\n",
 +		    lemonadep_gmu_start_ready.probe, lemonadep_gmu_start_ready.mask,
@@ -398,7 +421,7 @@
 +}
 --- /dev/null
 +++ b/bsd/dev/lemonadep/LemonadepGmuSource.h
-@@ -0,0 +1,157 @@
+@@ -0,0 +1,165 @@
 +/* SPDX-License-Identifier: MIT */
 +#ifndef LEMONADEP_GMU_SOURCE_H
 +#define LEMONADEP_GMU_SOURCE_H
@@ -486,6 +509,14 @@
 +#define LEMONADEP_GPUCC_HUB_CX_INT_CLK_OFFSET 0x1204u      /* BRANCH_HALT */
 +#define LEMONADEP_GCC_DDRSS_GPU_AXI_CLK_OFFSET 0x71154u    /* BRANCH_HALT_SKIP, hwcg_bit=1: never poll */
 +#define LEMONADEP_GCC_GPU_MEMNOC_GFX_CLK_OFFSET 0x7100cu   /* BRANCH_HALT_VOTED, hwcg_bit=1 */
++/* gpu_cc_gmu_clk_src, the RCG feeding gpu_cc_cx_gmu_clk (gpucc-sm8350.c:139,
++ * cmd_rcgr 0x1120, hid_width 5, mnd_width 0). Read-only here: CMD_RCGR bit 31
++ * is ROOT_OFF, and CFG_RCGR carries src_sel in [10:8] with (2 * div - 1) in
++ * [4:0]. Its table is 19.2 MHz from P_BI_TCXO (src 0), 200 MHz from
++ * P_GPLL0_OUT_MAIN_DIV (src 6, div 1.5, so cfg 0x602) -- the rate upstream
++ * sets before enabling the GMU -- and 500 MHz from PLL1 (src 3). */
++#define LEMONADEP_GPUCC_GMU_CMD_RCGR_OFFSET 0x1120u
++#define LEMONADEP_GPUCC_GMU_CFG_RCGR_OFFSET 0x1124u
 +#define LEMONADEP_CLK_ENABLE_BIT (1u << 0)
 +#define LEMONADEP_CLK_OFF_BIT (1u << 31)
 +#define LEMONADEP_CLK_HWCG_BIT (1u << 1)
@@ -1044,7 +1075,7 @@
 +}
 --- /dev/null
 +++ b/bsd/dev/lemonadep/lemonadep_gmu_coldstart.c
-@@ -0,0 +1,413 @@
+@@ -0,0 +1,427 @@
 +/*
 + * lemonadep: Adreno 660 GMU cold start -- CX GDSC enable, RSC/PDC handshake,
 + * firmware load, HFI bring-up through the bandwidth table. Every register
@@ -1316,6 +1347,7 @@
 +	uint32_t fal, falnext;
 +	uint32_t fw_busy, fence_status, general0, general1;
 +	uint32_t hfi_status, hfi_version, sysreset, seq_busy;
++	uint32_t itcm[4];
 +} lemonadep_gmu_start_ready;
 +
 +lemonadep_gmu_status
@@ -1352,6 +1384,19 @@
 +	TRY(rsc_pdc_handshake(io));
 +	NEXT_PHASE(LemonadepGmuPhasePdcHandshake, LemonadepGmuPhaseFirmwareLoad);
 +	TRY(load_firmware(io, fw));
++	/* Read the ITCM vector table back. DTCM is already proven -- the
++	 * StartReady probe returns 0x30010008, which is byte-for-byte the word
++	 * a660_gmu.bin places at 0x10007fe0 -- but nothing has ever verified
++	 * the ITCM path, and the M3 reset-fetches its vector table from ITCM
++	 * word 0. The firmware's first four ITCM words are the initial SP
++	 * (0x10007f80, which lands in DTCM just below the two blocks loaded
++	 * there) and the reset/NMI/HardFault vectors 0x105/0x145/0x159.
++	 * Anything else, zero above all, means the M3 has nothing to execute
++	 * and every other symptom follows from that. */
++	for (unsigned i = 0; i < 4; ++i) {
++		(void)io_read(io, LemonadepGmuWindowCore,
++		    A660_GMU_CM3_ITCM_START + 4u * i, &lemonadep_gmu_start_ready.itcm[i]);
++	}
 +	NEXT_PHASE(LemonadepGmuPhaseFirmwareLoad, LemonadepGmuPhaseFwStart);
 +	/* fw_start(): HFI table pointer, A660's real fence range (0xa/0xa0, not
 +	 * the A7XX/A8XX values), CM3 config, chip ID + log buffer (A660's real
