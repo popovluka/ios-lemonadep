@@ -294,6 +294,16 @@ def edits(text):
          "\t\tprintf(\"adreno: %u: the counter does not show the crystal's rate: nothing it says "
          "can be used\\n\", step);\n\t\treturn lemonadep_ahb_is_known_good();\n",
          "a counter that cannot see the crystal no longer fails step 5"),
+
+        # cx_ready() gates every step from 6 on, and consults the same counter
+        # separately: on-device step 5 passed and step 6 still refused with
+        # "ahb measures 0 Hz". Same substitution, same reasoning.
+        ("\tif (ahb_hz == MEASURE_FAILED || ahb_hz < 1000000) {\n"
+         "\t\tprintf(\"adreno: %u: without that clock a register of the GPU block would not "
+         "answer: not touching it\\n\", step);\n\t\treturn false;\n\t}\n",
+         "\tif (ahb_hz == MEASURE_FAILED || ahb_hz < 1000000) {\n"
+         "\t\treturn lemonadep_ahb_is_known_good();\n\t}\n",
+         "cx_ready() no longer gates steps 6+ on the unusable counter"),
     ]
 
 

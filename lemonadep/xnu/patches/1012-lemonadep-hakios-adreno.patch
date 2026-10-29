@@ -8,7 +8,7 @@
  bsd/dev/mem.c				standard
 --- /dev/null
 +++ b/bsd/dev/hakios_adreno.c
-@@ -0,0 +1,4007 @@
+@@ -0,0 +1,4006 @@
 +/*
 + * Imported into ios-sweet from HakiOS by lemonadep/tools/import-hakios-adreno.py.
 + *
@@ -1070,8 +1070,7 @@
 +		printf("adreno: %u: the GPU block's register bus clock (ahb) measures %u Hz\n", step, ahb_hz);
 +	}
 +	if (ahb_hz == MEASURE_FAILED || ahb_hz < 1000000) {
-+		printf("adreno: %u: without that clock a register of the GPU block would not answer: not touching it\n", step);
-+		return false;
++		return lemonadep_ahb_is_known_good();
 +	}
 +	return true;
 +}
