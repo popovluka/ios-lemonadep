@@ -1439,8 +1439,37 @@ Mu-Silicium upstream has `Platforms/OnePlus/lemonadePkg`, which is the OnePlus *
 `lisa`/`KodiakPkg` one furangelz had to follow. A search for "lemonadep" matches "lemonade**P**kg"
 by accident; do not take that as upstream support for the Pro.
 
-**Next**: step 2 of docs/porting — the first boot on the phone with nothing of the phone's,
-which needs the lemonadep UEFI built and `make loader`/`make phone`. Then drivers in the
+**The lemonadep UEFI is built** (2026-10-29 ~02:10). In WSL at `~/hakios/fz`:
+`SILICIUM_UEFI.fd`, **2,097,152 bytes**, sha256
+`199a1c48c4d94454ae0822be499e70ba33e1c3e538af4c31c5eacb2d749d0bd2`, at
+`Mu-Silicium/Build/lemonadepPkg/RELEASE_CLANGPDB/FV/`. Built in 61 s, 48 images verified.
+That size is exactly the `size = 0x200000` in `Resources/Configs/lemonadep.toml` (whose
+`[uefi_fd] base = 0x9FD00000`, gzip kernel, `append_dtb = true`), and
+`Resources/DTBs/lemonadep.dtb` (1.5 MB, from the phone's vendor_boot) is beside it.
+
+How, exactly:
+- sparse-fetch furangelz's `uefi/` from their `lemonadep` branch (11 MB), then `uefi/apply.sh`
+  — it clones Project-Silicium/Mu-Silicium at `BASE` = `e51cd877e31c8fbb322032dc4cb6715e83d25ad3`
+  with submodules (~3 GB), applies `mu-silicium.patch` and copies `files/.` over it;
+- Ubuntu packages: `build-essential lld nasm clang llvm gcc-aarch64-linux-gnu python3-venv
+  acpica-tools device-tree-compiler`;
+- `python3 -m venv venv && venv/bin/pip install -r Mu-Silicium/pip-requirements.txt`;
+- the documented **mu_nasm/NuGet/Mono** workaround: symlink the system `nasm`/`ndisasm` into
+  `Mu_Basecore/BaseTools/Bin/mu_nasm_extdep/Linux-x86-64/` with an `extdep_state.yaml`;
+- `python3 build_uefi.py -d lemonadep -r RELEASE` (their README says `-d redwood`).
+Despite their note that a from-scratch build "has not been re-run since", it worked first try.
+
+Two things to know about that package: the DTB line in `lemonadep.fdf` is **commented out**
+and still names `sm8350-oneplus-lemonade.dtb` (the OnePlus 9's), because the package was
+derived from upstream's `lemonadePkg` — the real tree is delivered at runtime through
+`Resources/`, as redwood does it. And `lemonadepPkg` now sits next to upstream's
+`lemonadePkg` in the same tree, so the sibling is there to diff against.
+
+**Next**: step 2 of docs/porting — the first boot on the phone with nothing of the phone's.
+`make loader` needs `xnuloader/identity.h`, which `mkidentity.sh` makes from the device tree
+in an IPSW, so `sysimage/fetch.sh` (7.4 GB) or `make unpack IPSW=...` comes first; `make
+loader-open` is the placeholder that boots the open kernel only. Then `mkxnuimg.py` takes the
+UEFI from `Mu-Silicium/` and `./xl enter` / `make phone` run it. Then drivers in the
 documented order (CPUFREQ/THERMAL/SOCINFO → buttons/touch → UFS → ADRENO → ADSP/battery/audio
 → Wi-Fi → the rest).
 
