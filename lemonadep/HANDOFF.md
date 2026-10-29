@@ -1375,6 +1375,61 @@ look for:
 Kernel run: https://github.com/popovluka/ios-lemonadep/actions/runs/39853877374
 (cpus=4 boot image built from it by `m2-boot-build.sh ... 4`).
 
+## GMU MILESTONE REACHED (2026-10-29) — the GMU executes its firmware and reports ready
+
+Commit `936ac6e` (pipeline 24, kernel `a458ac3e`, image `3daea6fb`), on real hardware:
+
+```
+SWEET GPU: gpucc gmu_rcg cmd=0x0 cfg=0x602 cx_gmu=0x6221 ahb=0x0 gdsc_cx=0xf8222000
+SWEET GPU: GMU cold start status=0 phase=9
+SWEET GPU: GMU start-ready probe=0x30010008 -> mask=0x1ff want=0x100, FW_INIT_RESULT=0x100
+SWEET GPU: GMU m3 fw_busy=0x0 sysreset=0x0 fence_status=0x0 seq_busy=0x0 general0=0x30000009 general1=0x0 hfi_status=0x1 hfi_ver=0x20010000
+SWEET GPU: GMU reports ready. Stopping before CP ring/CP_ME_INIT
+```
+
+**`status=0 phase=9`** is `LemonadepGmuPhaseDone` — the entire cold start completed. The
+firmware wrote `FW_INIT_RESULT=0x100`, exactly the `want` the DTCM probe selected, and three
+firmware-written registers are now non-zero where every one of them read `0x0` before:
+`general0=0x30000009`, `hfi_status=0x1`, `hfi_ver=0x20010000`. The GMU is executing.
+
+**The blocker was the clock, nothing else.** `cfg=0x602` confirms the RCG took the 200 MHz
+entry, and that single change turned a 10 ms timeout into a ready report. For the record, at
+19.2 MHz the firmware did not merely run slowly — it never set a single status bit in 10 ms,
+so this was a hard requirement and not a margin problem.
+
+`fw_busy=0x0` even now, which retroactively confirms the Phase 16 caveat: `FW_BUSY` does not
+assert during init, so it was never usable as an "is the M3 alive" signal. `hfi_status` and
+`hfi_ver` are the trustworthy ones.
+
+### What this is and is not
+
+This is **not** GPU acceleration, and nothing on screen changes. The GMU is the A660's power
+management microcontroller; having it alive is the precondition for touching the 3D core, not
+rendering. The UI is still CPU-composited. Stage 9 deliberately stops here, as its own log line
+says, before the CP ring and `CP_ME_INIT`.
+
+### The road from here, in order
+
+1. **HFI message sequence** (`a6xx_hfi_start()`): `perf_table`, `bw_table`
+   (`LemonadepA660BwTable_`), `core_fw_start`, `send_start`. `HFI_QTBL_ADDR`/`QTBL_INFO` are
+   already programmed and `hfi_status=0x1` says the firmware accepted the table, so this is the
+   natural next stage. ACD and IFPC stay skipped.
+2. **GX rail + the 3D core** (`a6xx_hw_init()`): CP ring allocation, `CP_ME_INIT`, the
+   `a660_protect` register-protection table, `a660_hwcg`, `prim_fifo_threshold 0x00300200`.
+3. **The zap shader** (`a660_zap.mdt`), which needs the SoC's secure world — likely the hardest
+   remaining piece and worth researching before committing to an approach.
+
+### Open threads carried forward
+
+- Context bank 0 collides with the 3D core's context 0; furangelz use context 1. Revisit before
+  the 3D core goes up, not now.
+- `fsr=0x400` at setup is the boot loader's, present before we touch anything. Benign.
+- `ahb=0x0`: `gpu_cc_ahb_clk`'s CLK_ENABLE reads back clear though set, while CLK_OFF is clear
+  and GPUCC access works — apparently hardware-controlled on this part.
+- The whole firmware load path (ITCM, DTCM, icache) is verified byte-for-byte on hardware. Do
+  not re-investigate it.
+- `a6xx_rpmh_start()` stays skipped; see Phase 15 for why re-adding it is known to fail.
+
 ## GPU, Phase 17: ITCM is perfect, the GMU clock was at 19.2 MHz — set the RCG to 200 MHz (2026-10-29)
 
 Commit `e63dea9` (pipeline 23, kernel `9aee9098`, image `f6b225ec`) answered both questions:
