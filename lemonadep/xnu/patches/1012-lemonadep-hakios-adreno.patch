@@ -8,7 +8,7 @@
  bsd/dev/mem.c				standard
 --- /dev/null
 +++ b/bsd/dev/hakios_adreno.c
-@@ -0,0 +1,4322 @@
+@@ -0,0 +1,4335 @@
 +/*
 + * The GPU of the POCO X5 Pro (redwood), an Adreno 642L, woken step by step up to a picture that
 + * it fills and the panel shows. Every address below belongs to this phone, and nothing here is
@@ -137,6 +137,7 @@
 +static bool quiet;                      /* repeating accesses that have been announced and seen to work: say nothing */
 +
 +/* --- ios-sweet shims (lemonadep/tools/import-redwood-adreno.py) ------------------- */
++#include <pexpert/device_tree.h>
 +extern vm_offset_t phystokv(uint64_t pa);
 +static bool image_asked_quietly;        /* start_by_itself()'s gpu=1 path is unused; kept for it to compile */
 +
@@ -180,16 +181,16 @@
 +	printf("%s", line);
 +}
 +
-+/* The boot loader's framebuffer (shim/board.h FB_PHYS/FB_SIZE for lemonadep): the display
-+ * engine's vig0/vig1 pipes read it continuously (patch 1011's redwood_dpu.c) and send it to
-+ * the panel on every tearing-effect pulse, so writing here shows up with no further "present"
-+ * step. ml_io_map_unmappable, not ml_io_map: that one's whole-kernel budget is 8 MiB
++/* The boot loader's framebuffer: the display engine's vig0/vig1 pipes read it continuously
++ * (patch 1011's redwood_dpu.c) and send it to the panel on every tearing-effect pulse, so
++ * writing here shows up with no separate "present" step. Its address/size are NOT a fixed
++ * constant: read from the "sweet-fbcon" device-tree node, the same one patch 0003's own
++ * fbcon_probe() uses for the text console that has already drawn correctly on this panel on
++ * every milestone so far -- a hand-picked address could be stale or simply wrong, and the
++ * green/blue-lines-at-the-bottom result the user saw is exactly what a wrong one looks like.
++ * ml_io_map_unmappable, not ml_io_map: that one's whole-kernel budget is 8 MiB
 + * (lemonadep-smmu-context/io_map notes), far under this ~10 MB picture. VM_WIMG_IO (0x7), the
-+ * same flag patches 1008/1010 use for their own big windows: correct and simple beats fast here. */
-+#define LEMONADEP_FB_PHYS 0xe4d00000UL
-+#define LEMONADEP_FB_SIZE 0x1700000UL
-+#define LEMONADEP_FB_STRIDE (1080u * 4u)
-+#define LEMONADEP_FB_ROWS 2412u
++ * same flag patches 1008/1010 use for their own big windows. */
 +#define ADRENO_VM_WIMG_IO 0x7u
 +extern vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, uint32_t);
 +
@@ -197,30 +198,42 @@
 +MiniIOMobileFramebufferShow(const uint8_t *pixels, uint32_t width, uint32_t height, uint32_t row_bytes)
 +{
 +	static uint8_t *fb;
++	static uint32_t fb_width, fb_height, fb_stride;
 +	static bool fb_failed;
-+	uint32_t copy_bytes = width * 4;
-+	uint32_t rows = height;
++	uint32_t copy_bytes, rows;
++	DTEntry entry;
++	uint64_t const *reg;
++	uint32_t const *val;
++	unsigned int size;
 +
 +	if (fb == NULL && !fb_failed) {
-+		fb = (uint8_t *)ml_io_map_unmappable(LEMONADEP_FB_PHYS, LEMONADEP_FB_SIZE, ADRENO_VM_WIMG_IO);
++		if (SecureDTFindEntry("name", "sweet-fbcon", &entry) == kSuccess &&
++		    SecureDTGetProperty(entry, "reg", (void const **)&reg, &size) == kSuccess && size >= 16 &&
++		    SecureDTGetProperty(entry, "width", (void const **)&val, &size) == kSuccess && (fb_width = *val) != 0 &&
++		    SecureDTGetProperty(entry, "height", (void const **)&val, &size) == kSuccess && (fb_height = *val) != 0 &&
++		    SecureDTGetProperty(entry, "stride", (void const **)&val, &size) == kSuccess && (fb_stride = *val) >= fb_width * 4) {
++			fb = (uint8_t *)ml_io_map_unmappable(reg[0], reg[1], ADRENO_VM_WIMG_IO);
++		}
 +		fb_failed = fb == NULL;
 +	}
 +	if (fb == NULL) {
-+		printf("adreno: a %ux%u picture (stride %u) is drawn; ml_io_map_unmappable of the panel "
-+		    "framebuffer failed, so it is not shown\n", width, height, row_bytes);
++		printf("adreno: a %ux%u picture (stride %u) is drawn; the \"sweet-fbcon\" device-tree node "
++		    "or ml_io_map_unmappable of it failed, so it is not shown\n", width, height, row_bytes);
 +		return;
 +	}
-+	if (copy_bytes > LEMONADEP_FB_STRIDE) {
-+		copy_bytes = LEMONADEP_FB_STRIDE;
++	copy_bytes = width * 4;
++	if (copy_bytes > fb_stride) {
++		copy_bytes = fb_stride;
 +	}
-+	if (rows > LEMONADEP_FB_ROWS) {
-+		rows = LEMONADEP_FB_ROWS;
++	rows = height;
++	if (rows > fb_height) {
++		rows = fb_height;
 +	}
 +	for (uint32_t y = 0; y < rows; y++) {
-+		memcpy(fb + (uint64_t)y * LEMONADEP_FB_STRIDE, pixels + (uint64_t)y * row_bytes, copy_bytes);
++		memcpy(fb + (uint64_t)y * fb_stride, pixels + (uint64_t)y * row_bytes, copy_bytes);
 +	}
-+	printf("adreno: a %ux%u picture (stride %u) copied to the panel framebuffer at %#lx\n",
-+	    width, height, row_bytes, (unsigned long)LEMONADEP_FB_PHYS);
++	printf("adreno: a %ux%u picture (stride %u) copied to the %ux%u panel framebuffer (stride %u)\n",
++	    width, height, row_bytes, fb_width, fb_height, fb_stride);
 +}
 +
 +void

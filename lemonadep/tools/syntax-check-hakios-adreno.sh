@@ -96,6 +96,14 @@ void panic(const char *, ...);
 int PE_parse_boot_argn(const char *, void *, int);
 int PE_parse_boot_arg_str(const char *, char *, int);
 EOF
+cat > "$STUB/pexpert/device_tree.h" <<'EOF'
+#pragma once
+#include <stdint.h>
+typedef struct OpaqueDTEntry *DTEntry;
+enum { kSuccess = 0 };
+int SecureDTFindEntry(const char *, const char *, DTEntry *);
+int SecureDTGetProperty(DTEntry, const char *, void const **, unsigned int *);
+EOF
 
 # --target=aarch64: the driver's TrustZone call names x0..x8 in asm operands,
 # which a host-x86 clang rejects. Everything it includes is stubbed here, so no
