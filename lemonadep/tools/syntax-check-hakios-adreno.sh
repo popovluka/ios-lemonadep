@@ -94,6 +94,7 @@ cat > "$STUB/pexpert/pexpert.h" <<'EOF'
 void delay(int);
 void panic(const char *, ...);
 int PE_parse_boot_argn(const char *, void *, int);
+int PE_parse_boot_arg_str(const char *, char *, int);
 EOF
 
 # --target=aarch64: the driver's TrustZone call names x0..x8 in asm operands,

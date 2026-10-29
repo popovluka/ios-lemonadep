@@ -34,7 +34,7 @@
 
 --- /dev/null
 +++ b/bsd/dev/lemonadep_gpu.c
-@@ -0,0 +1,641 @@
+@@ -0,0 +1,642 @@
 +/*
 + * lemonadep: GPU bring-up, first on-device slice. Real register writes
 + * only: CX GDSC + the seven GMU clock branches (lemonadep_gpu_reserve.c),
@@ -97,11 +97,12 @@
 +
 +extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 +extern vm_offset_t phystokv(uint64_t);
-+/* HakiOS's Adreno driver (patch 1012). Called from here rather than from
-+ * sweet_ufs.c because patches 1008, 1010 and 1011 use that file's init block
-+ * as patch context, and inserting a line into it makes all three stop
-+ * applying -- which darwin-xnu-build only warns about. */
-+extern void hakios_adreno_init(void);
++/* furangelz/hackios-xnu-kernel's redwood_adreno.c (patch 1012), hardware-verified on
++ * lemonadep: its own lemonadep_values table (board=lemonadep) replaces our hand-rolled
++ * one. Called from here rather than from sweet_ufs.c because patches 1008, 1010 and
++ * 1011 use that file's init block as patch context, and inserting a line into it
++ * makes all three stop applying -- which darwin-xnu-build only warns about. */
++extern void redwood_adreno_init(void);
 +
 +#include "lemonadep/LemonadepGmuSource.h"
 +#include "lemonadep/lemonadep_gpu_reserve.c"
@@ -425,10 +426,10 @@
 +lemonadep_gpu_init(void)
 +{
 +	uint32_t stage = 0;
-+	/* HakiOS's Adreno driver first: it has its own boot-arg (adreno=N) and
++	/* furangelz's Adreno driver first: it has its own boot-arg (adreno=N) and
 +	 * returns at once unless asked for. Run it with sweetgpu=0, or the two
 +	 * reach for the same GMU, SMMU and clocks in one boot. */
-+	hakios_adreno_init();
++	redwood_adreno_init();
 +	(void)PE_parse_boot_argn("sweetgpu", &stage, sizeof(stage));
 +	if (!stage) {
 +		printf("SWEET GPU: disabled (sweetgpu=N, N>=1, to enable; unverified on hardware)\n");
