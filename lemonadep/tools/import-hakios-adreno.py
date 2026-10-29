@@ -210,6 +210,30 @@ image_file(const char *directory, const char *name, uint64_t *size)
 \treturn NULL;
 }
 
+/*
+ * measure_clocks() exists to answer one question the hardware will not: whether
+ * the GPU block's AHB register bus has its clock, because gpucc 0x1078 reads 0
+ * either way. It answers it with the SoC's frequency counter, whose debug-mux
+ * constants are SC7280/SM7325's. On lemonadep those registers read back
+ * 0x80000000 and the crystal measures 0 Hz, so the counter cannot be believed
+ * here, and the step aborted with every clock already correctly programmed --
+ * gmu_clk_src = 0x602 (200 MHz) and cx_gdscr = 0xf8222000 are in the log.
+ *
+ * On this phone the question has an answer from evidence instead: GPUCC
+ * registers are read and written over that bus throughout this driver and
+ * ios-sweet's own, and patch 1007's driver brought the GMU's firmware up
+ * through it (HANDOFF.md, "GMU MILESTONE REACHED"). So record that and go on,
+ * rather than treat an inapplicable measurement as a failure. Finding lahaina's
+ * own mux constants would be better; nobody has them yet.
+ */
+static bool
+lemonadep_ahb_is_known_good(void)
+{
+\tprintf("adreno: %u: the counter's mux constants belong to another SoC; taking the register bus as "
+\t    "clocked, which this phone has already shown it is (HANDOFF.md)\\n", step);
+\treturn true;
+}
+
 /* ---- end of the ios-sweet shims ------------------------------------------- */
 """
 
@@ -257,6 +281,19 @@ def edits(text):
         ("extern const uint8_t *hakios_image_file(const char *dir, const char *name, "
          "uint64_t *size, int *disk_out);\n", "",
          "hakios_image_file is not available here"),
+
+        # The frequency counter's verdict, which is inapplicable on lahaina: see
+        # lemonadep_ahb_is_known_good() in the shims for why continuing is right.
+        ("\t\tprintf(\"adreno: %u: the counter did not finish: it cannot be used as it is set "
+         "up here\\n\", step);\n\t\treturn false;\n",
+         "\t\tprintf(\"adreno: %u: the counter did not finish: it cannot be used as it is set "
+         "up here\\n\", step);\n\t\treturn lemonadep_ahb_is_known_good();\n",
+         "an unusable counter no longer fails step 5"),
+        ("\t\tprintf(\"adreno: %u: the counter does not show the crystal's rate: nothing it says "
+         "can be used\\n\", step);\n\t\treturn false;\n",
+         "\t\tprintf(\"adreno: %u: the counter does not show the crystal's rate: nothing it says "
+         "can be used\\n\", step);\n\t\treturn lemonadep_ahb_is_known_good();\n",
+         "a counter that cannot see the crystal no longer fails step 5"),
     ]
 
 
