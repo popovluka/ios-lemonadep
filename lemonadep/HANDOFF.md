@@ -1375,6 +1375,58 @@ look for:
 Kernel run: https://github.com/popovluka/ios-lemonadep/actions/runs/39853877374
 (cpus=4 boot image built from it by `m2-boot-build.sh ... 4`).
 
+## GPU, Phase 15: the FAL10 veto lands but changes nothing; instrumenting the M3 (2026-10-29)
+
+Commit `4eed8d2` (pipeline 21, kernel `6e6f607f`, image `63b8c2f4`) on-device:
+
+```
+SWEET GPU: GMU cold start status=3 phase=8
+SWEET GPU: FAL10 veto fal=0x1 falnext=0x1
+SWEET GPU: GMU start-ready probe=0x30010008 -> mask=0x1ff want=0x100, FW_INIT_RESULT=0x0
+SWEET GPU: GMU context FSR=0x400 FAR=0x1dcefcf932aa9
+```
+
+The veto **took** — both registers read back `0x1`, which also independently confirms the
+`byte = (dword << 2) - 0x6a000` window arithmetic on a register this driver had never touched.
+It is correct to have (upstream does it unconditionally for A650-family) but it is **not** the
+blocker. Still `FW_INIT_RESULT=0x0`, and still no SMMU fault.
+
+**Why "no fault" is ambiguous.** In Phase 13 the fault at `FAR=0x4000` was *positive evidence*
+that the M3 was fetching. Now there is no fault at all, which could mean the fetches succeed —
+or that the M3 never issues any. Nothing in the current log distinguishes those, and the PTE
+Access Flag is useless as evidence because `descriptor()` pre-sets AF (bit 10) itself.
+
+So this commit adds reads, not behaviour. After the StartReady poll, whatever it decided:
+
+```
+SWEET GPU: GMU m3 fw_busy=… sysreset=… fence_status=… seq_busy=… general0=… general1=… hfi_status=… hfi_ver=…
+```
+
+- `CM3_FW_BUSY` (dword `0x1f81a` → `0x14068`) is the M3's own busy flag. **Non-zero ⇒ it is
+  executing** and the problem is downstream of the icache; zero with no SMMU fault ⇒ it never ran.
+- `AHB_FENCE_STATUS` (`0x23b13` → `0x24c4c`) latches an AHB access the fence refused. The fence
+  range is programmed a few writes earlier, so a wrong range shows here instead of as silence.
+- `GENERAL_0`/`GENERAL_1` (`0x1f9c5`/`0x1f9c6` → `0x14714`/`0x14718`) and `HFI_CTRL_STATUS`/
+  `HFI_VERSION_INFO` (`0x1f980`/`0x1f981` → `0x14600`/`0x14604`) are firmware-written: anything
+  non-zero is proof of execution.
+- `CM3_SYSRESET` read back, to confirm our `1 -> 0` toggle actually left reset deasserted.
+- `RSCC_SEQ_BUSY_DRV0` (RSCC window, `0x404`), in case the RSC sequencer is stuck.
+
+The dword→byte conversion was validated before use: it reproduces six constants already in the
+driver exactly — `CM3_SYSRESET 0x1f800`, `CM3_CFG 0x1f82d`, `GENERAL_7 0x1f9cc`,
+`RPMH_CTRL 0x1f8e8`, `AHB_FENCE_RANGE_0 0x23b11`, and `SEQ_BUSY_DRV0 0x0101` in its own window.
+
+**Deliberately not changed:** `a6xx_rpmh_start()` is still skipped, and that remains right. A
+previous session performed its `RSCC_CONTROL_REQ` wake-poll unconditionally and
+`RSCC_CONTROL_ACK` bit 1 never set on real silicon — which is exactly what the real driver's
+`test_and_clear_bit(GMU_STATUS_PDC_SLEEP, …)` gate predicts for a device never previously slept
+(see "GPU, Phase 8 continued"). Do not re-add it without new evidence.
+
+A note against repeating work: a GMU log/debug memory dump looked attractive here and was left
+out on purpose. The kernel has `lemonadep_clean_to_poc()` but no matching invalidate, so a CPU
+read of those regions can return the zeros we wrote rather than what the GMU wrote — a false
+negative. Registers are the stronger signal; add an invalidate first if a memory dump is wanted.
+
 ## GPU, Phase 14: the permission fault is FIXED; next suspect is the missing FAL10 veto (2026-10-29)
 
 Commit `d6ed11b` (CircleCI pipeline 20, kernel `362af471…`, boot image `864453ac…`, boot-args

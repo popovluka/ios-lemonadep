@@ -34,7 +34,7 @@
 
 --- /dev/null
 +++ b/bsd/dev/lemonadep_gpu.c
-@@ -0,0 +1,355 @@
+@@ -0,0 +1,361 @@
 +/*
 + * lemonadep: GPU bring-up, first on-device slice. Real register writes
 + * only: CX GDSC + the seven GMU clock branches (lemonadep_gpu_reserve.c),
@@ -364,6 +364,12 @@
 +		printf("SWEET GPU: GMU start-ready probe=0x%x -> mask=0x%x want=0x%x, FW_INIT_RESULT=0x%x\n",
 +		    lemonadep_gmu_start_ready.probe, lemonadep_gmu_start_ready.mask,
 +		    lemonadep_gmu_start_ready.want, lemonadep_gmu_start_ready.fw_init);
++		printf("SWEET GPU: GMU m3 fw_busy=0x%x sysreset=0x%x fence_status=0x%x "
++		    "seq_busy=0x%x general0=0x%x general1=0x%x hfi_status=0x%x hfi_ver=0x%x\n",
++		    lemonadep_gmu_start_ready.fw_busy, lemonadep_gmu_start_ready.sysreset,
++		    lemonadep_gmu_start_ready.fence_status, lemonadep_gmu_start_ready.seq_busy,
++		    lemonadep_gmu_start_ready.general0, lemonadep_gmu_start_ready.general1,
++		    lemonadep_gmu_start_ready.hfi_status, lemonadep_gmu_start_ready.hfi_version);
 +		/* Did CM3 run at all? If it fetched from the icache and the SMMU
 +		 * refused, its context records a translation fault and the address;
 +		 * a silent, all-zero context means it never issued a transaction. */
@@ -552,7 +558,7 @@
 +#endif
 --- /dev/null
 +++ b/bsd/dev/lemonadep/LemonadepA660HwInit.h
-@@ -0,0 +1,313 @@
+@@ -0,0 +1,325 @@
 +/* SPDX-License-Identifier: MIT */
 +#ifndef LEMONADEP_A660_HWINIT_H
 +#define LEMONADEP_A660_HWINIT_H
@@ -805,6 +811,18 @@
 +#define A660_GPU_GMU_CX_GMU_CX_FAL_INTF 0x0143c0      /* dword 0x1f8f0 */
 +#define A660_GPU_GMU_CX_GMU_CX_FALNEXT_INTF 0x0143c4  /* dword 0x1f8f1 */
 +
++/* Read-only, for the StartReady failure path: tell "the M3 never executed"
++ * apart from "it executed and stalled". Same dword->byte conversion, which
++ * reproduces six constants above exactly (CM3_SYSRESET 0x1f800, CM3_CFG
++ * 0x1f82d, GENERAL_7 0x1f9cc, RPMH_CTRL 0x1f8e8, AHB_FENCE_RANGE_0 0x23b11
++ * and, in its own window, SEQ_BUSY_DRV0 0x0101). */
++#define A660_GMU_CM3_FW_BUSY 0x014068          /* dword 0x1f81a */
++#define A660_GMU_AHB_FENCE_STATUS 0x024c4c     /* dword 0x23b13 */
++#define A660_GMU_GENERAL_0 0x014714            /* dword 0x1f9c5 */
++#define A660_GMU_GENERAL_1 0x014718            /* dword 0x1f9c6 */
++#define A660_GMU_HFI_CTRL_STATUS 0x014600      /* dword 0x1f980 */
++#define A660_GMU_HFI_VERSION_INFO 0x014604     /* dword 0x1f981 */
++
 +/* a6xx_gmu_power_config() + a6xx_gmu_start(): the real tail of fw_start,
 + * after the GBIF writes -- RPMH_CTRL's GPU-client vote enable is
 + * unconditional for A660 (not idle-level-gated), and the CM3 reset must
@@ -1026,7 +1044,7 @@
 +}
 --- /dev/null
 +++ b/bsd/dev/lemonadep/lemonadep_gmu_coldstart.c
-@@ -0,0 +1,386 @@
+@@ -0,0 +1,413 @@
 +/*
 + * lemonadep: Adreno 660 GMU cold start -- CX GDSC enable, RSC/PDC handshake,
 + * firmware load, HFI bring-up through the bandwidth table. Every register
@@ -1296,6 +1314,8 @@
 +static struct {
 +	uint32_t probe, mask, want, fw_init, seen;
 +	uint32_t fal, falnext;
++	uint32_t fw_busy, fence_status, general0, general1;
++	uint32_t hfi_status, hfi_version, sysreset, seq_busy;
 +} lemonadep_gmu_start_ready;
 +
 +lemonadep_gmu_status
@@ -1402,6 +1422,31 @@
 +	value = 0;
 +	lemonadep_gmu_status ready = poll_core(io, A660_GMU_CM3_FW_INIT_RESULT, ready_mask, ready_val, 2000, &value);
 +	lemonadep_gmu_start_ready.fw_init = value;
++	/* Whatever the poll decided, record the M3's own state. FW_BUSY is the
++	 * Cortex-M3's busy flag, so a non-zero value means it is executing and
++	 * the problem is downstream of the icache; zero with no SMMU fault
++	 * means it never ran. AHB_FENCE_STATUS latches an AHB access the fence
++	 * refused, and the fence range is programmed a few writes earlier, so a
++	 * wrong range shows up here rather than as silence. GENERAL_0/_1 and the
++	 * HFI pair are firmware-written, so anything non-zero in them is proof
++	 * of execution. Reads only, and deliberately not TRY: on this path a
++	 * failed read should leave 0 and let the rest print. */
++	(void)io_read(io, LemonadepGmuWindowCore, A660_GMU_CM3_FW_BUSY,
++	    &lemonadep_gmu_start_ready.fw_busy);
++	(void)io_read(io, LemonadepGmuWindowCore, A660_GMU_AHB_FENCE_STATUS,
++	    &lemonadep_gmu_start_ready.fence_status);
++	(void)io_read(io, LemonadepGmuWindowCore, A660_GMU_GENERAL_0,
++	    &lemonadep_gmu_start_ready.general0);
++	(void)io_read(io, LemonadepGmuWindowCore, A660_GMU_GENERAL_1,
++	    &lemonadep_gmu_start_ready.general1);
++	(void)io_read(io, LemonadepGmuWindowCore, A660_GMU_HFI_CTRL_STATUS,
++	    &lemonadep_gmu_start_ready.hfi_status);
++	(void)io_read(io, LemonadepGmuWindowCore, A660_GMU_HFI_VERSION_INFO,
++	    &lemonadep_gmu_start_ready.hfi_version);
++	(void)io_read(io, LemonadepGmuWindowCore, A660_GMU_CM3_SYSRESET,
++	    &lemonadep_gmu_start_ready.sysreset);
++	(void)io_read(io, LemonadepGmuWindowRscc, A660_RSCC_SEQ_BUSY_DRV0,
++	    &lemonadep_gmu_start_ready.seq_busy);
 +	lemonadep_gmu_start_ready.seen = 1;
 +	if (ready != LemonadepGmuOk) {
 +		return ready;
