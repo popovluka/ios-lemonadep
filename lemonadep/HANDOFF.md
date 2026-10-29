@@ -1375,6 +1375,61 @@ look for:
 Kernel run: https://github.com/popovluka/ios-lemonadep/actions/runs/39853877374
 (cpus=4 boot image built from it by `m2-boot-build.sh ... 4`).
 
+## HakiOS loader: root-caused — the UEFI has no vendor drivers and no HakiOS changes (2026-10-29)
+
+`xl enter` reporting "loader did not come up on USB" with the phone presenting **no USB at all** is
+now explained, with two independent defects confirmed by inspection of the built firmware
+(`~/hakios/fz/Mu-Silicium/Build/lemonadepPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd`).
+
+**1. The Qualcomm vendor drivers are not in the firmware.** `lemonadepPkg/Include/DXE.inc` requires
+them under `Binaries/lemonade/QcomPkg/Drivers/...` (lemonadep shares the OnePlus 9's), including
+`EnvDxe`, `ShmBridgeDxeLA`, `ScmDxeLA` and `TzDxeLA`. That directory **does not exist** — the tree
+has only `lemonadepPkg/Binaries/ClockDxe`. Grepping the built FD for driver names:
+
+| driver | occurrences in the FD |
+|---|---|
+| `UsbConfigDxe` | 0 |
+| `DisplayDxe` | 0 |
+| `UFSDxe` | 0 |
+| `TzDxe` | 0 |
+| `ScmDxe` | 0 |
+
+No USB driver is why the phone presents no USB; no display driver is why the screen stays black.
+`hakios-uefi/README.md` is explicit that these are proprietary, are deliberately not redistributed,
+and must be extracted from **your own phone** — so this was always a required step we skipped.
+
+**2. The HakiOS changes are not in the built firmware either.** `strings` finds no `hakios` in the
+FD, so `PcdFirmwareVendor`, the `Sec.c` log line and the branding are absent, which means the FD
+predates the patch. Without them the Boot Manager shows Silicium's menu instead of starting the XNU
+loader from the shim's container, so even with USB the loader would not appear.
+
+**A correction to an earlier guess in this session:** I first concluded furangelz's Mu-Silicium tree
+was plain upstream. It is not — it sits exactly at `hakios-uefi`'s pinned `BASE`
+(`e51cd877e31c8fbb322032dc4cb6715e83d25ad3`), it *does* contain
+`SiliciumPkg/Library/BootManagerLib/XnuLoader.c`, and its `BootShim.S` does handle the `XNUP`
+container. The source tree is right; the **built FD** is stale and the vendor drivers were never
+there.
+
+### The fix, in order
+
+1. **Dump `xbl` from this phone** (TWRP; it is the vendor's UEFI firmware). Never commit it —
+   AGENTS.md and their own `tools/provenance-check.py` both forbid it.
+2. **Extract the drivers** with [UEFIReader](https://github.com/WOA-Project/UEFIReader) into
+   `Mu-Silicium/Platforms/OnePlus/lemonadepPkg/Binaries/lemonade/`, the path `DXE.inc` names.
+   Note `hakios-uefi/README.md`: *"The authors of this repository have not repeated this extraction
+   since the drivers were taken out of the tree: if you do it, say what worked in an issue."* So
+   this path is documented but unproven — expect to iterate, and it is worth reporting upstream.
+3. **Re-apply the HakiOS changes and rebuild** so the Boot Manager starts the XNU loader:
+   `python3 build_uefi.py -d lemonadep -r RELEASE`. Verify before flashing anything: `strings` on
+   the new FD must contain `hakios`, and `UsbConfigDxe`/`DisplayDxe` must be non-zero.
+4. **Build the image with a payload** — `mkxnuimg.py -p ...`; every attempt so far passed none,
+   while `lemonadep.toml` declares `[boot_shim] requires_kernel_header = true`.
+5. `xl enter`, which needs the usbipd passthrough recorded further down.
+
+Also worth keeping in view: `lemonadep.toml` has `header_version = 3` where redwood's has `1`.
+Plausibly right for a OnePlus 9 Pro (Android 11 ships boot header v3), but unverified, and worth
+checking if the image still does not start once the firmware is correct.
+
 ## STOP REBUILDING THE GPU — a complete, hardware-verified A660 stack already exists (2026-10-29)
 
 Searched properly for the first time, after the user pushed back that other ports already have
