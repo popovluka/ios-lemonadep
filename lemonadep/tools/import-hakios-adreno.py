@@ -71,6 +71,47 @@ SHIMS = """
 extern vm_offset_t phystokv(uint64_t pa);
 
 /*
+ * HakiOS is built against a newer XNU than this tree. ios-sweet builds
+ * xnu-8796 (macOS 13.5, the iOS 16 era), where kmem_alloc() is
+ * (map, addrp, size, tag), the flag-taking form is kmem_alloc_flags()
+ * with the tag before the flags, and KMA_DATA does not exist yet -- it
+ * arrived with the later data/pointer split. All three call sites here pass
+ * the same flags, so one macro adapts them rather than editing each one, and
+ * the version gap stays visible in a single place.
+ */
+#ifndef KMA_DATA
+#define KMA_DATA 0
+#define kmem_alloc(map, addrp, size, flags, tag) \\
+\tkmem_alloc_flags((map), (addrp), (size), (tag), (flags))
+#endif
+
+/*
+ * The prototypes sys/hakios.input.h gave this file. That header is HakiOS's own
+ * and is not imported, so the declarations it provided are restored here: the
+ * "GPU kept on" interface that hakios.gpu.cpp calls (phase 2 of this port, but
+ * the functions are defined in this file and need prototypes), and this
+ * driver's own entry points.
+ */
+bool hakios_gpu_ready(void);
+bool hakios_gpu_parameter(uint32_t which, uint64_t *value);
+uint64_t hakios_gpu_address(uint64_t size);
+void hakios_gpu_address_free(uint64_t address, uint64_t size);
+bool hakios_gpu_map(uint64_t address, uint64_t phys, bool read_only);
+void hakios_gpu_mapped(void);
+void hakios_gpu_unmap(uint64_t address, uint64_t size);
+void hakios_gpu_to_memory(void *start, uint64_t size);
+uint32_t hakios_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t count);
+bool hakios_gpu_done(uint32_t fence);
+uint32_t hakios_gpu_last(void);
+void hakios_gpu_worked(uint64_t *microseconds, uint32_t *submissions, uint32_t by[7]);
+void hakios_gpu_report(const char *why);
+void hakios_gpu_stop(void);
+void hakios_adreno_init(void);
+void hakios_adreno_stop(void);
+void hakios_adreno_quiesce(void);
+void hakios_adreno_minute(void);
+
+/*
  * HakiOS's boot loader takes a character at a time from the kernel and writes
  * the tail of the log to storage. ios-sweet keeps its console log in a ring at
  * the end of userdata (patch 0047, read back with tools/sweet-log-pull.sh), and
@@ -192,7 +233,7 @@ def edits(text):
     """(old, new, description) in the order they are applied."""
     return [
         ("#include <sys/hakios.input.h>\n", "",
-         "drop the unused hakios.input.h include"),
+         "drop the hakios.input.h include; the shims restore the prototypes it gave"),
 
         # The externs the shims replace. Each is removed on its own so that an
         # upstream rename fails here instead of leaving a duplicate definition.
