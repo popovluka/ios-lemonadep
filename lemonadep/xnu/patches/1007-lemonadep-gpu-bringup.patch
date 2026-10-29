@@ -1390,7 +1390,7 @@
 +}
 --- /dev/null
 +++ b/bsd/dev/lemonadep/lemonadep_gpu_smmu_map.c
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,69 @@
 +/* SPDX-License-Identifier: MIT */
 +/*
 + * lemonadep: incremental SMMU mapping of the GMU's five fixed regions
@@ -1424,6 +1424,16 @@
 +		return ArmSmmu4KArgument;
 +	}
 +	for (size_t i = 0; i < count; ++i) {
++		/* Linux maps every GMU buffer that has a fixed IOVA with
++		 * IOMMU_PRIV ("use IOMMU_PRIV for icache/dcache",
++		 * a6xx_gmu_memory_alloc()) and the dynamically placed log/hfi
++		 * without it. Mirror that: pte() sets AP[1], the unprivileged
++		 * bit, whenever Privileged is absent, and an AP[1]=1 page is
++		 * PXN regardless of bit 53, so adding Execute alone left the
++		 * instruction fetch refused. */
++		const int fixed_iova = regions[i].iova == LEMONADEP_GMU_ICACHE_IOVA ||
++		    regions[i].iova == LEMONADEP_GMU_DUMMY_IOVA ||
++		    regions[i].iova == LEMONADEP_GMU_DEBUG_IOVA;
 +		ArmSmmu4KRange change = {
 +			.iova = regions[i].iova,
 +			.physical = regions[i].physical,
@@ -1431,12 +1441,12 @@
 +			/* The GMU does fetch instructions through this mapping:
 +			 * stage 9 faulted with FSR=0x80000408 (PF) at FAR=0x4000,
 +			 * the icache's own IOVA, disproving the assumption that
-+			 * it only pulls the icache into an internal cache. Without
-+			 * Execute, pte() sets PXN|UXN (bits 53/54) and the fetch is
-+			 * refused. Only the icache is executable; the data regions
++			 * it only pulls the icache into an internal cache. Only
++			 * the icache is executable; the data regions
 +			 * (dummy/debug/log/hfi) stay execute-never. */
 +			.permissions = ArmSmmu4KRead | ArmSmmu4KWrite |
-+			    (regions[i].iova == LEMONADEP_GMU_ICACHE_IOVA ? ArmSmmu4KExecute : 0u),
++			    (regions[i].iova == LEMONADEP_GMU_ICACHE_IOVA ? ArmSmmu4KExecute : 0u) |
++			    (fixed_iova ? ArmSmmu4KPrivileged : 0u),
 +			.writeback = 1,
 +			.shareability = 3,
 +		};

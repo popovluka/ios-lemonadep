@@ -1375,6 +1375,47 @@ look for:
 Kernel run: https://github.com/popovluka/ios-lemonadep/actions/runs/39853877374
 (cpus=4 boot image built from it by `m2-boot-build.sh ... 4`).
 
+## GPU, Phase 13: the icache fault is root-caused — the mapping is unprivileged (2026-10-29)
+
+The stage-9 log from commit `6621fef` (built and booted 2026-10-29, log pulled today) is
+the first run with the `ArmSmmu4KExecute` fix on the icache. It did **not** clear the fault:
+
+```
+SWEET GPU: GMU SMMU setup status=0 step=7 sids=2 tables=774 leaves=4111 program_phase=5 fsr=0x400 attach_phase=4
+SWEET GPU: GMU cold start status=3 phase=8
+SWEET GPU: GMU start-ready probe=0x30010008 -> mask=0x1ff want=0x100, FW_INIT_RESULT=0x0
+SWEET GPU: GMU context FSR=0x80000408 FAR=0x000004000
+```
+
+`FAR=0x4000` is `LEMONADEP_GMU_ICACHE_IOVA` exactly — the GMU's very first instruction
+fetch — and FSR bit 3 is still PF. So Execute was necessary but not sufficient.
+
+**Why.** `descriptor()` in the vendored ArmSmmu4K sets `attrs |= 1u<<6` — AP[1], the
+"unprivileged access permitted" bit — whenever `ArmSmmu4KPrivileged` is absent, which
+mirrors io-pgtable-arm's `ARM_LPAE_PTE_AP_UNPRIV`. In the AArch64 stage-1 EL1&0 regime an
+AP[1]=1 page is treated as **PXN regardless of descriptor bit 53**, so clearing PXN had no
+effect while the page stayed EL0-accessible, and the GMU's fetches are privileged.
+
+Upstream `a6xx_gmu_memory_alloc()` confirms the intended split: every GMU buffer with a
+**fixed** IOVA is mapped `MSM_BO_MAP_PRIV` (its own comment reads *"use IOMMU_PRIV for
+icache/dcache"*) — dummy `0x60000000`, debug `0x60400000`, icache `0x4000` — while the
+dynamically placed log and hfi buffers get no PRIV. Downstream kgsl does the same for its
+`GMU_CACHED_CODE` region (`IOMMU_READ | IOMMU_WRITE | IOMMU_PRIV`). Our region table
+already has exactly that fixed/dynamic split, so patch 1007 now derives `Privileged` from
+it (`fixed_iova`) and keeps Execute on the icache alone.
+
+Dropping AP[1] on the three fixed regions cannot break their data accesses: AP[1]=0 denies
+EL0, not EL1, and nothing but the GMU reads them through the SMMU — the kernel fills the
+icache through the direct map and cleans to PoC.
+
+Secondary notes from the same log, both downstream of the fault and not yet separate
+problems: `probe=0x30010008` against `want=0x100` and `FW_INIT_RESULT=0x0` are simply what
+a GMU that never executed reports, and the `fsr=0x400` already present at setup time
+(bit 10, before any GMU access) is the boot loader's, not ours.
+
+Not yet built. Next: a CircleCI run on this patch, then a stage-9 boot, then read
+`FSR`/`FAR` again — if PF is gone the next thing to watch is `FW_INIT_RESULT`.
+
 ## HakiOS port started: a lemonadep kernel builds and runs user space (2026-10-29 ~01:50)
 
 **Where it is.** `~/hakios/hakios-xnu-kernel` inside the **LemonadepLab WSL distro** (not /mnt/d:
