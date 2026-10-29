@@ -1465,13 +1465,54 @@ derived from upstream's `lemonadePkg` — the real tree is delivered at runtime 
 `Resources/`, as redwood does it. And `lemonadepPkg` now sits next to upstream's
 `lemonadePkg` in the same tree, so the sibling is there to diff against.
 
-**Next**: step 2 of docs/porting — the first boot on the phone with nothing of the phone's.
-`make loader` needs `xnuloader/identity.h`, which `mkidentity.sh` makes from the device tree
-in an IPSW, so `sysimage/fetch.sh` (7.4 GB) or `make unpack IPSW=...` comes first; `make
-loader-open` is the placeholder that boots the open kernel only. Then `mkxnuimg.py` takes the
-UEFI from `Mu-Silicium/` and `./xl enter` / `make phone` run it. Then drivers in the
-documented order (CPUFREQ/THERMAL/SOCINFO → buttons/touch → UFS → ADRENO → ADSP/battery/audio
-→ Wi-Fi → the rest).
+**The IPSW, the loader and a bootable image are done** (2026-10-29 ~02:55).
+
+- There is **no `sysimage/fetch.sh` on the `hakios` branch, by design**: `unpack.sh` says "The
+  project ships no file of Apple's and downloads none. The IPSW is yours." The file it wants is
+  `iPhone10,3,iPhone10,6_16.5_20F66_Restore.ipsw`, **6,165,698,198 bytes**, sha1
+  `6ee6e5b447902dbb36a3991ca20d032d6b4cc759`, from Apple's own CDN (`updates.cdn-apple.com`,
+  URL via api.ipsw.me). Downloaded to `~/hakios/ipsw/` in WSL, both size and sha1 verified.
+  `make unpack IPSW=...` gave 2.9 G rootfs, 26 M cryptex, 11 M App cryptex, 2.6 G dyld cache
+  and `sysimage/DeviceTree.d22ap.im4p` (33,694 bytes).
+- **`identity.h` is silently a placeholder until the IPSW exists.** `make loader` will happily
+  build against `mkidentity.py --placeholder` ("no Apple device-tree data") and say nothing.
+  Delete `xnuloader/identity.h` and run `make loader` again once `sysimage/` is unpacked: it
+  then says "made from the device tree (186040 bytes)" and `loader.efi` grows 65,536 -> 70,656.
+- **LZFSE**: `mkidentity.sh` wants `lzfse`; its own fallback that clones and builds
+  github.com/lzfse/lzfse fails (`No rule to make target 'lzfse'`). Ubuntu packages it:
+  `apt-get install lzfse` (noble/universe), which is the first decoder it looks for anyway.
+- **`mkxnuimg.py` was redwood-hardcoded** (`Build/redwoodPkg/...`, `Resources/DTBs/redwood.dtb`,
+  `xnu-redwood.img`, and `MU` fixed to a `Mu-Silicium/` inside the tree). Patched here to read
+  `CONFIG_DEVICE` from `.config` (overridable with `HAKIOS_DEVICE`) and to honour `MU_DIR`, since
+  `uefi/apply.sh` puts Mu-Silicium beside the `uefi/` it was run from, not in the kernel tree.
+  Worth sending upstream — any second device hits this. With it:
+  `MU_DIR=~/hakios/fz/Mu-Silicium python3 mkxnuimg.py` -> **`xnu-lemonadep.img`, 2,615,296 bytes**
+  (shim 176, uncompressed 2,097,328).
+
+**On-device result so far: the image does not bring the loader up.** `fastboot boot
+xnu-lemonadep.img` reports OKAY, and the phone comes back in **stock** fastboot: `product:
+lahaina`, serial unchanged. `xl`'s own test is `is_loader() { fb getvar product | grep -q
+'product: xnuloader'; }`, so `lahaina` means stock, not the loader. (A `????????????` line in
+`fastboot devices` right after the boot is just USB re-enumeration — not a second fastboot
+implementation. Don't read it as success.) Nothing was harmed; the phone returns by itself.
+Untested guesses for why, in order: the image was built with **no payload** (`mkxnuimg.py`
+without `-p`), while `Resources/Configs/lemonadep.toml` has `[boot_shim] requires_kernel_header
+= true`; and whether the UEFI starts at all needs the screen or a log to tell.
+
+**The supported workflow needs USB from WSL, which it does not have.** `xl` drives the loader
+over the fastboot protocol and runs inside the kernel tree, but `fastboot`/`adb` are not
+installed in LemonadepLab and the phone is on the Windows USB bus — `./xl state` says `absent`.
+Either install `usbipd-win` on Windows and attach the device to WSL (`usbipd bind` / `usbipd
+attach --wsl`), which is the real fix, or keep copying images out to Windows for `fastboot
+boot`, which cannot drive `xl run`/`xl log` at all.
+
+**Built artifacts** (copied to `D:\ios port\hakios-out\`): `xnu-lemonadep.img` 2,615,296 bytes,
+`hakios-kernel` 14,365,016 bytes.
+
+**Next**: get the loader to come up — try `mkxnuimg.py -p` with a payload, and look at the
+phone's screen during the attempt (UEFI should show its framebuffer). Then step 2's "done
+when": a run reaches `launchd` and ends by itself. Then drivers in the documented order
+(CPUFREQ/THERMAL/SOCINFO → buttons/touch → UFS → ADRENO → ADSP/battery/audio → Wi-Fi → rest).
 
 ## Upstream restructured into HakiOS — evaluation notes (2026-10-29 ~01:20)
 
