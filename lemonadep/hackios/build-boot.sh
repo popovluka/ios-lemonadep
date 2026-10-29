@@ -13,12 +13,12 @@ cd "$FK"
 # mkxnuimg.py silently falls back to prebuilt/uefi/ (redwood's UEFI, another SoC) when ./Mu-Silicium
 # is missing. That fallback crashed the phone into XBL ramdump on every boot: never let it happen.
 [ -e Mu-Silicium ] || ln -sfn "$FZ" Mu-Silicium
+
+DEVICE=lemonadep
+. common/devices/lemonadep.conf          # first: it sets DTB=none, which the next lines override
 FD=$FZ/Build/lemonadepPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd
 DTB=$FZ/Resources/DTBs/lemonadep.dtb
 [ -f "$FD" ] && [ -f "$DTB" ] || { echo "missing $FD or $DTB"; exit 1; }
-
-DEVICE=lemonadep
-. common/devices/lemonadep.conf
 # The working values, whatever the conf says: FD at 0x9FD00000 (what the FD is linked for) and the
 # OnePlus 9 DTB appended (DTB=none in the conf put the phone in 05C6:900E crash-dump mode).
 FD_BASE=0x9FD00000

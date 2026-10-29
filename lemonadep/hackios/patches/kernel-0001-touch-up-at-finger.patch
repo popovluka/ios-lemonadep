@@ -1,0 +1,35 @@
+diff --git a/xnu/files/bsd/dev/redwood_synaptics.c b/xnu/files/bsd/dev/redwood_synaptics.c
+index be19da0..b2cdbf4 100644
+--- a/xnu/files/bsd/dev/redwood_synaptics.c
++++ b/xnu/files/bsd/dev/redwood_synaptics.c
+@@ -725,6 +725,7 @@ static const uint8_t lemonadep_layout[] = {
+ static struct object {
+ 	uint32_t classification, x, y;
+ 	uint32_t last_x, last_y;        /* where the previous report had it */
++	uint32_t post_x, post_y;        /* where it was last posted (0..65535), for its up */
+ 	uint8_t stable;                 /* reports in a row it has been a finger, near where it was */
+ 	uint8_t missing;                /* reports in a row it has not been, while posted as down */
+ 	bool seen;              /* in this report */
+@@ -901,6 +902,8 @@ parse_touch_report(const uint8_t *data, uint32_t size)
+ 				y = 65535 - y;
+ 			}
+ 			redwood_touch_post(o->down ? REDWOOD_TOUCH_MOVE : REDWOOD_TOUCH_DOWN, i, x, y);
++			o->post_x = x;
++			o->post_y = y;
+ 			if (!o->down && downs++ < 20) {
+ 				printf("synaptics: finger %u down at %u, %u (of %u, %u)\n", i, o->x, o->y, max_x, max_y);
+ 			}
+@@ -908,7 +911,12 @@ parse_touch_report(const uint8_t *data, uint32_t size)
+ 		} else {
+ 			o->stable = 0;
+ 			if (o->down && ++o->missing >= release) {
+-				redwood_touch_post(REDWOOD_TOUCH_UP, i, 0, 0);
++				/*
++				 * Up where the finger last was: the window server takes an up's position as the
++				 * finger's, and an up at 0, 0 is a finger that slid off the button it pressed, so
++				 * buttons, keys and alerts highlighted and then did nothing.
++				 */
++				redwood_touch_post(REDWOOD_TOUCH_UP, i, o->post_x, o->post_y);
+ 				o->down = false;
+ 				o->missing = 0;
+ 			}

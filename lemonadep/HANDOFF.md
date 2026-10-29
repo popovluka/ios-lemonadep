@@ -14,9 +14,12 @@ Seen on the phone, as the user described it:
 - **Apps register taps but do not act on them.** The button's pressed animation plays and then
   nothing: Apple Music's "Continue", Calculator's keys (key highlights, the display never changes),
   the buttons of an alert (Software Update's "something went wrong": Retry and Cancel both highlight,
-  neither dismisses). Guess, not verified: the touch-up (or touch-end phase) does not reach UIKit as
-  a clean end of the touch, so controls see touch-down but never fire `touchUpInside`. Check the
-  touch driver's end-of-contact report against what furangelz's `redwood_synaptics.c` sends first.
+  neither dismisses). **FIXED, confirmed on the phone ("buttons work"):** `redwood_synaptics.c`
+  posted every lift-off as `REDWOOD_TOUCH_UP` at **0, 0**, and userland's `inject.c:948` takes an
+  up's x/y as the finger's position, so UIKit saw every finger slide off to the top-left corner
+  before lifting (touchUpOutside). The up is now posted where the finger was last posted.
+  Patch for furangelz's tree: `lemonadep/hackios/patches/kernel-0001-touch-up-at-finger.patch`
+  (`git apply` in `~/fkernel`; it is applied there now).
 
 Nothing was flashed for this. Everything runs from RAM; the phone goes back to fastboot afterwards.
 
