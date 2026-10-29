@@ -1375,6 +1375,50 @@ look for:
 Kernel run: https://github.com/popovluka/ios-lemonadep/actions/runs/39853877374
 (cpus=4 boot image built from it by `m2-boot-build.sh ... 4`).
 
+## HakiOS loader: reproduced with everything verified; the screen is the only thing left (2026-10-29)
+
+Ran the documented flow properly, from WSL with the phone passed through:
+
+```
+xl state         -> fastboot            (so usbipd/passthrough is fine)
+usb-payload.bin  -> 70824 bytes         (xl built it: loader.efi=xnuloader/loader.efi --usb)
+xnu-usb.img      -> 2648064 bytes       (mkxnuimg.py -p usb-payload.bin)
+xl enter         -> loader did not come up on USB (state: absent)
+```
+
+**A third theory of mine died here.** `enter()` in `xl` builds the USB payload itself and passes
+it with `-p`; it boots `xnu-usb.img`, not the payload-less `xnu-lemonadep.img` I had been making
+by hand. `loader.efi` is real (70 KiB, rebuilt 02:51, after the `identity.h` placeholder fix). So
+"the image has no payload" was wrong, as were "no vendor drivers" and "no HakiOS boot manager".
+Read `xl` before theorising about what `xl` does.
+
+What is now *verified* rather than assumed: the firmware has all 94 vendor drivers including the
+USB stack; `XnuLoader.c` is compiled into the Boot Manager; `BootShim.bin` is newer than the
+patched `BootShim.S`; the payload is built and included; the passthrough works and `xl` sees
+`fastboot`. The image boots (fastboot takes it) and then the phone leaves the USB bus entirely.
+
+### The screen is now a real discriminator
+
+It was not before: while I believed `DisplayDxe` was missing, a black screen meant nothing. Both
+`DisplayDxe` and `SimpleFbDxe` **are** in the firmware, so a UEFI that runs should put the boot
+logo on the panel. Therefore:
+
+- **something on screen** -> UEFI runs, and the failure is the hand-over to the XNU loader
+  (`XnuLoader.c` not finding the `XNUP` container at `0xF0000000`, or the loader starting and
+  dying before it brings USB up).
+- **nothing on screen** -> UEFI never starts, and the suspects are the boot image header and the
+  memory map: `lemonadep.toml` sets `header_version = 3` where redwood's working config sets `1`,
+  and `[uefi_fd] base = 0x9FD00000` has never been checked against this phone.
+
+Next, in that order: look at the panel during `xl enter`; then try `header_version = 1`; then
+check `lemonadepPkg/Library/MemoryMapLib/MemoryMapLib.c` against the phone's own memory map.
+
+Operational notes for the next attempt: Windows must not hold the device (`adb kill-server`
+first, or `usbipd attach` fails with "Device busy (exported)"), and the phone must really be in
+fastboot — in Android it enumerates as `18d1:d001` and the attach fails with "Device in error
+state", where fastboot is `18d1:d00d`. After a failed `xl enter` the phone is off the bus and
+needs Power + Volume Down.
+
 ## HakiOS loader: the previous section's root cause is WRONG — the firmware is fine (2026-10-29)
 
 **Retracting the section below.** It says the built UEFI has no vendor drivers and no HakiOS
