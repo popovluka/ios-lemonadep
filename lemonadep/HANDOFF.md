@@ -1509,10 +1509,40 @@ boot`, which cannot drive `xl run`/`xl log` at all.
 **Built artifacts** (copied to `D:\ios port\hakios-out\`): `xnu-lemonadep.img` 2,615,296 bytes,
 `hakios-kernel` 14,365,016 bytes.
 
-**Next**: get the loader to come up — try `mkxnuimg.py -p` with a payload, and look at the
-phone's screen during the attempt (UEFI should show its framebuffer). Then step 2's "done
-when": a run reaches `launchd` and ends by itself. Then drivers in the documented order
-(CPUFREQ/THERMAL/SOCINFO → buttons/touch → UFS → ADRENO → ADSP/battery/audio → Wi-Fi → rest).
+**usbipd is set up and works** (2026-10-29 ~03:05). `winget install --id dorssel.usbipd-win`
+(5.3.0; the MSI elevates, so a UAC prompt appears), then — the phone in fastboot is BUSID
+**1-20**, `18d1:d00d` "Android Bootloader Interface":
+
+```
+usbipd bind --busid 1-20            # needs admin: Start-Process -Verb RunAs
+usbipd attach --wsl LemonadepLab --busid 1-20   # --wsl takes the distro as its argument,
+                                                # there is no --distribution flag
+apt-get install android-sdk-platform-tools usbutils   # in the distro
+```
+
+After that WSL sees it (`lsusb`: `18d1:d00d ... (fastboot)`), `fastboot devices` lists the
+phone, and **`./xl state` returns `fastboot` instead of `absent`**. Windows loses the
+device while it is attached; `usbipd detach` gives it back. Consider `--auto-attach` for
+re-enumeration across runs.
+
+**The loader still does not come up, now confirmed by xl itself**: `MU_DIR=... XL_DEVICE=lemonadep
+./xl enter` -> `xl: loader did not come up on USB (state: absent)`. Afterwards the phone is
+**gone from the USB bus altogether** — not in `lsusb`, and absent from `usbipd list`'s
+Connected section (only the binding persists). So this is not a usbipd re-attach problem: the
+phone presents no USB at all after booting `xnu-lemonadep.img`. It needs Power+VolDown to come
+back. Nothing is flashed, so Android is untouched.
+
+What that narrows it to: the UEFI either hangs before its USB comes up, or starts and the
+XNU loader never does. **Next thing to do is look at the phone's screen during the attempt** —
+Mu-Silicium should put up its own framebuffer/banner, and whether anything appears at all
+separates "UEFI never ran" from "UEFI ran, loader did not". Other threads: build the image
+with a payload (`mkxnuimg.py -p ...`; `lemonadep.toml` has `[boot_shim] requires_kernel_header
+= true` and we passed none), and check `lemonadepPkg`'s memory map against the phone — the
+package came from furangelz's tree and has never been built or booted by us before tonight.
+
+**Then** step 2's "done when": a run reaches `launchd` and ends by itself. Then drivers in the
+documented order (CPUFREQ/THERMAL/SOCINFO → buttons/touch → UFS → ADRENO → ADSP/battery/audio
+→ Wi-Fi → rest).
 
 ## Upstream restructured into HakiOS — evaluation notes (2026-10-29 ~01:20)
 
