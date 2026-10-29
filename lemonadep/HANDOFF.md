@@ -1375,6 +1375,76 @@ look for:
 Kernel run: https://github.com/popovluka/ios-lemonadep/actions/runs/39853877374
 (cpus=4 boot image built from it by `m2-boot-build.sh ... 4`).
 
+## STOP REBUILDING THE GPU — a complete, hardware-verified A660 stack already exists (2026-10-29)
+
+Searched properly for the first time, after the user pushed back that other ports already have
+the GPU working. They are right, and the hand-written route this file documents through Phase 18
+is the wrong one. **Port, do not rebuild.**
+
+### `oosexgang/hakios-xnu-kernel`, branch `hakios` — the closest match to lemonadep
+
+`drivers/gpu/hakios.adreno.c`, ~3850 lines, is an Adreno **660** bring-up in 22 numbered steps,
+boot-arg driven (`adreno=N` runs steps 1..N and stops), ending at *"a picture filled with three
+colours, and shows it on the panel"*. `a660` appears 17 times; `redwood` only twice. It loads
+`fw/a660_gmu.bin`, `fw/a660_sqe.fw` and `fw/a660_zap.mdt` — **the same firmware files lemonadep
+uses**. The steps that matter most to us:
+
+| step | what |
+|---|---|
+| 11-12 | TrustZone calls, and the **zap shader signature check** — the part this handoff called a whole hard subsystem |
+| 13-15 | GMU page tables + SMMU context, firmware load, out of reset |
+| 16-17 | RPMh connection, **HFI message queues**, the tables, and powering the 3D core |
+| 18 | the 3D core's own context, ring and `a660_sqe.fw` microcode |
+| 19 | TrustZone **loads** the zap shader (and reclaims one a previous kernel left) |
+| 20-22 | 3D core registers, command processor, out of secure mode, a drawn picture on the panel |
+
+`adreno_keep=1` with `adreno=21` keeps the GPU up for the system to draw through, as the IOKit
+service `HakiosGPU` (`drivers/gpu/hakios.gpu.cpp`, 1218 lines). The display side is
+`xnu/files/iokit/Kernel/MiniIOSurface.cpp` + `MiniIOMobileFramebuffer.cpp`.
+`docs/driver-review/gpu-display.md` is a 220-line security review of all of it — read it before
+shipping anything: finding G1 is that user command buffers are passed to the GPU unvalidated in
+the same SMMU context as the kernel's ring and fence page, with no CP_PROTECT table.
+
+### `oosexgang/hakios-metal`
+
+Metal's command model on the Adreno in C++. PM4 packets, command queues, fences and blits
+**verified on a real Adreno 642L** on 28 Oct 2026 (a 500 KB copy byte-exact in 4.2 ms, 40 command
+buffers in flight completing in order, 16 MB at 92 MB/s). Honest limit, in their own README:
+**shaders are not done** — AIR→NIR→ir3 is missing, so CoreAnimation still draws through OpenGL ES
+even there. So "GPU working" in these projects means real command submission and a drawn picture,
+not yet a fully Metal-accelerated UI.
+
+### `UniXNU/*` — 29 repos, and we are already a consumer
+
+`ArmSmmu4K`, the SMMU library **already vendored in patch 1007**, is theirs. Also:
+`AdrenoFirmware` (GMU cold start + HFI + `AdrenoHfiVotes.c`, the ARC votes Phase 18 called a
+research subsystem — working on sheng hardware), `Adreno740` (a complete kernel GPU driver with
+ring/submit/VM/IOKit user client, verified on SM8550), `AdrenoMetal`, `AdrenoPM4`. Docs at
+unixnu.com. SM8350 siblings: `xiaomi-haydn-dev/UniXNU-haydn` and `iamOJZ/UniXNU-haydn` (haydn,
+Redmi K40 Pro) carry SM8350 values.
+
+### What this session's work is still good for
+
+Not wasted, but it is **device data, not driver code**. These were verified on real lemonadep
+silicon and are exactly the SM8350 values a ported driver needs: the GPUCC GMU RCG
+(`cmd_rcgr 0x1120`) must be programmed to 200 MHz (`cfg=0x602`) or the GMU firmware never runs;
+the GMU icache must be mapped **privileged** or its first instruction fetch faults
+(`FSR=0x80000408` at `FAR=0x4000`); SMMU stream IDs 5/0x405 with `qcom,skip-init` and S2CR FAULT
+as the idle state; chipid `0x06060100`; fence range `0xa`/`0xa0`; the firmware block table for
+`a660_gmu.bin`. Keep these; drop the hand-written driver.
+
+### Recommended route
+
+Finish the **HakiOS port** rather than porting 5000 lines into ios-sweet. HakiOS already has the
+whole stack for our exact GPU; its one blocker is that the loader does not come up on the phone
+(see the usbipd section below), which is a single bug against a 5000-line re-integration into a
+different kernel base with a different display path (`redwood_dpu`). `devices/lemonadep/` is
+already scaffolded there and the kernel built and reached user space in QEMU.
+
+The alternative, if ios-sweet's booting system must be kept: port `hakios.adreno.c` +
+`hakios.gpu.cpp` + the two Mini* files in as a new overlay patch, substituting the SM8350 values
+above for the SM7325 ones.
+
 ## GPU, Phase 18: HFI transport written as stage 10 (2026-10-29)
 
 Stage 10 = stage 9's cold start, then the HFI handshake and the messages that
