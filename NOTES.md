@@ -2,6 +2,12 @@
 
 ## Agent handoff / active work (2026-10-15, latest)
 
+### >>> lemonadep 2026-10-29: GPU-accelerated iOS boots on the OnePlus 9 Pro <<<
+
+Via the HackiOS UEFI chain (Mesa/freedreno on the Adreno 660): blur, transparency, smooth UI,
+brightness, battery. Taps highlight buttons but most don't fire their action (open issue). Recipe and
+details: `lemonadep/HANDOFF.md` (top section) and `lemonadep/hackios/`.
+
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
 
 **STATE at end of 2026-10-18 (evening):**

@@ -1,4 +1,52 @@
-# lemonadep handoff (2026-10-23 ~00:10) — read first
+# lemonadep handoff (2026-10-29 ~23:30) — read first
+
+## MILESTONE: GPU-ACCELERATED iOS ON THE ONEPLUS 9 PRO (2026-10-29)
+
+iOS 16.5 booted to the home screen **with the Adreno 660 doing the drawing**, through furangelz's
+HackiOS chain (Mu-Silicium UEFI → XNU loader → kernel + system image in RAM, Mesa/freedreno GL).
+Seen on the phone, as the user described it:
+
+- **Works:** blur and transparency (dock, Control Center), smooth animation, "system performance much
+  much better" than the software-rendered ios-sweet boot; wallpapers; the correct time and date system
+  wide; panel brightness; battery and charging detection (partly).
+- **Not working:** Wi-Fi and Bluetooth (not implemented); tearing at times, as if vsync were off
+  (noticeable in games).
+- **Apps register taps but do not act on them.** The button's pressed animation plays and then
+  nothing: Apple Music's "Continue", Calculator's keys (key highlights, the display never changes),
+  the buttons of an alert (Software Update's "something went wrong": Retry and Cancel both highlight,
+  neither dismisses). Guess, not verified: the touch-up (or touch-end phase) does not reach UIKit as
+  a clean end of the touch, so controls see touch-down but never fire `touchUpInside`. Check the
+  touch driver's end-of-contact report against what furangelz's `redwood_synaptics.c` sends first.
+
+Nothing was flashed for this. Everything runs from RAM; the phone goes back to fastboot afterwards.
+
+### How it was done (reproduce with `lemonadep/hackios/`)
+
+1. WSL lab: furangelz's `hackios-xnu-kernel` + `hackios-xnu-userland` (branch `lemonadep`) at
+   `~/fkernel`, built with `common/build.sh lemonadep` (kernel, `xnuloader/loader.efi`, `root.apfs`
+   with `fw-gpu/` in it, `system.apfs` with Mesa 25.0.7, `USERLAND_VARS="GL=1 ADSP=1"`).
+2. `bash lemonadep/hackios/build-boot.sh` makes `out/hackios/lemonadep-boot.img` (UEFI) and
+   `run-payload.bin` (kernel + root.apfs + `BOOTARGS` from `common/devices/lemonadep.conf`).
+3. `lemonadep/hackios/run.ps1` from Windows (stock fastboot, no usbipd): `fastboot boot` the UEFI;
+   the loader appears ~10 s later as fastboot serial `XNULOADER`; `oem ramdisk` + `stage system.apfs`
+   (2.4 GB, 41 s), `stage run-payload.bin`, `oem run`.
+
+### The three things that had been stopping it (all three fixed in build-boot.sh)
+
+1. **`mkxnuimg.py` silently used redwood's UEFI.** It looks for `~/fkernel/Mu-Silicium`; when that is
+   missing it takes `prebuilt/uefi/` (the Redmi Note 12 Turbo's shim, FD and DTB, another SoC) with no
+   warning. Every XBLRamDump/`phoenix` crash screen of the evening was that firmware on lahaina.
+2. **`FD_BASE` mismatch.** An experiment of mine left `lemonadep.conf` at `0x9BE00000` while the FD is
+   linked for `0x9FD00000`. Reverted.
+3. **No DTB.** `lemonadep.conf` says `DTB=none`. With the real FD but no DTB the phone went to
+   `05C6:900E` crash-dump mode. The image that had reached Silicium's screen earlier appended
+   `Mu-Silicium/Resources/DTBs/lemonadep.dtb` (the OnePlus 9's). With that, the loader came up first time.
+
+### Android
+
+Android no longer boots (it goes to its recovery). That is the M2 step from 2026-10-15: userdata holds
+the iOS HFSX root, so `/data` cannot be mounted as f2fs. Both slots are healthy
+(`slot-successful: yes`); slot `b` is active. Not a fault, and not caused by tonight's boots.
 
 ## TOUCH WORKS ON-DEVICE (2026-10-23)
 
