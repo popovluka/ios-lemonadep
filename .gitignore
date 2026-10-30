@@ -19,3 +19,6 @@ logs/
 # lemonadep/tools/pull-wlan-fw.sh from your own device)
 lemonadep/fw-wlan/
 lemonadep/fw-vendor/
+
+# build output (Apple system image, images carrying Wi-Fi credentials and vendor firmware)
+lemonadep/out/
