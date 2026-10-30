@@ -1,6 +1,61 @@
 # ios-lemonadep
 
-**Apple's iOS 16 running on a OnePlus 9 Pro.**
+**Apple's iOS 16 running on a OnePlus 9 Pro -- standalone, with GPU, touch, Wi-Fi and Safari.**
+
+Power the phone on and iOS 16.5 starts by itself: no computer, no `fastboot boot`. This repository holds the
+OnePlus 9 Pro (`lemonadep`, Qualcomm SM8350 / Snapdragon 888) port in two generations:
+
+- **Current: HackiOS-based** (`lemonadep/hackios/`). furangelz's [hackios-xnu-kernel / hackios-xnu-userland](https://github.com/furangelz)
+  (XNU 8796 + the unmodified iOS 16.5 user space of the iPhone X), Mu-Silicium UEFI and an XNU loader, plus this
+  repository's patches: the phone's Wi-Fi driver, the standalone boot, persistence and the fixes that make iOS's own
+  Wi-Fi stack, Safari and location work. Latest release:
+  [lemonadep-2026-10-31](https://github.com/popovluka/ios-lemonadep/releases/tag/lemonadep-2026-10-31).
+- **Earlier: the ios-sweet shim path** (everything else under `lemonadep/`): the bare-metal shim, a CPU-rendered
+  home screen from iOS 16.7 on HFS+, and the GPU bring-up research. Kept for reference.
+
+> Experimental, not a daily-driver OS. Apple's security model is mostly switched off, there is no Bluetooth,
+> cellular or camera, and installing it **overwrites the `userdata` partition and the boot partition** (Android
+> stops booting until you restore your backups).
+
+## Status (2026-10-31, HackiOS path)
+
+| Works | |
+| --- | --- |
+| Standalone boot | UEFI + XNU loader + kernel in `boot_b`; the 2.4 GB iOS system image is read from `userdata` at boot |
+| Display, GPU | Adreno 660 through Mesa (GL): blur, transparency, smooth animation |
+| Touch, buttons, battery, backlight | |
+| Wi-Fi | QCA6490 with Linux's ath11k over PCIe; join at boot or from Settings, status bar, DHCP by iOS itself |
+| Safari | pages and video |
+| Location | Wi-Fi positioning (Weather knows where you are) |
+| Your data | `/private/var` saved to flash and restored at boot (icons, settings, dark mode survive) |
+
+| Not working yet | Why (as far as known) |
+| --- | --- |
+| Sound (speaker, Safari, system sounds) | the audio DSP starts, but nothing is heard: speaker path not brought up on this phone |
+| Weather data, Maps tiles | Weather requests are FairPlay-signed (no Secure Enclave); Maps not investigated |
+| Bluetooth, cellular, camera | not started |
+| Power off with the Power button | use the five-finger hold (1.5 s) or iOS's own power off, which save your data |
+
+## How to reproduce
+
+The full recipe, the root cause of every fix and the debugging tools are in
+**[`lemonadep/HANDOFF.md`](lemonadep/HANDOFF.md)** (start there) and
+**[`lemonadep/README.md`](lemonadep/README.md#standalone-hackios-boot-no-computer)**. In short:
+
+1. **Back up** every partition first (TWRP / `dd`), at least `boot_a`, `boot_b`, `vendor_boot_*`, `dtbo_*`.
+2. **Lab**: a Linux (WSL works) checkout of furangelz's two trees at `~/fkernel`, branch `lemonadep`; apply
+   `lemonadep/hackios/patches/*.patch` with `git apply`; build Mu-Silicium's lemonadep UEFI; let
+   `ios165/fetch.sh` extract iOS 16.5 (20F66, iPhone10,3) from Apple's IPSW.
+3. **Phone files** (never in git): Wi-Fi firmware and board data pulled from your own phone into
+   `~/fkernel/fw-wlan/` (`amss.bin`, `m3.bin`, `bdwlan.bin`, `regdb.bin`), and `fw-wlan/network` with your
+   network's name and passphrase.
+4. **Build**: `common/build.sh lemonadep`, then `bash lemonadep/hackios/build-standalone.sh`.
+5. **Install**: phone in TWRP: `lemonadep/hackios/install-standalone.ps1 -SystemImage`; phone in fastboot:
+   `install-standalone.ps1 -Boot`. Undo: `fastboot flash boot_b <your boot_b backup>`.
+
+No prebuilt images are published: they would contain Apple's iOS, Qualcomm firmware and Wi-Fi credentials.
+
+## The earlier shim path
 
 This project ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation) to the OnePlus 9 Pro (`lemonadep`, Qualcomm SM8350 / Snapdragon 888). On top of it runs the **unmodified iOS 16.7.16 (20H392) userland of the iPhone X**: launchd, the system daemons, backboardd, SpringBoard and the stock apps — the same bare-metal shim and patched kernel as [ios-sweet](https://github.com/dipa-studio/ios-sweet), whose original target (the Xiaomi Redmi Note 10 Pro) this repo still fully supports too (see [below](#also-runs-on-the-redmi-note-10-pro-sweet)).
 
@@ -8,7 +63,7 @@ As of **2026-10-23** the phone boots to an **interactive iOS 16 home screen**: t
 
 > Experimental bring-up, not a usable phone OS. Many things are missing or stubbed, and Apple's security model is mostly switched off. It installs into the `userdata` partition and so **erases Android's user data**.
 
-## Status
+### Shim path status
 
 | Milestone | State |
 | --- | --- |
@@ -33,7 +88,7 @@ Same shim, same kernel patch series, same iPhone X userland — only the hardwar
 | CPU | 6× Cortex-A55 (homogeneous) | 4×A55 + 3×A78 + 1×X1 (boots on 1 core so far) |
 | GICv3/timer | direct EL1 access | under a hypervisor: `CNTP_CTL_EL0` and `GICR_IPRIORITYR` writes need working around |
 
-## How it boots
+## How it boots (shim path)
 
 ```
 Bootloader (unlocked)
@@ -44,7 +99,7 @@ Bootloader (unlocked)
               -> dyld + shared cache -> launchd -> daemons -> backboardd + SpringBoard
 ```
 
-## How to do it yourself
+## How to do it yourself (shim path)
 
 Full step-by-step instructions (backup, kernel build via CI, iOS root image, boot image, flash, log pull) are in **[`lemonadep/README.md`](lemonadep/README.md)**. Short version:
 

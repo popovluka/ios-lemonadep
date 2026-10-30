@@ -1,10 +1,16 @@
 # OnePlus 9 Pro (lemonadep) port
 
-**Porting ios-sweet's iOS 16 bring-up from the Redmi Note 10 Pro to the OnePlus 9 Pro** (codename `lemonadep`, Qualcomm SM8350 / Snapdragon 888). Same shim, same patched XNU kernel, same unmodified iPhone X (`iPhone10,3`/`D22AP`) userland as the main [`README.md`](../README.md) — only the hardware bring-up layer (ADT values, MMIO addresses, drivers) is device-specific, expressed as runtime overrides so the original sweet code path stays byte-for-byte unchanged when they're absent.
+**iOS 16 on the OnePlus 9 Pro** (codename `lemonadep`, Qualcomm SM8350 / Snapdragon 888). Two generations live here:
+
+- **The HackiOS path (current, 2026-10-31): standalone iOS 16.5 with GPU, touch, Wi-Fi, Safari and location.**
+  Start with [`HANDOFF.md`](HANDOFF.md) (state, fixes, build and install), then
+  [Standalone HackiOS boot](#standalone-hackios-boot-no-computer) below. Code and patches: [`hackios/`](hackios/).
+- **The ios-sweet shim path (earlier, up to 2026-10-23)**: everything else on this page from "Status" on -- the
+  bare-metal shim, a CPU-rendered iOS 16.7 home screen from HFS+, and the GPU research that preceded HackiOS.
 
 > Same caveats as sweet: experimental, not a usable phone OS, no GPU acceleration yet (bring-up in progress, see below), Apple's security model is mostly off, and it installs into `userdata` (**erases Android's user data**). This document reflects the state as of **2026-10-23**; read it with a critical eye against the actual code and the sourced facts in `HWMAP_lemonadep.md` before relying on anything here.
 
-## Status
+## Status (shim path)
 
 | Milestone | State |
 | --- | --- |
@@ -133,9 +139,8 @@ Look for `SWEET KEYS:`, `SWEET TOUCH:` and `SWEET GPU:` lines. After a test, hol
 
 ## Standalone HackiOS boot (no computer)
 
-Status (2026-10-30): power on -> iOS 16.5 with GPU, touch, battery, backlight, audio DSP and Wi-Fi (Safari loads pages and video; join from Settings works);
-/private/var kept between boots. Not working yet: Bluetooth, cellular, camera, Wi-Fi status in
-Settings, Power-button power off (use five fingers held 1.5 s on the screen, or iOS's power off).
+Status (2026-10-31): power on -> iOS 16.5 with GPU, touch, battery, backlight and Wi-Fi (Safari loads pages and video; join from Settings works; location by Wi-Fi positioning);
+/private/var kept between boots. Not working yet: sound (no speaker output, although the audio DSP starts), Weather data, Maps tiles, Bluetooth, cellular, camera, Power-button power off (use five fingers held 1.5 s on the screen, or iOS's power off).
 iOS does not see the flash as its storage: system and /var run from RAM; /var is saved to userdata.
 
 Replicate (WSL lab with furangelz's hackios-xnu-kernel/userland at `~/fkernel`, patches from

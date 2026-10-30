@@ -9,7 +9,7 @@ found is in [HANDOFF-log.md](HANDOFF-log.md); this page is the state and the rec
 | Works | Notes |
 |---|---|
 | Boot without a PC | boot_b = UEFI + xnuloader + kernel + root.apfs; the 2.4 GB system image read from userdata at 16 GiB (`diskrd`) |
-| GPU (Adreno 660, Mesa GL), touch, battery, backlight, audio DSP | furangelz's drivers + lemonadep patches |
+| GPU (Adreno 660, Mesa GL), touch, battery, backlight | furangelz's drivers + lemonadep patches |
 | /private/var kept between boots | var_store in userdata from 20 GiB; saved every 30 min, on iOS power off, on a five-finger hold (which powers off) |
 | Wi-Fi (QCA6490 / ath11k over PCIe) | joins `fw-wlan/network` at boot; configd's own Wi-Fi service and DHCP; status bar/Settings show it; join from Settings works |
 | Safari (pages, video) | needs apsd left out (see below) |
@@ -17,6 +17,7 @@ found is in [HANDOFF-log.md](HANDOFF-log.md); this page is the state and the rec
 
 | Not working | Cause (as far as known) |
 |---|---|
+| Sound (speaker, Safari, system sounds) | user, 2026-10-31: nothing heard although adsp=1 starts the audio DSP; speaker amplifier/route on this phone not brought up -- next candidate (furangelz's redwood audio is for another codec/amp) |
 | Weather numbers | WeatherKit requests are FairPlay-signed; fairplayd exits at once on this port (unsolved upstream too) |
 | Maps tiles | not investigated; signing and/or VectorKit Metal (Metal for apps unfinished) |
 | Bluetooth, cellular, camera | not started |
