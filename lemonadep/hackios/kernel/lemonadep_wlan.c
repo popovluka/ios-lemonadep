@@ -998,6 +998,82 @@ static const struct redwood_wifi_platform wlan_platform = {
 	.option = wlan_platform_option,
 };
 
+/*
+ * The firmware crashed (EE 3, RDDM): its dump over BHIe RX (mhi_download_rddm_image(): a vector table
+ * at RXVECADDR, its size, a sequence number in RXVECDB, done when RXVECSTATUS says 2), and the text
+ * in it that looks like a reason (file names, "assert", "err").
+ */
+#define RDDM_BYTES      0x420000u       /* dt qcom,wlan-ramdump-dynamic */
+static uint32_t mh_bhieoff;
+static void
+wlan_rddm(void)
+{
+	vm_offset_t buf = 0, vec = 0;
+	uint64_t buf_iova, vec_iova;
+	uint32_t segs = RDDM_BYTES / 0x80000u + 1, st = 0, be = mh_bhieoff;
+
+	if (kmem_alloc(kernel_map, &buf, RDDM_BYTES, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS ||
+	    kmem_alloc(kernel_map, &vec, 4096, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS ||
+	    wlan_dma_map(NULL, (void *)buf, RDDM_BYTES, &buf_iova)) {
+		printf("SWEET WLAN: rddm: no memory\n");
+		return;
+	}
+	uint64_t *ve = (uint64_t *)vec;
+	for (uint32_t i = 0; i < segs; i++) {
+		ve[2 * i] = buf_iova + (uint64_t)i * 0x80000u;
+		ve[2 * i + 1] = (i + 1 < segs) ? 0x80000u : RDDM_BYTES - i * 0x80000u;
+	}
+	if (wlan_dma_map(NULL, (void *)vec, segs * 16, &vec_iova)) {
+		return;
+	}
+	chip_wr(be + 0x64, (uint32_t)(vec_iova >> 32));
+	chip_wr(be + 0x60, (uint32_t)vec_iova);
+	chip_wr(be + 0x68, segs * 16);
+	chip_wr(be + 0x70, (chip_rd(be + 0x70) & ~0x3fffffffu) | 0x1ddd0eu);
+	for (int ms = 0; ms < 5000; ms++) {
+		st = chip_rd(be + 0x78);
+		if (st >> 30) {
+			break;
+		}
+		IOSleep(1);
+	}
+	for (vm_offset_t l = buf; l < buf + RDDM_BYTES; l += 64) {
+		__asm__ volatile ("dc civac, %0" : : "r" (l));
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+	printf("SWEET WLAN: rddm: rxvecstatus %#x (2 = done)\n", st);
+	const char *p = (const char *)buf;
+	unsigned said = 0;
+	for (uint32_t i = 0, run = 0; i < RDDM_BYTES && said < 60; i++) {
+		char c = p[i];
+		if (c >= 0x20 && c < 0x7f) {
+			run++;
+			continue;
+		}
+		if (run >= 10) {
+			const char *s = p + i - run;
+			bool want = false;
+			for (uint32_t k = 0; k + 2 < run; k++) {
+				if ((s[k] == '.' && s[k + 1] == 'c' && (s[k + 2] == ':' || s[k + 2] == ' ' || s[k + 2] == ',')) ||
+				    (s[k] == 'e' && s[k + 1] == 'r' && s[k + 2] == 'r') || (s[k] == 'E' && s[k + 1] == 'R' && s[k + 2] == 'R') ||
+				    (s[k] == 'a' && s[k + 1] == 's' && s[k + 2] == 's') || (s[k] == 'f' && s[k + 1] == 'a' && s[k + 2] == 't')) {
+					want = true;
+					break;
+				}
+			}
+			if (want) {
+				char line[200];
+				uint32_t n = run < sizeof(line) - 1 ? run : sizeof(line) - 1;
+				memcpy(line, s, n);
+				line[n] = 0;
+				printf("SWEET WLAN: rddm @%#x: %s\n", i - run, line);
+				said++;
+			}
+		}
+		run = 0;
+	}
+}
+
 static void
 wlan_poll_thread(void *arg, wait_result_t wr)
 {
@@ -1025,6 +1101,11 @@ wlan_poll_thread(void *arg, wait_result_t wr)
 				    chip_rd(mh_bhioff + 0x28), chip_rd(mh_bhioff + 0x30), chip_rd(mh_bhioff + 0x34),
 				    chip_rd(mh_bhioff + 0x38), chip_rd(mh_bhioff + 0x3c));
 				st_was = st;
+				static bool rddm_done;
+				if ((st >> 8 & 0xff) == 0xff && chip_rd(mh_bhioff + 0x28) == 3 && !rddm_done) {
+					rddm_done = true;
+					wlan_rddm();
+				}
 			}
 		}
 		IOSleep(1);
@@ -1082,6 +1163,13 @@ wlan_driver(void)
 	printf("SWEET WLAN: driver: ath11k start returns %d; qrtr in %u, out %u (done %u), dropped %u, events %u\n", r, mh_rx,
 	    mh_tx_sent, mh_tx_done, wq_dropped, mh_events);
 	wlan_note(7, "ath11k %d rx %u tx %u", r, mh_rx, mh_tx_sent);
+	uint32_t back = 0;
+	if (PE_parse_boot_argn("wlan_return", &back, sizeof(back)) && back) {
+		extern void loader_return(void);
+		printf("SWEET WLAN: back to the loader (wlan_return)\n");
+		IOSleep(500);
+		loader_return();
+	}
 }
 
 /* IPCR up: both channels started, inbound buffers queued, listen; a QRTR HELLO if the chip says nothing. */
@@ -1140,6 +1228,7 @@ wlan_mhi_host(const lemonadep_mhi_result *m, const void *fw, uint32_t fw_bytes)
 	}
 	mh = (uint8_t *)region;
 	mh_bhioff = m->bhioff;
+	mh_bhieoff = m->bhieoff;
 	if (wlan_dma_map(NULL, mh, MHI_CTRL_BYTES, &mh_iova)) {
 		return;
 	}
@@ -1151,7 +1240,11 @@ wlan_mhi_host(const lemonadep_mhi_result *m, const void *fw, uint32_t fw_bytes)
 	mh_ctx(O_CHAN + 21 * sizeof(struct mhi_ctx), chcfg, 2, 1, O_CH21, 64 * 16);
 	/* event rings: ctrl (32, irq 1), data (256, irq 2, 1 ms moderation); one MSI vector here: msivec 0 */
 	mh_ctx(O_ER + 0 * sizeof(struct mhi_ctx), 0, 1, 0, O_ER0, 32 * 16);
-	mh_ctx(O_ER + 1 * sizeof(struct mhi_ctx), 1u << 16, 1, 0, O_ER1, 256 * 16);
+	/*
+	 * (no moderation: with ath11k's 1 ms the chip held an event back until it next had something to
+	 * say -- a QMI reply sat 10 s, 2026-10-30)
+	 */
+	mh_ctx(O_ER + 1 * sizeof(struct mhi_ctx), 0, 1, 0, O_ER1, 256 * 16);
 	mh_ctx(O_CMD, 0, 0, 0, O_CMDR, 128 * 16);
 	mh_clean(0, MHI_CTRL_BYTES);
 
@@ -1260,6 +1353,15 @@ wlan_mhi_host(const lemonadep_mhi_result *m, const void *fw, uint32_t fw_bytes)
 	    chip_rd(0x48), mh_events, ee == 2 ? "MISSION MODE" : "no mission mode");
 	wlan_note(7, "bhie %#x EE %u ev %u %s", st, ee, mh_events, ee == 2 ? "AMSS" : "");
 	if (ee == 2) {
+		/*
+		 * Device wake (MHI's doorbell 127, mhi_assert_dev_wake()), held for good: ath11k reaches the
+		 * chip's registers behind it (pci.c wakeup = mhi_device_get_sync()); without it the firmware
+		 * went to RDDM 23 ms after the copy engines were started (2026-10-30)
+		 */
+		uint32_t nowake = 0;
+		if (!(PE_parse_boot_argn("wlan_nowake", &nowake, sizeof(nowake)) && nowake)) {
+			mh_db(chdboff + 8 * 127, 1);
+		}
 		wlan_ipcr();
 	}
 }

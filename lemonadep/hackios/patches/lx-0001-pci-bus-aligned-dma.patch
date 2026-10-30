@@ -42,7 +42,7 @@ index df4daee..53014d7 100644
  	bzero(pool.memory + at, size);
  	*dma_handle = pool.address + at;
 diff --git a/wifi/lx/src/lx_bus.c b/wifi/lx/src/lx_bus.c
-index 6943a33..ac0e09c 100644
+index 6943a33..904fb8e 100644
 --- a/wifi/lx/src/lx_bus.c
 +++ b/wifi/lx/src/lx_bus.c
 @@ -62,6 +62,11 @@ static struct {
@@ -137,7 +137,7 @@ index 6943a33..ac0e09c 100644
  		__asm __volatile("dsb sy");	/* (what was written to a ring is in memory before the radio is told of it) */
  		iowrite32(value, (u8 *)ab->mem + window(ab, offset));
  	}
-@@ -746,14 +803,25 @@ lx_start(void)
+@@ -746,14 +803,26 @@ lx_start(void)
  	device.of_node = &node;
  	device.kobj.name = "wifi";
  
@@ -156,6 +156,7 @@ index 6943a33..ac0e09c 100644
 +		/* BAR0 where the platform has it (wifi_pci_bar), 2 MB; the chip is up already (lx_os_rproc_boot()) */
 +		ab->mem_len = 0x200000;
 +		ab->mem = lx_os_map_registers(lx_os_option("wifi_pci_bar"), ab->mem_len);
++		ab->mem_ce = ab->mem;		/* (pci.c: the copy engines are in BAR0 too; ATH11K_CE_OFFSET() is 0) */
 +		bus.window_now = ~0u;
 +		if (ab->mem == NULL) {
 +			return (ENXIO);
@@ -166,7 +167,7 @@ index 6943a33..ac0e09c 100644
  		unsigned long long address;
  		unsigned data;
  
-@@ -771,7 +839,8 @@ lx_start(void)
+@@ -771,7 +840,8 @@ lx_start(void)
  			lx_tell("lx: wifi_irq: the radio cannot be shown where to raise an interrupt: the rings are looked at, as before\n");
  		}
  	}

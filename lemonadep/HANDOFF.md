@@ -73,8 +73,18 @@ QCA6490 (17cb:1103, SOC_HW_VERSION 0x400c0110 = major 1 -> amss.bin, as cnss2 pi
   (BHI errcode 0x73086).
 - The chip is the **WCN6851** of Dmitry Baryshkov's 2026-06 series "enable WiFi/BT on SM8350 HDK"
   (ath11k hw1.1 = WCN6855 hw2.0 params, num_vdevs 3). We run it as `wifi_hw20=1`.
-- **Next:** board data. ath11k wants board-2.bin/board.bin; the phone has bdwlan* + regdb in the modem
-  partition (image/), not pulled yet (`tools/pull-wlan-fw.sh` from recovery).
+- Board data: OnePlus's cnss2 takes `bdwlan.elf` for board_id 0xff from **`/odm/etc/wifi/`** (with
+  `regdb.bin`), not the 146 `bdwlan.eXX` of the modem partition. Pulled from TWRP into `fw-wlan/` as
+  `bdwlan.bin` + `regdb.bin` (gitignored); the image build (`SKIP='kernel loader boot'`) puts them in fw/.
+- Three more fixes: event ring 1 without interrupt moderation (with 1 ms a QMI reply sat until the next
+  send), MHI device wake held (doorbell 127), and **`ab->mem_ce = ab->mem`** in lx_bus's PCI path (without
+  it every copy-engine register went to 0x6aa9xxxx and the firmware crashed into RDDM once HTC started).
+- **SCAN WORKS (2026-10-30):** QMI -> BDF/regdb/M3 -> mission mode -> HTC -> WMI "unified ready" in 407 ms,
+  radio registered (2.4 + 5 GHz, 2x2, HE), country US; a 35-channel passive scan heard 9 access points
+  (-43 to -81 dBm). Boot-args: `sweetwlan=17 wlan_msi=1 wlan_ath=1 wifi_scan=1` (+ `wlan_return=1` to go
+  back to the loader right after, so the driver's log is the tail of the loader log).
+- **Next:** join (`wifi_join=1` + `fw/network`: name line, passphrase line -- the user's to write), then
+  `wifi_station=1` for configd, then running it together with the GPU/touch boot-args.
 
 ### Android
 
