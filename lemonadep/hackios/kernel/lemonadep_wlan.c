@@ -989,7 +989,8 @@ wlan_platform_option(const char *name, uint32_t *value)
 	static const struct {
 		const char *name;
 		uint32_t value;
-	} ours[] = { { "wifi_pci", 1 }, { "wifi_lx", 2 }, { "wifi_irq", 0 }, { "wifi_smmu", 2 } };
+	} ours[] = { { "wifi_pci", 1 }, { "wifi_lx", 2 }, { "wifi_irq", 0 }, { "wifi_smmu", 2 }, { "wifi_no11d", 1 },
+		     { "wifi_eapol_ms", 1500 } };
 	uint32_t given;
 
 	if (PE_parse_boot_argn(name, &given, sizeof(given))) {

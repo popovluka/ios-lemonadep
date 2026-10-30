@@ -88,8 +88,15 @@ QCA6490 (17cb:1103, SOC_HW_VERSION 0x400c0110 = major 1 -> amss.bin, as cnss2 pi
   TKIP as the *group* cipher in lx_80211 (WPA/WPA2-mixed access point; pairwise stays CCMP; Michael keys
   swapped as wpa_supplicant does), and the MHI control region on an uncached mapping with event elements
   read and cleared by content (the chip's ring read pointer lagged written events).
-- Open: the handshake's first message sometimes never arrives (2 of ~6 joins; access point deauth reason
-  15 after 6 s) -- lx_bus retries the join 3 times meanwhile; `wifi_station=1` waits for a request nobody
+- Handshake: the **first association after the radio starts receives nothing at all** (no EAPOL, no
+  frame on any REO ring -- `wifi_dbg=<ath11k mask>` also prints per-group data-path counts each second;
+  the monitor-status groups still count PPDUs); a second association right after always works. With
+  the firmware's 802.11d scan off (`wifi_no11d`, default on PCI) this is deterministic (8 of 8 runs).
+  Not the 11d scan, not a pause after the scan (`wifi_settle`), not aid/WMM order (ath11k prints the old
+  aid; conf_tx lands within 10 ms). Only visible difference: the first vdev start takes 100 ms, later
+  ones 17. Workaround: give up after `wifi_eapol_ms` (1500) without an EAPOL frame and retry (lx_bus,
+  3 tries): joined 3 of 3, 6.3 s after radio start, DHCP 3 s later. Root cause still open.
+- Open: `wifi_station=1` waits for a request nobody
   makes here; firmware does not answer mode-off at teardown; Wi-Fi not yet combined with GPU/touch args
   (one of those drivers kills the loader's USB, which carries the live log).
 

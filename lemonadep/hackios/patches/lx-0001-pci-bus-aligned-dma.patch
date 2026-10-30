@@ -1,5 +1,5 @@
 diff --git a/wifi/lx/src/lx_80211.c b/wifi/lx/src/lx_80211.c
-index ea753f2..d007d52 100644
+index ea753f2..e0c3120 100644
 --- a/wifi/lx/src/lx_80211.c
 +++ b/wifi/lx/src/lx_80211.c
 @@ -1361,8 +1361,8 @@ protection(const struct lx_target *target, unsigned *group_cipher)
@@ -66,7 +66,26 @@ index ea753f2..d007d52 100644
  		kfree(*conf);
  		*conf = NULL;
  	}
-@@ -1637,6 +1651,7 @@ station_join(struct lx_radio *radio, const struct redwood_sta_join *what)
+@@ -1623,8 +1637,18 @@ station_join(struct lx_radio *radio, const struct redwood_sta_join *what)
+ 		}
+ 	}
+ 	lx_os_unlock();
++	bool scanned = false;
++
+ 	for (unsigned attempt = 0; attempt < 3 && !target->found; attempt++) {
+ 		station_scan(radio, name, name_length, false, NULL);
++		scanned = true;
++	}
++	/*
++	 * wifi_settle=ms: a pause between a scan and the join (lemonadep, 2026-10-30: right after the scan
++	 * the access point's handshake never came through; a second try without a scan always did)
++	 */
++	if (scanned && lx_os_option("wifi_settle") != 0) {
++		lx_pause_ms(lx_os_option("wifi_settle"));
+ 	}
+ 	if (!target->found) {
+ 		lx_tell("lx: THE NETWORK THAT IS WANTED WAS NOT HEARD (a name of %u bytes), in three scans\n", name_length);
+@@ -1637,6 +1661,7 @@ station_join(struct lx_radio *radio, const struct redwood_sta_join *what)
  		channel = linuxkpi_ieee80211_get_channel(hw->wiphy, linuxkpi_ieee80211_channel_to_frequency(e[2], channel->band));
  	}
  	obstacle = protection(target, &group_cipher);
@@ -74,6 +93,22 @@ index ea753f2..d007d52 100644
  	lx_tell("lx: the network that is wanted: an access point on channel %u (%u MHz) at %d dBm, capabilities %#x, beacons every "
  	    "%u units; HT %s, VHT %s, WMM %s; %s%s\n", channel != NULL ? channel_of(channel->center_freq) : 0, channel != NULL ?
  	    channel->center_freq : 0, target->signal, target->capability, target->interval, element(target->elements,
+@@ -1792,8 +1817,14 @@ station_join(struct lx_radio *radio, const struct redwood_sta_join *what)
+ 	/* the handshake: the access point begins it; its messages come in as frames and are answered where they come in */
+ 	began = lx_os_nanoseconds();
+ 	lx_os_lock();
++	/*
++	 * wifi_eapol_ms: give up early when the access point's first message has not come by then (it
++	 * comes some 250 ms after the association): on lemonadep the first association after the radio
++	 * starts receives nothing at all, and a second one, at once, does (2026-10-30)
++	 */
+ 	while (radio->handshake != LX_WPA_KEYS && radio->handshake != LX_WPA_BAD && radio->answer != ANSWER_GONE &&
+-	    lx_os_nanoseconds() - began < 8000000000ull) {
++	    lx_os_nanoseconds() - began < 8000000000ull && !(radio->eapol == 0 && lx_os_option("wifi_eapol_ms") != 0 &&
++	    lx_os_nanoseconds() - began > lx_os_option("wifi_eapol_ms") * 1000000ull)) {
+ 		lx_os_sleep(&radio->handshake, 20 * 1000000ull);
+ 	}
+ 	lx_os_unlock();
 diff --git a/wifi/lx/src/lx_base.c b/wifi/lx/src/lx_base.c
 index df4daee..53014d7 100644
 --- a/wifi/lx/src/lx_base.c
@@ -118,7 +153,7 @@ index df4daee..53014d7 100644
  	bzero(pool.memory + at, size);
  	*dma_handle = pool.address + at;
 diff --git a/wifi/lx/src/lx_bus.c b/wifi/lx/src/lx_bus.c
-index 6943a33..283e16f 100644
+index 6943a33..214cf4b 100644
 --- a/wifi/lx/src/lx_bus.c
 +++ b/wifi/lx/src/lx_bus.c
 @@ -62,6 +62,11 @@ static struct {
@@ -213,7 +248,57 @@ index 6943a33..283e16f 100644
  		__asm __volatile("dsb sy");	/* (what was written to a ring is in memory before the radio is told of it) */
  		iowrite32(value, (u8 *)ab->mem + window(ab, offset));
  	}
-@@ -746,14 +803,26 @@ lx_start(void)
+@@ -294,6 +351,8 @@ bus_write32(struct ath11k_base *ab, u32 offset, u32 value)
+  * to count what the interrupts left behind and to take care of it.
+  */
+ #define DATA_BUDGET	64
++static unsigned group_work[ATH11K_EXT_IRQ_GRP_NUM_MAX], group_said;
++static unsigned long long group_at;
+ 
+ static void
+ bus_looks(void *argument)
+@@ -305,6 +364,23 @@ bus_looks(void *argument)
+ 	while (bus.looking) {
+ 		bool more = false;
+ 
++		/* wifi_dbg: what each of the data path's groups took in, once a second for the first minute */
++		if (lx_os_option("wifi_dbg") && bus.data && group_said < 60 && lx_os_nanoseconds() - group_at > 1000000000ull) {
++			char line[200];
++			int at = 0;
++
++			group_at = lx_os_nanoseconds();
++			group_said++;
++			for (unsigned i = 0; i < ATH11K_EXT_IRQ_GRP_NUM_MAX && at < 180; i++) {
++				if (group_work[i] != 0) {
++					at += snprintf(line + at, sizeof(line) - at, " g%u:%u", i, group_work[i]);
++				}
++			}
++			if (at != 0) {
++				printf("lx: data path took in, by group:%s\n", line);
++			}
++		}
++
+ 		if (lx_os_nanoseconds() - said > 300000000000ull) {	/* every five minutes: how the station and memory stand */
+ 			said = lx_os_nanoseconds();
+ 			lx_station_say();
+@@ -323,6 +399,8 @@ bus_looks(void *argument)
+ 		for (unsigned i = 0; bus.data && i < ATH11K_EXT_IRQ_GRP_NUM_MAX; i++) {
+ 			int done = ath11k_dp_service_srng(ab, &ab->ext_irq_grp[i], DATA_BUDGET);
+ 
++			group_work[i] += done > 0 ? (unsigned)done : 0;
++
+ 			more |= done >= DATA_BUDGET;
+ 			bus.late += bus.irq && done > 0;
+ 		}
+@@ -736,6 +814,7 @@ lx_start(void)
+ 		bus.said = SAID_FIRST;
+ 	} else {
+ 		ath11k_debug_mask = ATH11K_DBG_QMI | ATH11K_DBG_BOOT | ATH11K_DBG_AHB | ATH11K_DBG_WMI | ATH11K_DBG_REG | ATH11K_DBG_MAC;
++		ath11k_debug_mask |= lx_os_option("wifi_dbg");	/* (more of the driver's own debug: its mask bits) */
+ 	}
+ 	/*
+ 	 * The driver's parameter "frame_mode": Ethernet. The firmware then puts frames into 802.11
+@@ -746,14 +825,26 @@ lx_start(void)
  	device.of_node = &node;
  	device.kobj.name = "wifi";
  
@@ -243,7 +328,7 @@ index 6943a33..283e16f 100644
  		unsigned long long address;
  		unsigned data;
  
-@@ -771,7 +840,8 @@ lx_start(void)
+@@ -771,7 +862,8 @@ lx_start(void)
  			lx_tell("lx: wifi_irq: the radio cannot be shown where to raise an interrupt: the rings are looked at, as before\n");
  		}
  	}
@@ -253,7 +338,19 @@ index 6943a33..283e16f 100644
  	ab->fw_mode = ATH11K_FIRMWARE_MODE_NORMAL;
  	if ((ret = ath11k_core_pre_init(ab)) != 0 || (ret = ath11k_hal_srng_init(ab)) != 0 || (ret = ath11k_ce_alloc_pipes(ab)) != 0) {
  		lx_tell("lx: the driver does not get as far as its exchange with the firmware: %d\n", ret);
-@@ -819,7 +889,12 @@ lx_start(void)
+@@ -811,6 +903,11 @@ lx_start(void)
+ 	}
+ 	lx_pause_ms(1000);			/* (for what the firmware says unasked once it is ready) */
+ 	say_radio(ab);
++	if (lx_os_option("wifi_no11d")) {
++		/* no 802.11d scan of the firmware's own beside the station (mac.c starts one with every interface) */
++		clear_bit(WMI_TLV_SERVICE_11D_OFFLOAD, ab->wmi_ab.svc_map);
++		lx_tell("lx: wifi_no11d: the firmware's 802.11d scan is not asked for\n");
++	}
+ 
+ 	driver = ab;
+ 	if (lx_os_option("wifi_station")) {
+@@ -819,7 +916,12 @@ lx_start(void)
  			return (0);
  		}
  	} else if (lx_os_option("wifi_join")) {
