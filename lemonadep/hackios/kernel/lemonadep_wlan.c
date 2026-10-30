@@ -506,7 +506,11 @@ wlan_dma_map(void *c, const void *data, uint32_t bytes, uint64_t *dma)
 	uint64_t size = round_page((vm_offset_t)data + bytes) - va, at;
 	int e = 0;
 
-	wlan_config_sid();
+	static bool sid_done;           /* once: rewriting it while the chip does DMA would send it to 0x1c00 */
+	if (!sid_done) {
+		wlan_config_sid();
+		sid_done = true;
+	}
 	lck_mtx_lock(&redwood_smmu_lock);
 	if (wsp.tables == 0) {
 		if (kmem_alloc(kernel_map, &wsp.tables, round_page(4096u * WSP_TABLES), KMA_KOBJECT | KMA_ZERO | KMA_DATA,
@@ -543,9 +547,11 @@ wlan_dma_map(void *c, const void *data, uint32_t bytes, uint64_t *dma)
 	if ((!wsp.found && !wsp_find()) || (!wsp.on && !wsp_on())) {
 		e = 4;
 	} else {
+		static bool msi_done;
 		uint32_t msi = 0;
-		if (PE_parse_boot_argn("wlan_msi", &msi, sizeof(msi)) && msi) {
+		if (!msi_done && PE_parse_boot_argn("wlan_msi", &msi, sizeof(msi)) && msi) {
 			wlan_enable_msi();
+			msi_done = true;
 		}
 		uint32_t nodb = 0;
 		if (PE_parse_boot_argn("wlan_nodb", &nodb, sizeof(nodb)) && nodb) {
@@ -654,6 +660,227 @@ wlan_sw_reset(void)
 	    "qfprom_pwr_ctrl %#x -> %#x\n", sw_ltssm, sw_hotrst, sw_cookie, sw_warm, sw_cause, sw_gr, sw_qfprom, sw_qfprom_now);
 }
 
+/*
+ * The host side of MHI once the SBL says READY (Linux drivers/bus/mhi/host: init.c mhi_init_dev_ctxt,
+ * mhi_init_mmio; pm.c mhi_ready_state_transition; boot.c mhi_fw_load_bhie; ath11k mhi.c's
+ * QCA6390 configuration): contexts and rings in memory the chip reaches through the SMMU, M0, then
+ * the whole amss.bin over BHIe and the wait for mission mode (EE AMSS). Polled; MSI only wakes nobody.
+ */
+struct mhi_ctx { uint32_t a, b, c; uint64_t rbase, rlen, rp, wp; } __attribute__((packed, aligned(4)));
+struct mhi_el { uint64_t ptr; uint32_t d0, d1; };
+#define MHI_NCH         128
+#define MHI_CTRL_BYTES  0x10000u
+enum { O_CHAN = 0, O_ER = 0x2000, O_CMD = 0x2100, O_ER0 = 0x2200, O_ER1 = 0x3000, O_CMDR = 0x4000,
+	O_CH0 = 0x4800, O_CH1 = 0x4a00, O_CH20 = 0x5000, O_CH21 = 0x5400, O_RXBUF = 0x8000 };
+static const void *wlan_fw_full;
+static uint32_t wlan_fw_full_bytes;
+static uint8_t *mh;                     /* kernel view of the control region */
+static uint64_t mh_iova;                /* the chip's */
+static uint32_t er_rp[2];               /* our read index into each event ring (elements) */
+static const uint32_t er_n[2] = { 32, 256 };
+static const uint32_t er_off[2] = { O_ER0, O_ER1 };
+static uint32_t mh_m0, mh_ee_ev, mh_events;
+
+static void
+mh_clean(uint32_t off, uint32_t len)
+{
+	for (uintptr_t l = (uintptr_t)(mh + off) & ~63ul; l < (uintptr_t)(mh + off + len); l += 64) {
+		__asm__ volatile ("dc cvac, %0" : : "r" (l));
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+}
+static void
+mh_inval(uint32_t off, uint32_t len)
+{
+	for (uintptr_t l = (uintptr_t)(mh + off) & ~63ul; l < (uintptr_t)(mh + off + len); l += 64) {
+		__asm__ volatile ("dc civac, %0" : : "r" (l));
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+}
+static void
+mh_db(uint32_t reg, uint64_t v)         /* 64-bit doorbell: high, then low (mhi_write_db) */
+{
+	chip_wr(reg + 4, (uint32_t)(v >> 32));
+	chip_wr(reg, (uint32_t)v);
+}
+static void
+mh_ctx(uint32_t off, uint32_t a, uint32_t b, uint32_t c, uint32_t ring, uint32_t len)
+{
+	struct mhi_ctx *x = (struct mhi_ctx *)(mh + off);
+	x->a = a;
+	x->b = b;
+	x->c = c;
+	x->rbase = x->rp = x->wp = mh_iova + ring;
+	x->rlen = len;
+}
+
+/* Every event the chip has written since the last look, logged; state, EE and command events noted. */
+static uint32_t erdboff;
+static void
+mh_events_poll(void)
+{
+	for (int r = 0; r < 2; r++) {
+		struct mhi_ctx *x = (struct mhi_ctx *)(mh + O_ER + r * sizeof(struct mhi_ctx));
+		mh_inval(O_ER, 2 * sizeof(struct mhi_ctx));
+		uint64_t dev_rp = x->rp;
+		uint32_t dev_i = (uint32_t)((dev_rp - (mh_iova + er_off[r])) / 16);
+		int n = 0;
+		while (er_rp[r] != dev_i && dev_i < er_n[r] && n++ < 64) {
+			mh_inval(er_off[r] + er_rp[r] * 16, 16);
+			struct mhi_el *e = (struct mhi_el *)(mh + er_off[r] + er_rp[r] * 16);
+			uint32_t type = e->d1 >> 16 & 0xff, code = e->d0 >> 24;
+			mh_events++;
+			printf("SWEET WLAN: mhi ev[%d][%u] type %#x code/state/ee %#x len %u ch %u ptr %#llx\n", r, er_rp[r],
+			    type, code, e->d0 & 0xffff, e->d1 >> 24, e->ptr);
+			if (type == 0x20 && code == 2) {
+				mh_m0 = 1;
+			}
+			if (type == 0x40) {
+				mh_ee_ev = code;
+			}
+			er_rp[r] = (er_rp[r] + 1) % er_n[r];
+			/* hand the element back: wp follows our read pointer, one behind (mhi_recycle_ev_ring) */
+			uint64_t wp = mh_iova + er_off[r] + ((er_rp[r] + er_n[r] - 1) % er_n[r]) * 16;
+			x->wp = wp;
+			mh_clean(O_ER, 2 * sizeof(struct mhi_ctx));
+			mh_db(erdboff + 8 * r, wp);
+		}
+	}
+}
+
+static void
+wlan_mhi_host(const lemonadep_mhi_result *m, const void *fw, uint32_t fw_bytes)
+{
+	vm_offset_t region = 0;
+	uint32_t chdboff, v;
+
+	if (kmem_alloc(kernel_map, &region, MHI_CTRL_BYTES, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) !=
+	    KERN_SUCCESS) {
+		printf("SWEET WLAN: mhi host: no memory\n");
+		return;
+	}
+	mh = (uint8_t *)region;
+	if (wlan_dma_map(NULL, mh, MHI_CTRL_BYTES, &mh_iova)) {
+		return;
+	}
+	/* channel contexts: 0/1 LOOPBACK, 20 IPCR out, 21 IPCR in (ath11k_mhi_channels_qca6390) */
+	const uint32_t chcfg = 2u << 8;         /* state DISABLED, MHI_DB_BRST_DISABLE, pollcfg 0 */
+	mh_ctx(O_CHAN + 0 * sizeof(struct mhi_ctx), chcfg, 1, 0, O_CH0, 32 * 16);
+	mh_ctx(O_CHAN + 1 * sizeof(struct mhi_ctx), chcfg, 2, 0, O_CH1, 32 * 16);
+	mh_ctx(O_CHAN + 20 * sizeof(struct mhi_ctx), chcfg, 1, 1, O_CH20, 64 * 16);
+	mh_ctx(O_CHAN + 21 * sizeof(struct mhi_ctx), chcfg, 2, 1, O_CH21, 64 * 16);
+	/* event rings: ctrl (32, irq 1), data (256, irq 2, 1 ms moderation); one MSI vector here: msivec 0 */
+	mh_ctx(O_ER + 0 * sizeof(struct mhi_ctx), 0, 1, 0, O_ER0, 32 * 16);
+	mh_ctx(O_ER + 1 * sizeof(struct mhi_ctx), 1u << 16, 1, 0, O_ER1, 256 * 16);
+	mh_ctx(O_CMD, 0, 0, 0, O_CMDR, 128 * 16);
+	mh_clean(0, MHI_CTRL_BYTES);
+
+	chdboff = chip_rd(0x18);
+	erdboff = chip_rd(0x20);
+	chip_wr(0x5c, (uint32_t)((mh_iova + O_CHAN) >> 32));
+	chip_wr(0x58, (uint32_t)(mh_iova + O_CHAN));
+	chip_wr(0x64, (uint32_t)((mh_iova + O_ER) >> 32));
+	chip_wr(0x60, (uint32_t)(mh_iova + O_ER));
+	chip_wr(0x6c, (uint32_t)((mh_iova + O_CMD) >> 32));
+	chip_wr(0x68, (uint32_t)(mh_iova + O_CMD));
+	chip_wr(0x84, 0);
+	chip_wr(0x80, (uint32_t)WSP_ADDRESSES);
+	chip_wr(0x9c, 0);
+	chip_wr(0x98, (uint32_t)WSP_ADDRESSES);
+	chip_wr(0x8c, 0);
+	chip_wr(0x88, (uint32_t)(WSP_ADDRESSES + WSP_ADDRESSES_SIZE - 1));
+	chip_wr(0xa4, 0);
+	chip_wr(0xa0, (uint32_t)(WSP_ADDRESSES + WSP_ADDRESSES_SIZE - 1));
+	v = chip_rd(0x10);
+	v = (v & ~(0xffu << 16)) | 2u << 16;    /* NER 2 */
+	v &= ~(0xffu << 24);                     /* NHWER 0 */
+	chip_wr(0x10, v);
+	printf("SWEET WLAN: mhi host: ctrl at chip %#llx; chdboff %#x erdboff %#x mhicfg %#x\n", mh_iova, chdboff, erdboff,
+	    chip_rd(0x10));
+	/* all event ring elements to the chip, and the doorbells (mhi_ready_state_transition) */
+	for (int r = 0; r < 2; r++) {
+		struct mhi_ctx *x = (struct mhi_ctx *)(mh + O_ER + r * sizeof(struct mhi_ctx));
+		x->wp = mh_iova + er_off[r] + (er_n[r] - 1) * 16;
+		mh_clean(O_ER, 2 * sizeof(struct mhi_ctx));
+		mh_db(erdboff + 8 * r, x->wp);
+	}
+	/* M0 */
+	v = chip_rd(0x38);
+	chip_wr(0x38, (v & ~(0xffu << 8) & ~2u) | 2u << 8);
+	for (int i = 0; i < 5000 && !mh_m0; i++) {
+		mh_events_poll();
+		if ((chip_rd(0x48) >> 8 & 0xff) == 2) {
+			mh_m0 = 1;
+		}
+		delay(1000);
+	}
+	printf("SWEET WLAN: mhi host: M0 %s (status %#x ctrl %#x ee %u), %u events\n", mh_m0 ? "reached" : "NOT reached",
+	    chip_rd(0x48), chip_rd(0x38), chip_rd(m->bhioff + 0x28), mh_events);
+	wlan_note(7, "M0 %u st %#x ee %u ev %u", mh_m0, chip_rd(0x48), chip_rd(m->bhioff + 0x28), mh_events);
+	if (!mh_m0) {
+		return;
+	}
+
+	/* BHIe: the whole image in 512 KB segments, the vector table after them (mhi_alloc_bhie_table) */
+	uint32_t segs = (fw_bytes + 0x7ffffu) / 0x80000u;
+	vm_offset_t img = 0, vec = 0;
+	uint64_t img_iova, vec_iova;
+	if (kmem_alloc(kernel_map, &img, round_page(fw_bytes), KMA_KOBJECT | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS ||
+	    kmem_alloc(kernel_map, &vec, round_page(segs * 16), KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) !=
+	    KERN_SUCCESS) {
+		printf("SWEET WLAN: bhie: no memory\n");
+		return;
+	}
+	memcpy((void *)img, fw, fw_bytes);
+	if (wlan_dma_map(NULL, (void *)img, fw_bytes, &img_iova)) {
+		return;
+	}
+	uint64_t *ve = (uint64_t *)vec;
+	for (uint32_t i = 0; i < segs; i++) {
+		ve[2 * i] = img_iova + (uint64_t)i * 0x80000u;
+		ve[2 * i + 1] = (i + 1 < segs) ? 0x80000u : fw_bytes - i * 0x80000u;
+	}
+	if (wlan_dma_map(NULL, (void *)vec, segs * 16, &vec_iova)) {
+		return;
+	}
+	uint32_t be = m->bhieoff;
+	chip_wr(be + 0x30, (uint32_t)(vec_iova >> 32));
+	chip_wr(be + 0x2c, (uint32_t)vec_iova);
+	chip_wr(be + 0x34, segs * 16);
+	chip_wr(be + 0x3c, (chip_rd(be + 0x3c) & ~0x3fffffffu) | 0x2bad1e5u);
+	printf("SWEET WLAN: bhie: %u bytes in %u segments at chip %#llx, vector table %#llx; doorbell rung\n", fw_bytes, segs,
+	    img_iova, vec_iova);
+	uint32_t st = 0;
+	unsigned ms;
+	for (ms = 0; ms < 30000; ms++) {
+		st = chip_rd(be + 0x44);
+		if (st >> 30) {
+			break;
+		}
+		if (ms % 50 == 0) {
+			mh_events_poll();
+		}
+		delay(1000);
+	}
+	printf("SWEET WLAN: bhie: txvecstatus %#x after %u ms (2 = done, 3 = error); ee %u\n", st, ms, chip_rd(m->bhioff + 0x28));
+	/* mission mode: EE 2 (AMSS) */
+	uint32_t ee = 0;
+	for (ms = 0; ms < 30000; ms++) {
+		ee = chip_rd(m->bhioff + 0x28);
+		if (ms % 20 == 0) {
+			mh_events_poll();
+		}
+		if (ee == 2 || mh_ee_ev == 2) {
+			break;
+		}
+		delay(1000);
+	}
+	mh_events_poll();
+	printf("SWEET WLAN: mhi host: EE %u (event EE %u) after %u ms, status %#x, %u events -- %s\n", ee, mh_ee_ev, ms,
+	    chip_rd(0x48), mh_events, ee == 2 ? "MISSION MODE" : "no mission mode");
+	wlan_note(7, "bhie %#x EE %u ev %u %s", st, ee, mh_events, ee == 2 ? "AMSS" : "");
+}
+
 static uint32_t wlan_stage;
 
 static void
@@ -693,6 +920,8 @@ wlan_stage2(void *arg, wait_result_t wr)
 				p.fw_v1.bytes = (uint32_t)s20;
 			}
 		}
+		wlan_fw_full = p.fw_v1.data;
+		wlan_fw_full_bytes = p.fw_v1.bytes;
 		if (p.fw_v1.data && p.fw_v1.bytes) {
 			vm_offset_t copy = 0;
 			uint32_t n = p.fw_v1.bytes < 0x80000u ? p.fw_v1.bytes : 0x80000u, cut = 0;
@@ -741,6 +970,11 @@ wlan_stage2(void *arg, wait_result_t wr)
 	}
 	ms = lemonadep_wlan_mhi_up(&io, &p, &m, mstop);
 	printf("SWEET WLAN: mhi status=%d phase=%d\n", ms, m.phase);
+	if (ms == LemonadepMhiOk && m.phase >= LemonadepMhiPhaseDone && wlan_fw_full && wlan_fw_full_bytes) {
+		wlan_bar = m.bar_pa - LEMONADEP_PCIE0_MEM_PA;
+		wlan_window = ~0u;
+		wlan_mhi_host(&m, wlan_fw_full, wlan_fw_full_bytes);
+	}
 	wlan_note(3, "mhi st=%d ph=%d bar %#x", ms, m.phase, m.bar_pa);
 	wlan_note(4, "socver %#x ee %u bhi %#x", m.soc_hw_version, m.ee, m.bhi_status0);
 	wlan_note(5, "smmu scr0 %#x id0 %#x", m.scr0, m.id0);
