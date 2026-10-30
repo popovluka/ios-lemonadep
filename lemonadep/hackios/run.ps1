@@ -1,6 +1,8 @@
 # Boot HackiOS on lemonadep from Windows with the stock fastboot (no WSL USB passthrough needed).
 # The phone must be in the bootloader's fastboot. Images come from build-boot.sh.
 param([string]$Dir = "$PSScriptRoot\..\out\hackios")
+# a current fastboot: Touch Portal's 28.0.3 comes first on PATH here and loses the loader once a run starts
+$env:PATH = "C:\platform-tools;$env:PATH"
 
 fastboot boot "$Dir\lemonadep-boot.img"
 # the XNU loader enumerates as fastboot with serial XNULOADER, product xnuloader, ~10 s later

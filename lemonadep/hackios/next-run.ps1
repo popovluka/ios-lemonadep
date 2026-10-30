@@ -1,6 +1,7 @@
 # Wait for a run to hand back to the loader, save its log, then start the next run payload
 # (the system image stays resident in the loader, so it is not uploaded again).
 param([string]$Dir = "$PSScriptRoot\..\out\hackios", [string]$Log = "run.log", [int]$WaitMinutes = 20, [switch]$NoStart)
+$env:PATH = "C:\platform-tools;$env:PATH"    # a current fastboot (see run.ps1)
 
 function fb([string]$a, [int]$t = 15) {
     $j = Start-Job -ArgumentList $a { param($a) cmd /c "fastboot -s XNULOADER $a 2>&1" }

@@ -1,0 +1,113 @@
+diff --git a/common/devices/lemonadep.conf b/common/devices/lemonadep.conf
+index a9e8549..5deb503 100644
+--- a/common/devices/lemonadep.conf
++++ b/common/devices/lemonadep.conf
+@@ -8,8 +8,8 @@ SOC="Qualcomm Snapdragon 888 (SM8350)"
+ # --- boot chain (phones) ---------------------------------------------------------------------------
+ # The phone boots a Mu-Silicium UEFI (Project Silicium) with `fastboot boot`; the UEFI starts our loader.
+ UEFI_TARGET=lemonadep
+-UEFI_FD=                        # a built SILICIUM_UEFI.fd; empty: Mu-Silicium/Build/<target>Pkg/... or prebuilt/uefi
+-DTB=none                        # none: ABL uses the phone's own (vendor_boot), not the OnePlus 9's
++UEFI_FD=/root/hakios/fz/Mu-Silicium/Build/lemonadepPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd   # the FD that reached the Silicium screen
++DTB=/root/hakios/fz/Mu-Silicium/Resources/DTBs/lemonadep.dtb   # the OnePlus 9 tree: without it the phone went to 900E crash dump (ios-sweet HANDOFF 2026-10-29)
+ BOOT_ARGS="--os_version 17.0.0 --os_patch_level 2035-06 --cmdline console=null"   # as the ios-sweet shim
+ # display test: -DFB_TEST_BASE=0xE4D00000 -DFB_TEST_STRIDE=4320 makes the boot shim paint a red band
+ # into ABL's framebuffer before anything else runs (see FbBandDxe in the UEFI port)
+diff --git a/xnu/files/bsd/dev/redwood_input.c b/xnu/files/bsd/dev/redwood_input.c
+index 1aff3ac..0decb3e 100644
+--- a/xnu/files/bsd/dev/redwood_input.c
++++ b/xnu/files/bsd/dev/redwood_input.c
+@@ -33,6 +33,8 @@ extern void loader_log_line(const char *line);
+  */
+ void redwood_tl(const char *format, ...) __printflike(1, 2);
+ 
++extern void lemonadep_wlan_init(void);
++
+ void
+ redwood_tl(const char *format, ...)
+ {
+@@ -225,5 +227,6 @@ redwood_input_init(void)
+ 	redwood_adreno_init();
+ 	redwood_dpu_init();
+ 	redwood_wifi_init();
++	lemonadep_wlan_init();         /* QCA6490 on PCIe0 (sweetwlan=N), from ios-sweet */
+ 	redwood_adsp_init();
+ }
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 4427401..60434e3 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -109,6 +109,42 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+ 
+ bsd/dev/monotonic.c optional monotonic
++bsd/dev/redwood_input.c		standard
++bsd/dev/redwood_virtio_input.c	standard
++bsd/dev/redwood_goodix.c	standard
++bsd/dev/redwood_synaptics.c	standard
++bsd/dev/redwood_buttons.c	standard
++bsd/dev/redwood_battery.c	standard
++bsd/dev/redwood_ufs.c	standard
++bsd/dev/redwood_ufshc.c	standard
++bsd/dev/redwood_net.c		standard
++bsd/dev/redwood_virtio_net.c	standard
++bsd/dev/redwood_apple80211.c	standard
++bsd/dev/redwood_cpufreq.c	standard
++bsd/dev/redwood_adreno.c	standard
++bsd/dev/redwood_dpu.c	standard
++bsd/dev/redwood_gauge.c	standard
++bsd/dev/redwood_audio.c		standard
++bsd/dev/redwood_virtio_sound.c	standard
++bsd/dev/redwood_speaker.c	standard
++bsd/dev/redwood_guard.c		standard
++bsd/dev/redwood_haptic.c		standard
++bsd/dev/redwood_torch.c		standard
++bsd/dev/redwood_camera.c	standard
++bsd/dev/redwood_mic.c		standard
++bsd/dev/redwood_wifi.c		standard
++bsd/dev/lemonadep_wlan.c		standard
++bsd/dev/sweet_rpmh.c		standard
++bsd/dev/redwood_adsp.c		standard
++bsd/dev/redwood_image.c		standard
++bsd/dev/redwood_virtio_blk.c	standard
++bsd/dev/redwood_sparse.c	standard
++bsd/dev/redwood_apfs_check.c	optional apfs
++bsd/dev/redwood_sound.c		standard
++bsd/dev/redwood_qmi.c		standard
++bsd/dev/redwood_wlfw.c		standard
++bsd/dev/redwood_lx.c		standard
++bsd/dev/redwood_sta.c		standard
+ bsd/dev/dev_perfmon.c optional config_perfmon
+ 
+ bsd/libkern/crc32.c			standard
+@@ -155,6 +191,14 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
+ bsd/miscfs/mockfs/mockfs_fsnode.c	optional mockfs
+ bsd/miscfs/mockfs/mockfs_vfsops.c	optional mockfs
+ bsd/miscfs/mockfs/mockfs_vnops.c	optional mockfs
++bsd/miscfs/apfs/apfs_deflate.c		optional apfs
++bsd/miscfs/apfs/apfs_zbitmap.c		optional apfs
++bsd/miscfs/apfs/apfs_lib.c		optional apfs
++bsd/miscfs/apfs/apfs_write.c		optional apfs
++bsd/miscfs/apfs/apfs_store.c		optional apfs
++bsd/miscfs/apfs/apfs_vfsops.c		optional apfs
++bsd/miscfs/apfs/apfs_vnops.c		optional apfs
++bsd/miscfs/ramfs/ramfs.c			optional ramfs
+ 
+ bsd/miscfs/routefs/routefs_ops.c	optional routefs
+ 
+@@ -361,6 +405,7 @@ bsd/security/audit/audit_syscalls.c		standard
+ bsd/security/audit/audit_worker.c		optional config_audit
+ 
+ bsd/pthread/pthread_shims.c		standard
++bsd/pthread/pthread_kext_static.c    standard
+ bsd/pthread/pthread_priority.c		standard
+ bsd/pthread/pthread_workqueue.c		standard
+ 
+@@ -383,6 +428,7 @@ bsd/kern/kern_debug.c			standard
+ bsd/kern/kern_symfile.c			standard
+ bsd/kern/kern_descrip.c			standard
+ bsd/kern/kern_guarded.c			standard
++bsd/kern/kern_minimac.c			optional config_macf
+ bsd/kern/kern_event.c			standard
+ bsd/kern/kern_control.c			optional networking
+ bsd/kern/kern_exec.c			standard

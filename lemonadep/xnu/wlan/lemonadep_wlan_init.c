@@ -88,6 +88,17 @@ wlan_checkpoint(void *c, const char *what)
 	delay((int)WLAN_CHECKPOINT_US);
 }
 
+static void
+wlan_trace(void *c, const char *what, uint32_t a, uint32_t b, uint32_t cc, unsigned ms)
+{
+	(void)c;
+	if (!strcmp(what, "bhi")) {
+		printf("SWEET WLAN: t=%u ms bhi_status=%#x ee=%u mhi_status=%#x\n", ms, a, b, cc);
+	} else {
+		printf("SWEET WLAN: t=%u ms %s ctrl=%#x ee=%u mhi_status=%#x\n", ms, what, a, b, cc);
+	}
+}
+
 static uint32_t wlan_stage;
 
 static void
@@ -97,7 +108,8 @@ wlan_stage2(void *arg, wait_result_t wr)
 	(void)wr;
 	const uint32_t stage = wlan_stage;
 	const lemonadep_wlan_io io = {.cookie = NULL, .read32 = wlan_read, .write32 = wlan_write,
-	    .rpmh_vote = wlan_vote, .delay_us = wlan_delay, .checkpoint = wlan_checkpoint};
+	    .rpmh_vote = wlan_vote, .delay_us = wlan_delay, .checkpoint = wlan_checkpoint,
+	    .trace = wlan_trace};
 	wlan_checkpoint(NULL, "stage 2 (boot log flushed first)");
 	/* Stage 2. Firmware blobs: wlanfw1 = amss.bin, wlanfw2 = amss20.bin. */
 	lemonadep_mhi_params p = {{0, 0}, {0, 0}};

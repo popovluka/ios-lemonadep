@@ -1,6 +1,7 @@
 # Fetch the running kernel's log from the XNU loader every $Every seconds (like xl's XL_FOLLOW),
 # into $Dir\live.txt (the latest) and live-N.txt (each one kept).
 param([string]$Dir = "$PSScriptRoot\..\out\hackios", [int]$Every = 20, [int]$Minutes = 15)
+$env:PATH = "C:\platform-tools;$env:PATH"    # a current fastboot (see run.ps1)
 
 $end = (Get-Date).AddMinutes($Minutes); $n = 0
 while ((Get-Date) -lt $end) {

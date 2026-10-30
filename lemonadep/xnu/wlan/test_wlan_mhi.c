@@ -122,6 +122,17 @@ mwrite(void *c, unsigned w, uint32_t off, uint32_t v)
 	return 0;
 }
 static void mdelay(void *c, unsigned us) { (void)c; (void)us; }
+static const void *mapped_data;
+static uint32_t mapped_bytes;
+static int
+tmap(void *c, const void *data, uint32_t bytes, uint64_t *dma)
+{
+	(void)c;
+	mapped_data = data;
+	mapped_bytes = bytes;
+	*dma = 0xa0000000ull;
+	return 0;
+}
 
 static void
 reset(void)
@@ -286,6 +297,32 @@ main(void)
 	want_pa = 0;
 	st = lemonadep_wlan_mhi_up(&io, &p, &r, LemonadepMhiPhaseNone);
 	CHECK(st == LemonadepMhiBhiTimeout && r.bhi_ms == LEMONADEP_MHI_TIMEOUT_MS);
+
+	/* ---- translated (io->dma_map): the SMR that would block BHI is ignored, the chip is
+	 * given the mapped address, and the SMMU is never written by this code ---- */
+	{
+		static const uint8_t image[16];
+		const lemonadep_wlan_io tio = {.cookie = NULL, .read32 = mread, .write32 = mwrite, .delay_us = mdelay,
+		    .dma_map = tmap};
+		lemonadep_mhi_params tp = p;
+		tp.fw_v2.data = image;
+		reset();
+		*reg(WlanWinSmmu, SMMU_SMR(2)) = SMMU_SMR_VALID | 1u << 16 | 0x1c00u;
+		*reg(WlanWinSmmu, SMMU_S2CR(2)) = 0x00000005u;
+		want_pa = 0xa0000000ull;
+		want_size = LEMONADEP_MHI_SBL_BYTES;
+		mapped_data = NULL;
+		st = lemonadep_wlan_mhi_up(&tio, &tp, &r, LemonadepMhiPhaseNone);
+		CHECK(st == LemonadepMhiOk && r.iommu && r.fw_dma == 0xa0000000ull && r.phase == LemonadepMhiPhaseDone);
+		CHECK(mapped_data == image && mapped_bytes == LEMONADEP_MHI_SBL_BYTES);
+		CHECK(*reg(WlanWinSmmu, SMMU_S2CR(2)) == 0x00000005u && !r.smmu_written);
+		/* no image in memory: refused before any doorbell */
+		tp.fw_v2.data = NULL;
+		reset();
+		st = lemonadep_wlan_mhi_up(&tio, &tp, &r, LemonadepMhiPhaseNone);
+		CHECK(st == LemonadepMhiNoFirmware);
+		CHECK(*reg(WlanWinMem, r.bar_pa - LEMONADEP_PCIE0_MEM_PA + BHIOFF + BHI_IMGTXDB) == 0);
+	}
 
 	for (unsigned i = 0; i < WlanWinCount; ++i) free(win[i]);
 	printf("test_wlan_mhi %s (%d failures)\n", fails ? "FAILED" : "ok", fails);

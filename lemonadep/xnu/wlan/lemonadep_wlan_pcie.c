@@ -39,6 +39,14 @@ typedef struct {
 	/* Optional (stage 2): called before each access that could take the SoC
 	 * down, so the kernel can log it and let the log reach the disk first. */
 	void (*checkpoint)(void *cookie, const char *what);
+	/* Optional (stage 2): a state change while polling the chip, logged
+	 * without waiting (a, b, c are register values, ms the poll time). */
+	void (*trace)(void *cookie, const char *what, uint32_t a, uint32_t b, uint32_t c, unsigned ms);
+	/* Optional (stage 2): make `bytes` of kernel memory at `data` visible to
+	 * the chip through an SMMU translation context and return the chip-side
+	 * address. When set, the SMMU bypass entry of stage 14 is not attempted
+	 * (on this phone the hypervisor turns bypass into fault). 0 on success. */
+	int (*dma_map)(void *cookie, const void *data, uint32_t bytes, uint64_t *dma);
 } lemonadep_wlan_io;
 
 typedef enum {

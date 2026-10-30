@@ -51,11 +51,13 @@ typedef enum {
 	LemonadepMhiBhiTimeout,
 	LemonadepMhiReadyTimeout,
 	LemonadepMhiSysErr,
+	LemonadepMhiDmaMapFailed,     /* io->dma_map refused the image */
 } lemonadep_mhi_status;
 
 typedef struct {
 	uint64_t pa;                  /* physical address the chip reads the image from */
 	uint32_t bytes;
+	const void *data;             /* the image in kernel memory, for io->dma_map */
 } lemonadep_mhi_fw;
 
 typedef struct {
@@ -80,6 +82,8 @@ typedef struct {
 	/* BHI */
 	const char *fw_name;
 	uint64_t fw_pa;
+	uint64_t fw_dma;              /* what IMGADDR was given: fw_pa, or io->dma_map's address */
+	bool iommu;                   /* the image went through io->dma_map */
 	uint32_t sbl_bytes, bhi_status, bhi_errcode, bhi_errdbg[3];
 	unsigned bhi_ms;
 	/* READY */
@@ -218,7 +222,7 @@ lemonadep_wlan_mhi_up(const lemonadep_wlan_io *io, const lemonadep_mhi_params *p
 	 * (valid, ID, mask 0), each read back as arm_smmu_write_smr() does (the
 	 * write can be refused). An entry that already matches is left alone. */
 	MPHASE(LemonadepMhiPhaseRegs, LemonadepMhiPhaseSmmu);
-	if (!r->smmu_bypass && r->smr_index < 0) {
+	if (!io->dma_map && !r->smmu_bypass && r->smr_index < 0) {
 		if (r->smr_free < 0) {
 			return LemonadepMhiSmmuNoFreeEntry;
 		}
@@ -292,24 +296,60 @@ lemonadep_wlan_mhi_up(const lemonadep_wlan_io *io, const lemonadep_mhi_params *p
 	const lemonadep_mhi_fw *fw = major == LEMONADEP_MHI_FW_V2 ? &p->fw_v2 : &p->fw_v1;
 	r->fw_name = major == LEMONADEP_MHI_FW_V2 ? "amss20.bin" : "amss.bin";
 	r->fw_pa = fw->pa;
-	if (!fw->bytes || !fw->pa || fw->pa + fw->bytes > LEMONADEP_MHI_DMA_LIMIT) {
-		return LemonadepMhiNoFirmware;
+	if (io->dma_map) {
+		/* Translated: the chip gets an SMMU address for the image. */
+		if (!fw->bytes || !fw->data) {
+			return LemonadepMhiNoFirmware;
+		}
+		r->sbl_bytes = fw->bytes < LEMONADEP_MHI_SBL_BYTES ? fw->bytes : LEMONADEP_MHI_SBL_BYTES;
+		if (io->dma_map(io->cookie, fw->data, r->sbl_bytes, &r->fw_dma)) {
+			return LemonadepMhiDmaMapFailed;
+		}
+		r->iommu = true;
+	} else {
+		if (!fw->bytes || !fw->pa || fw->pa + fw->bytes > LEMONADEP_MHI_DMA_LIMIT) {
+			return LemonadepMhiNoFirmware;
+		}
+		if (!r->smmu_bypass) {
+			return LemonadepMhiSmmuNotBypass;
+		}
+		r->sbl_bytes = fw->bytes < LEMONADEP_MHI_SBL_BYTES ? fw->bytes : LEMONADEP_MHI_SBL_BYTES;
+		r->fw_dma = fw->pa;
 	}
-	if (!r->smmu_bypass) {
-		return LemonadepMhiSmmuNotBypass;
-	}
-	r->sbl_bytes = fw->bytes < LEMONADEP_MHI_SBL_BYTES ? fw->bytes : LEMONADEP_MHI_SBL_BYTES;
 	CHECKPOINT("BHI doorbell (chip DMA starts)");
 	MTRY(bar_wr(io, r, r->bhioff + BHI_INTVEC, 0));
 	MTRY(bar_wr(io, r, r->bhioff + BHI_STATUS, 0));
-	MTRY(bar_wr(io, r, r->bhioff + BHI_IMGADDR_HIGH, (uint32_t)(fw->pa >> 32)));
-	MTRY(bar_wr(io, r, r->bhioff + BHI_IMGADDR_LOW, (uint32_t)fw->pa));
+	MTRY(bar_wr(io, r, r->bhioff + BHI_IMGADDR_HIGH, (uint32_t)(r->fw_dma >> 32)));
+	MTRY(bar_wr(io, r, r->bhioff + BHI_IMGADDR_LOW, (uint32_t)r->fw_dma));
 	MTRY(bar_wr(io, r, r->bhioff + BHI_IMGSIZE, r->sbl_bytes));
 	/* Session id: Linux uses a random non-zero value; any non-zero one does. */
 	MTRY(bar_wr(io, r, r->bhioff + BHI_IMGTXDB, 0x1c0ffee & BHI_TXDB_SEQ_MASK));
+	/* Then 3 s with no BAR access at all: a crash inside this window is the
+	 * chip's DMA (or the bus behind it), not our register reads. */
+	if (io->trace) {
+		io->trace(io->cookie, "doorbell rung, 3 s without BAR reads", 0, 0, 0, 0);
+		io->delay_us(io->cookie, 3000000u);
+		io->trace(io->cookie, "quiet window over, polling", 0, 0, 0, 0);
+	}
+	/* The first BHI run on the phone hard-crashed the SoC some time after this
+	 * doorbell (logs/lemonadep-wlan11.txt), with nothing logged in between:
+	 * every change of BHI status / EE / MHI status, and a heartbeat each
+	 * second, now goes to the log. */
+	uint32_t last_s = ~0u, last_ee = ~0u, last_st = ~0u;
 	for (r->bhi_ms = 0;; ++r->bhi_ms) {
 		MTRY(bar_rd(io, r, r->bhioff + BHI_STATUS, &r->bhi_status));
 		const uint32_t s = r->bhi_status >> 30;
+		if (io->trace) {
+			uint32_t ee, st;
+			MTRY(bar_rd(io, r, r->bhioff + BHI_EXECENV, &ee));
+			MTRY(bar_rd(io, r, MHI_STATUS, &st));
+			if (r->bhi_status != last_s || ee != last_ee || st != last_st || r->bhi_ms % 1000u == 0) {
+				io->trace(io->cookie, "bhi", r->bhi_status, ee, st, r->bhi_ms);
+				last_s = r->bhi_status;
+				last_ee = ee;
+				last_st = st;
+			}
+		}
 		if (s == BHI_STATUS_SUCCESS) {
 			break;
 		}
@@ -332,6 +372,13 @@ lemonadep_wlan_mhi_up(const lemonadep_wlan_io *io, const lemonadep_mhi_params *p
 	for (r->ready_ms = 0;; ++r->ready_ms) {
 		MTRY(bar_rd(io, r, MHI_CTRL, &r->ready_ctrl));
 		MTRY(bar_rd(io, r, MHI_STATUS, &r->ready_status));
+		if (io->trace && (r->ready_status != last_st || r->ready_ctrl != last_s || r->ready_ms % 1000u == 0)) {
+			uint32_t ee;
+			MTRY(bar_rd(io, r, r->bhioff + BHI_EXECENV, &ee));
+			io->trace(io->cookie, "ready", r->ready_ctrl, ee, r->ready_status, r->ready_ms);
+			last_st = r->ready_status;
+			last_s = r->ready_ctrl;
+		}
 		if (r->ready_status & MHI_STATUS_SYSERR) {
 			MTRY(bar_rd(io, r, r->bhioff + BHI_EXECENV, &r->ready_ee));
 			return LemonadepMhiSysErr;
