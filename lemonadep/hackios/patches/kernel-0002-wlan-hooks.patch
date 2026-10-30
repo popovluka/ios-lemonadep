@@ -1,5 +1,5 @@
 diff --git a/common/devices/lemonadep.conf b/common/devices/lemonadep.conf
-index a9e8549..5deb503 100644
+index a9e8549..3e084c0 100644
 --- a/common/devices/lemonadep.conf
 +++ b/common/devices/lemonadep.conf
 @@ -8,8 +8,8 @@ SOC="Qualcomm Snapdragon 888 (SM8350)"
@@ -13,21 +13,31 @@ index a9e8549..5deb503 100644
  BOOT_ARGS="--os_version 17.0.0 --os_patch_level 2035-06 --cmdline console=null"   # as the ios-sweet shim
  # display test: -DFB_TEST_BASE=0xE4D00000 -DFB_TEST_STRIDE=4320 makes the boot shim paint a red band
  # into ABL's framebuffer before anything else runs (see FbBandDxe in the UEFI port)
+@@ -33,7 +33,7 @@ WIFI_ATH11K=0                   # 1: build the ath11k Wi-Fi driver into the kern
+ # touch_power=1: the Synaptics S3908, its supply switched on through RPMh (ldoc3) and its two
+ # enable pins (bsd/dev/redwood_synaptics.c). Since then: gpu=1 (Adreno 660), battery=1 (BQ28Z610 gauge),
+ # backlight=1 (DCS brightness), adsp=1 (the audio DSP, which charges); docs/lemonadep.md. No Wi-Fi or sound yet.
+-BOOTARGS="cpus=8 bootcpu=7 cpufreq=1 buttons=1 touchscreen=1 touch_power=1 gpu=1 battery=1 backlight=1 adsp=1"  # gpu=1: needs fw-gpu/ (from vendor_a); battery=1: the BQ28Z610 gauge; backlight=1: brightness by DCS 0x51; adsp=1: the audio DSP, which charges (needs fw-audio/ from modem_a)
++BOOTARGS="cpus=8 bootcpu=7 cpufreq=1 buttons=1 touchscreen=1 touch_power=1 gpu=1 battery=1 backlight=1 adsp=1 sweetwlan=17 wlan_msi=1 wlan_ath=1 wifi_join=1 wifi=1"  # Wi-Fi: QCA6490 + ath11k, joins fw/network (lemonadep_wlan.c); gpu=1: needs fw-gpu/ (from vendor_a); battery=1: the BQ28Z610 gauge; backlight=1: brightness by DCS 0x51; adsp=1: the audio DSP, which charges (needs fw-audio/ from modem_a)
+ DEFAULT_SECS=900
+ USERLAND_VARS="GL=1 ADSP=1"     # extra variables for userland/build.sh: GL=1, Mesa for the Adreno 660 (gpu=1); ADSP=1, the audio DSP image in the small image (adsp=1)
+ # The phone's own firmware, taken off it through the loader (never in the repository): docs/lemonadep.md.
 diff --git a/xnu/files/bsd/dev/redwood_input.c b/xnu/files/bsd/dev/redwood_input.c
-index 1aff3ac..29faf17 100644
+index 1aff3ac..7c3c87a 100644
 --- a/xnu/files/bsd/dev/redwood_input.c
 +++ b/xnu/files/bsd/dev/redwood_input.c
-@@ -33,6 +33,9 @@ extern void loader_log_line(const char *line);
+@@ -33,6 +33,10 @@ extern void loader_log_line(const char *line);
   */
  void redwood_tl(const char *format, ...) __printflike(1, 2);
  
 +extern void lemonadep_wlan_init(void);
++extern void lemonadep_wlan_reserve(void);
 +extern void lemonadep_logkeep_init(void);
 +
  void
  redwood_tl(const char *format, ...)
  {
-@@ -214,6 +217,7 @@ redwood_input_init(void)
+@@ -214,6 +218,7 @@ redwood_input_init(void)
  		printf("redwood-touch: cannot create the device\n");
  	}
  	exit_call = thread_call_allocate(exit_hold_elapsed, NULL);
@@ -35,7 +45,11 @@ index 1aff3ac..29faf17 100644
  	redwood_cpufreq_init();
  	redwood_virtio_input_init();
  	redwood_goodix_init();
-@@ -225,5 +229,6 @@ redwood_input_init(void)
+@@ -222,8 +227,10 @@ redwood_input_init(void)
+ 	redwood_battery_init();
+ 	redwood_ufs_init();
+ 	redwood_net_init();
++	lemonadep_wlan_reserve();       /* before the GPU: the radio's 64 MB in one piece (wlan_ath=1) */
  	redwood_adreno_init();
  	redwood_dpu_init();
  	redwood_wifi_init();

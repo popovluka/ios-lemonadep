@@ -1422,6 +1422,17 @@ wlan_mhi_host(const lemonadep_mhi_result *m, const void *fw, uint32_t fw_bytes)
 
 static uint32_t wlan_stage;
 
+/* Called before the GPU comes up (redwood_input.c): the driver's pool, while 64 MB in one piece are still there. */
+extern void redwood_lx_reserve(unsigned long size);
+void
+lemonadep_wlan_reserve(void)
+{
+	uint32_t ath = 0;
+	if (PE_parse_boot_argn("wlan_ath", &ath, sizeof(ath)) && ath) {
+		redwood_lx_reserve(64ul << 20);        /* lx_base.c POOL_SIZE */
+	}
+}
+
 static void
 wlan_stage2(void *arg, wait_result_t wr)
 {

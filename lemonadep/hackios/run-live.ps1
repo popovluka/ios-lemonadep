@@ -2,7 +2,9 @@
 # system image already resident: -Resident), ask for the result every 3 s until it is not "running",
 # then fetch the whole log (loader + kernel message buffer) into $Dir\$Log. The phone stays in the
 # loader. Needs the loader's USB alive during the run (see HANDOFF: which drivers break it).
-param([string]$Dir = "$PSScriptRoot\..\out\hackios", [string]$Log = "run.log", [int]$Minutes = 5, [switch]$Resident)
+# -Patient: a run whose drivers silence the loader's USB is waited out (polls until -Minutes), not given up on.
+param([string]$Dir = "$PSScriptRoot\..\out\hackios", [string]$Log = "run.log", [int]$Minutes = 5, [switch]$Resident,
+    [switch]$Patient)
 $env:PATH = "C:\platform-tools;$env:PATH"
 function fb([string]$a, [int]$t = 8) {
     $j = Start-Job -ArgumentList $a { param($a) cmd /c "fastboot $a 2>&1" }
@@ -22,7 +24,10 @@ while (((Get-Date) - $t0).TotalMinutes -lt $Minutes) {
     Start-Sleep 3
     $r = fb "getvar result"
     if ($r -match 'result:' -and $r -notmatch 'running') { "$([int]((Get-Date) - $t0).TotalSeconds)s: $($r -replace ' Finished.*','')"; break }
-    if ($r -notmatch 'result:') { if (++$dead -ge 10) { "loader stopped answering"; exit 1 } } else { $dead = 0 }
+    if ($r -notmatch 'result:') {
+        if (++$dead -eq 10) { "$([int]((Get-Date) - $t0).TotalSeconds)s: loader stopped answering" }
+        if ($dead -ge 10 -and -not $Patient) { exit 1 }
+    } else { if ($dead -ge 10) { "$([int]((Get-Date) - $t0).TotalSeconds)s: loader answers again" }; $dead = 0 }
 }
 Remove-Item "$Dir\$Log.raw" -ErrorAction SilentlyContinue
 fb "oem log" 10 | Out-Null

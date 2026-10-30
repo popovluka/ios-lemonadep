@@ -96,7 +96,14 @@ QCA6490 (17cb:1103, SOC_HW_VERSION 0x400c0110 = major 1 -> amss.bin, as cnss2 pi
   aid; conf_tx lands within 10 ms). Only visible difference: the first vdev start takes 100 ms, later
   ones 17. Workaround: give up after `wifi_eapol_ms` (1500) without an EAPOL frame and retry (lx_bus,
   3 tries): joined 3 of 3, 6.3 s after radio start, DHCP 3 s later. Root cause still open.
-- Open: `wifi_station=1` waits for a request nobody
+- **Full boot (2026-10-30):** with every driver (GPU, touch, battery, backlight, ADSP) the loader's USB
+  stays alive (`run-live.ps1 -Patient` waits out a silent loader anyway), GPU step 21 done, Wi-Fi joins
+  and en0 gets its address 4 s later. Needed: the driver's 64 MB pool **reserved before the GPU comes up**
+  (`lemonadep_wlan_reserve()` -> `redwood_lx_reserve()`, called from redwood_input.c before
+  redwood_adreno_init); afterwards no 64 MB in one piece was left. The Wi-Fi boot-args are now in
+  lemonadep.conf's BOOTARGS.
+- Open: a panic at the end of Wi-Fi runs ("Console I/O from interrupt-disabled context", on the way back
+  to the loader); `wifi_station=1` waits for a request nobody
   makes here; firmware does not answer mode-off at teardown; Wi-Fi not yet combined with GPU/touch args
   (one of those drivers kills the loader's USB, which carries the live log).
 
