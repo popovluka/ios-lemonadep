@@ -1,5 +1,5 @@
 diff --git a/xnu/files/bsd/dev/redwood_lx.c b/xnu/files/bsd/dev/redwood_lx.c
-index a6786fa..c48be86 100644
+index a6786fa..e222f4d 100644
 --- a/xnu/files/bsd/dev/redwood_lx.c
 +++ b/xnu/files/bsd/dev/redwood_lx.c
 @@ -60,6 +60,24 @@ lx_os_free(void *memory, unsigned long size)
@@ -39,6 +39,19 @@ index a6786fa..c48be86 100644
  	    KERN_SUCCESS) {
  		say("lx: no %lu bytes of memory in one piece\n", size);
  		return NULL;
+@@ -347,6 +368,12 @@ redwood_lx_net_early(void)
+ 	}
+ }
+ 
++int
++lx_os_net_address(unsigned char *address)
++{
++	return lx_link_attached && redwood_net_address(address);
++}
++
+ void
+ lx_os_net_link(int up)
+ {
 diff --git a/xnu/files/bsd/dev/redwood_wifi.c b/xnu/files/bsd/dev/redwood_wifi.c
 index c7751c1..f9ac0ec 100644
 --- a/xnu/files/bsd/dev/redwood_wifi.c

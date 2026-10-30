@@ -44,7 +44,38 @@ after the join (lx-0001), and `redwood_sta_attach()` posts LINK up when the stat
 Known: dark mode did not survive a power-off once while a moved icon did -- untested whether cfprefsd
 had written it before the save.
 
-Wi-Fi first association still needs the retry. Searched for the first-association EAPOL
+Wi-Fi first association still needs the retry.
+
+### Wi-Fi vs iOS's network stack (2026-10-30 evening) -- what was found, what is fixed
+
+Symptoms: status bar full bars, en0 has an IP, but Safari spins, Weather/Maps tiles/Music say offline;
+joining from Settings failed. Fixed (kernel-0004, lx-0001, lemonadep_wlan.c, build scripts):
+1. **configd had no network service for en0** ("configd has no network service for en0", net_test): en0
+   appeared seconds after configd started. Now made at kernel start (`lemonadep_wlan_reserve()` ->
+   `redwood_lx_net_early()`) from `wifi_mac` (random locally administered, made once in
+   `~/fkernel/fw-wlan/mac`, not in git; build scripts add it). configd now makes the "Wi-Fi" service and
+   runs DHCP itself. Same finding in y2sios (docs/plans/06-wireless.md) and ios-flame (PixOS notes 26).
+2. **Settings join** -- wifid's own log (`OSLOG=com.apple.wifid` image build) showed `Failed to associate
+   with Popov: -3903` before any ASSOCIATE. Causes, all fixed: set 422 and 419 refused (now taken as no-ops);
+   get 29 DEAUTH refused (now "no reason"); SIOCSIFLLADDR refused (Private Wi-Fi Address: now accepted, and
+   the radio re-creates its interface with en0's address before a join); CARD_CAPABILITIES lacked TKIP/
+   TKIP-MIC/WPA1 (bits 1, 12, 13) so a WPA/WPA2-mixed network with a TKIP group cipher was "unsupported".
+   Settings join works (user, 18:3x); the network is remembered in /var (persists).
+3. Not the cause (measured): large UDP/QUIC (`net_test quicvn`: 1200-1400-byte QUIC packets answered by
+   example.com, Google, Cloudflare; the ISP drops >512-byte DNS only), TLS/trust (`net_test fetch
+   https://example.com/` 200 as root), reachability (flags 0x2).
+
+STILL BROKEN: Safari pages / Weather / Maps tiles / Music "offline". `State:/Network/Interface/en0/
+CaptiveNetwork = { Stage = Evaluate }` never leaves Evaluate although captiveagent logs `Response Code: 200
+... Result = Success` (both join modes). Next: find who publishes the Stage (configd's
+CaptiveNetworkSupport.bundle logs nothing even with OSLOG=com.apple.configd) and why the success is not
+taken; Safari's WebKit networking (pid com.apple.WebKit) does fetch data (1.6 MB from Akamai in one run).
+wifid's auto-join at boot (wifi_station=1) tries once before the radio is up and does not retry for
+minutes, so the profile keeps `wifi_join=1`.
+Dev-loop caveat: re-running without a power cycle can panic early ("element modified after free"): the
+chip, left running by `oem stop`, still DMAs. A rerun works; real boots are unaffected.
+Diagnostics: `net_test bigudp/bigtcp/dnstxt/quicvn` (userland/src/net_test.m, not in a patch yet),
+`RC_JOBS=rc.jobs.lnet`, `OSLOG='com.apple.wifid com.apple.captiveagent'` on the image build. Searched for the first-association EAPOL
 loss online (ath11k list, WCN6855 fixes): no matching upstream report; the 7.0.14 driver already has
 the related upstream fixes (vdev-start rate reset, wcn6855 rx ops). Port-side suspects left: REO
 status ring handling with polled interrupts (`wifi_irq=0`) at the first peer's TID setup, and the slow

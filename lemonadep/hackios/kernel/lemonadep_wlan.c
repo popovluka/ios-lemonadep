@@ -1422,14 +1422,22 @@ wlan_mhi_host(const lemonadep_mhi_result *m, const void *fw, uint32_t fw_bytes)
 
 static uint32_t wlan_stage;
 
-/* Called before the GPU comes up (redwood_input.c): the driver's pool, while 64 MB in one piece are still there. */
+/*
+ * Called before the GPU comes up (redwood_input.c): the driver's pool, while 64 MB in one piece are still there.
+ * And en0 made now, from wifi_mac (the driver gives the radio the same address), not when the radio is up
+ * seconds later: configd makes its Wi-Fi network service only for an interface that is there when it
+ * starts, and without that service iOS never counts Wi-Fi as a route -- wifid gives up on joins from
+ * Settings and Safari waits on reachability for ever (other ports found the same: y2sios, ios-flame).
+ */
 extern void redwood_lx_reserve(unsigned long size);
+extern void redwood_lx_net_early(void);
 void
 lemonadep_wlan_reserve(void)
 {
 	uint32_t ath = 0;
 	if (PE_parse_boot_argn("wlan_ath", &ath, sizeof(ath)) && ath) {
 		redwood_lx_reserve(64ul << 20);        /* lx_base.c POOL_SIZE */
+		redwood_lx_net_early();                /* nothing without wifi_mac */
 	}
 }
 

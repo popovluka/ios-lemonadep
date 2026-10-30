@@ -34,6 +34,11 @@ FD_BASE=0x9FD00000
 STORE=${STORE-"ufs=2 ufs_write=1 var_store=1 var_store_every=1800"}
 [ -n "$ARGS" ] && BOOTARGS=$ARGS
 for w in $DROP; do BOOTARGS=$(echo " $BOOTARGS " | sed "s/ $w / /g; s/^ //; s/ $//"); done
+# wifi_mac: en0 is made at kernel start, before configd (lemonadep_wlan_reserve), and the radio takes the
+# same address. A random locally administered one, made once and kept in fw-wlan/mac (not in git).
+MACF=$FK/fw-wlan/mac
+[ -s "$MACF" ] || od -An -N5 -tx1 /dev/urandom | awk '{printf "02:%s:%s:%s:%s:%s\n", $1, $2, $3, $4, $5}' > "$MACF"
+case " $BOOTARGS " in *" wlan_ath=1 "*) BOOTARGS="$BOOTARGS wifi_mac=$(cat "$MACF")" ;; esac
 K=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837
 printf '%s %s\0' $DISKRD_PART ${DISKRD_OFFSET#0x} > out/diskrd.txt
 python3 xnuloader/mkpayload.py -o out/standalone-payload.bin loader.efi=xnuloader/loader.efi kernel=$K \

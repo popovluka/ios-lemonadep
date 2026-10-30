@@ -10,7 +10,7 @@ index 3e3fb9e..13a53fc 100644
  
  #endif
 diff --git a/wifi/lx/src/lx_80211.c b/wifi/lx/src/lx_80211.c
-index ea753f2..deaec45 100644
+index ea753f2..c372355 100644
 --- a/wifi/lx/src/lx_80211.c
 +++ b/wifi/lx/src/lx_80211.c
 @@ -1361,8 +1361,8 @@ protection(const struct lx_target *target, unsigned *group_cipher)
@@ -120,7 +120,29 @@ index ea753f2..deaec45 100644
  		lx_os_sleep(&radio->handshake, 20 * 1000000ull);
  	}
  	lx_os_unlock();
-@@ -2089,6 +2120,23 @@ lx_station_offer(void)
+@@ -1986,6 +2017,21 @@ boundary_join(const struct redwood_sta_join *what)
+ 	if (radio == NULL || !radio->registered) {
+ 		return (ENXIO);
+ 	}
++	{
++		/* iOS's Private Wi-Fi Address: en0's address changed before the join, and the interface on the radio follows */
++		unsigned char now[ETH_ALEN];
++
++		if (lx_os_net_address(now) && radio->vif != NULL && !is_zero_ether_addr(now) &&
++		    memcmp(now, radio->vif->addr, ETH_ALEN) != 0) {
++			station_down(radio);
++			memcpy(radio->hw.wiphy->perm_addr, now, ETH_ALEN);
++			error = station_up(radio);
++			lx_tell("lx: the interface takes en0's new address (iOS's private one): %d\n", error);
++			if (error != 0) {
++				return (error);
++			}
++		}
++	}
+ 	radio->joining = true;
+ 	error = station_join(radio, what);
+ 	radio->last_error = error;
+@@ -2089,6 +2135,23 @@ lx_station_offer(void)
  	return (0);
  }
  

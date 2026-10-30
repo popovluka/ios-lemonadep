@@ -1,5 +1,5 @@
 diff --git a/xnu/files/bsd/dev/redwood_apple80211.c b/xnu/files/bsd/dev/redwood_apple80211.c
-index e2674ee..f37170c 100644
+index e2674ee..311cf25 100644
 --- a/xnu/files/bsd/dev/redwood_apple80211.c
 +++ b/xnu/files/bsd/dev/redwood_apple80211.c
 @@ -294,7 +294,7 @@ get(struct apple80211req *request)
@@ -11,6 +11,74 @@ index e2674ee..f37170c 100644
  
  		return give(request, name, sizeof(name));
  	}
+@@ -307,7 +307,9 @@ get(struct apple80211req *request)
+ 		 * for a WPA2 network ("Unable to join").
+ 		 */
+ 		uint8_t bits[13] = { 0 };
+-		static const uint8_t has[] = { 2, 3, 6, 9, 10, 14, 17, 19 };
++		/* + TKIP, TKIP MIC and WPA (1, 12, 13): a WPA/WPA2 network with TKIP as its group cipher is otherwise one
++		 * the card "cannot" join, and wifid ends the join from Settings before asking (-3903) */
++		static const uint8_t has[] = { 1, 2, 3, 6, 9, 10, 12, 13, 14, 17, 19 };
+ 
+ 		for (unsigned i = 0; i < sizeof(has); i++) {
+ 			bits[has[i] / 8] |= (uint8_t)(1u << (has[i] % 8));
+@@ -364,6 +366,14 @@ get(struct apple80211req *request)
+ 		kfree_data(answer, sizeof(*answer));
+ 		return error;
+ 	}
++	case 29: {                              /* why the last link went (wifid asks it before a join from Settings, and */
++		struct {                        /* a refusal ends the join: -3903): nobody sent us away */
++			uint32_t version, reason;
++			uint8_t address[8];
++		} answer = { .version = 1 };
++
++		return give(request, &answer, sizeof(answer));
++	}
+ 	case 21:                                /* how the last join went (0: not over yet) */
+ 		lck_mtx_lock(&apple80211_lock);
+ 		request->req_val = (int32_t)join_result;
+@@ -575,6 +585,9 @@ set(const struct apple80211req *request, char *said, size_t said_size)
+ 		return set_join(request, said, said_size);
+ 	case 22:                                /* leave the network */
+ 		return redwood_sta_ask_leave();
++	case 422:                               /* asked by wifid between leaving and joining, with nothing in it: */
++	case 419:                               /* refused, it gives up the join from Settings (-3903, "Failed to */
++		return 0;                       /* associate"); 419 follows with 136 bytes. Taken, nothing to do */
+ 	case 19: {                              /* the radio's power */
+ 		struct {
+ 			uint32_t version, radios, state[4];
+diff --git a/xnu/files/bsd/dev/redwood_net.c b/xnu/files/bsd/dev/redwood_net.c
+index 27a8e03..5a2a9be 100644
+--- a/xnu/files/bsd/dev/redwood_net.c
++++ b/xnu/files/bsd/dev/redwood_net.c
+@@ -230,6 +230,14 @@ net_ioctl(ifnet_t ifp, u_long command, void *data)
+ 	case SIOCADDMULTI:
+ 	case SIOCDELMULTI:
+ 		break;                          /* the link hands us everything anyway */
++	case SIOCSIFLLADDR:
++		/*
++		 * wifid's Private Wi-Fi Address, just before a join: refused, the join from Settings is given up
++		 * (-3903). Taken: XNU sets the address itself after this answer, and the radio takes en0's
++		 * address as it is at the join (redwood_net_address()).
++		 */
++		error = net_link->wireless ? 0 : EOPNOTSUPP;
++		break;
+ 	default:
+ 		/* what iOS's Wi-Fi side asks of a radio's interface: bsd/dev/redwood_apple80211.c */
+ 		error = net_link->wireless ? redwood_apple80211_ioctl(command, data) : EOPNOTSUPP;
+@@ -368,6 +376,12 @@ redwood_net_attach(const struct redwood_net_link *link)
+ 	return true;
+ }
+ 
++bool
++redwood_net_address(uint8_t *address)
++{
++	return net_ifp != NULL && ifnet_lladdr_copy_bytes(net_ifp, address, ETHER_ADDR_LEN) == 0;
++}
++
+ void
+ redwood_net_init(void)
+ {
 diff --git a/xnu/files/bsd/dev/redwood_sta.c b/xnu/files/bsd/dev/redwood_sta.c
 index f4e0490..630477e 100644
 --- a/xnu/files/bsd/dev/redwood_sta.c
@@ -113,6 +181,30 @@ index efa2fda..ac04012 100644
  		} else {
  			printf("ufs: nothing takes writes: darwin is not among the partitions\n");
  		}
+diff --git a/xnu/files/bsd/sys/redwood_lx.h b/xnu/files/bsd/sys/redwood_lx.h
+index ef79d87..47b5394 100644
+--- a/xnu/files/bsd/sys/redwood_lx.h
++++ b/xnu/files/bsd/sys/redwood_lx.h
+@@ -66,6 +66,7 @@ int	 lx_os_network(unsigned char *name, unsigned *name_length, unsigned char *pa
+ 
+ /* ---- frames: the radio as what carries the machine's network interface ---- */
+ void	 lx_os_net_attach(const unsigned char *address);	/* there is a radio, and this is its address */
++int	 lx_os_net_address(unsigned char *address);	/* en0's address now (iOS may have changed it); 0: none */
+ void	 lx_os_net_link(int up);				/* frames can pass now (a network is joined) / no longer */
+ void	 lx_os_net_input(const unsigned char *frame, unsigned long length);	/* an Ethernet frame has arrived */
+ 
+diff --git a/xnu/files/bsd/sys/redwood_net.h b/xnu/files/bsd/sys/redwood_net.h
+index 41550ce..ad1d45e 100644
+--- a/xnu/files/bsd/sys/redwood_net.h
++++ b/xnu/files/bsd/sys/redwood_net.h
+@@ -53,6 +53,7 @@ bool redwood_net_attach(const struct redwood_net_link *link);
+ void redwood_net_input(const uint8_t *frame, size_t length);
+ /* Frames can pass now / can no longer pass. */
+ void redwood_net_link_state(bool up);
++bool redwood_net_address(uint8_t *address);    /* en0's address as it is now (iOS changes it: Private Wi-Fi Address) */
+ 
+ void redwood_net_init(void);            /* the links there are: each looks for its hardware (or its boot-arg) */
+ /* an Apple80211 request (SIOCGA80211, SIOCSA80211) for the interface of a radio: redwood_apple80211.c */
 diff --git a/userland/src/var_store.c b/userland/src/var_store.c
 --- a/userland/src/var_store.c
 +++ b/userland/src/var_store.c
