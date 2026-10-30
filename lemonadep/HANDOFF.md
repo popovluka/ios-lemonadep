@@ -84,9 +84,8 @@ Still broken, with causes: Weather numbers -- every WeatherKit request is signed
 ("AMSMescalFairPlay Init failed", "Error while creating local signature"); fairplayd exits at once on this
 port (furangelz's inject_fairplay.c: it never even asks IOKit), unsolved upstream. Maps tiles -- likely the
 same signing and/or VectorKit's Metal rendering (Metal for apps unfinished): not looked into.
-NOT INSTALLED STANDALONE YET: the system image with locationd (out/hackios/system-rd.bin, 2504359936 bytes)
-must be rewritten to userdata+16 GiB from TWRP (install-standalone.ps1 -SystemImage) and the new
-lemonadep-standalone.img flashed (-Boot). boot_b now holds the 21:00 image (Safari fix, no locationd).
+INSTALLED STANDALONE (23:40): system-rd.bin with locationd (2504359936 bytes, SHA-256 7ee10c6e...) at
+userdata+16 GiB, verified by read-back; boot_b flashed with the matching lemonadep-standalone.img.
 
 **SAFARI FIXED (21:00): pages and video load (user).** Root cause, found with a kernel stackshot of the
 hung processes (`stack_test -k NAME`, userland/src/stack_test.c: stack_snapshot_with_config as root, kcdata
