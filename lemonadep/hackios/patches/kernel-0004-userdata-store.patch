@@ -1,0 +1,165 @@
+diff --git a/xnu/files/bsd/dev/redwood_ufs.c b/xnu/files/bsd/dev/redwood_ufs.c
+index efa2fda..ac04012 100644
+--- a/xnu/files/bsd/dev/redwood_ufs.c
++++ b/xnu/files/bsd/dev/redwood_ufs.c
+@@ -78,6 +78,11 @@ extern void FlushPoC_DcacheRegion(vm_offset_t va, size_t length);   /* osfmk/arm
+ #define UFS_WRITE_FIRST    2042368ULL                  /* darwin's blocks of 4096 */
+ #define UFS_DARWIN_FIRST   25374720ULL                 /* its first LBA on the unit, as the GPT has it */
+ #define UFS_DARWIN_BLOCKS  5242875ULL
++/* lemonadep has no darwin: userdata of unit 0 from 20 GiB on (xnuloader/loader.c, BLOCK_USERDATA_*) */
++#define UFS_USERDATA_WRITE_FIRST 5242880ULL
++#define UFS_USERDATA_FIRST       2877512ULL
++#define UFS_USERDATA_BLOCKS      26767283ULL
++static uint64_t ufs_write_first = UFS_WRITE_FIRST;
+ 
+ struct loader_block_part {
+ 	char name[36];
+@@ -576,7 +581,7 @@ ufs_write(uint32_t part, uint64_t offset, const uint8_t *src, uint64_t len)
+ 	if (len == 0 || offset % nbs != 0 || len % nbs != 0) {
+ 		return EINVAL;          /* whole blocks only: nothing is read before a write */
+ 	}
+-	if (offset / nbs < UFS_WRITE_FIRST || offset > ufs_part_bytes(part) ||
++	if (offset / nbs < ufs_write_first || offset > ufs_part_bytes(part) ||
+ 	    len > ufs_part_bytes(part) - offset) {
+ 		/* the iOS volume, the cryptexes, and anything past the partition's end: never */
+ 		ufs_write_refused++;
+@@ -1500,14 +1505,18 @@ redwood_ufs_init(void)
+ 	if (PE_parse_boot_argn("ufs_write", &check, sizeof(check)) && check == 1) {
+ 		uint32_t offered = ufs_page->write_part_plus_one;
+ 
+-		if (offered == 0 || offered > ufs_parts || ufs_page->write_first != UFS_WRITE_FIRST) {
++		if (offered == 0 || offered > ufs_parts ||
++		    (ufs_page->write_first != UFS_WRITE_FIRST && ufs_page->write_first != UFS_USERDATA_WRITE_FIRST)) {
+ 			printf("ufs: the loader offers no partition to write into (ufs_write=1 on its command "
+ 			    "line too, and a loader that knows about writes)\n");
+ 		}
+ 		for (uint32_t i = 0; offered != 0 && i < ufs_parts; i++) {
+ 			const char *why = NULL;
++			uint64_t first = UFS_DARWIN_FIRST, blocks = UFS_DARWIN_BLOCKS, write_first = UFS_WRITE_FIRST;
+ 
+-			if (strncmp((const char *)ufs_page->part[i].name, "darwin", 7) != 0) {
++			if (strncmp((const char *)ufs_page->part[i].name, "userdata", 9) == 0) {
++				first = UFS_USERDATA_FIRST, blocks = UFS_USERDATA_BLOCKS, write_first = UFS_USERDATA_WRITE_FIRST;
++			} else if (strncmp((const char *)ufs_page->part[i].name, "darwin", 7) != 0) {
+ 				continue;
+ 			}
+ 			if (i != offered - 1) {
+@@ -1519,23 +1528,26 @@ redwood_ufs_init(void)
+ 				 * has compared with the loader's reads; the device path this firmware gives
+ 				 * says no logical unit number at all, so part[].lun is 0xff for every unit */
+ 				why = "it is not on the first logical unit";
+-			} else if (ufs_page->part[i].start_lba != UFS_DARWIN_FIRST) {
++			} else if (ufs_page->write_first != write_first) {
++				why = "the loader bounds it elsewhere";
++			} else if (ufs_page->part[i].start_lba != first) {
+ 				why = "it does not begin where it did";
+-			} else if (ufs_page->part[i].blocks != UFS_DARWIN_BLOCKS) {
++			} else if (ufs_page->part[i].blocks != blocks) {
+ 				why = "it is not the size it was";
+ 			} else if (ufs_page->part[i].block_size != 4096) {
+ 				why = "its blocks are not 4096 bytes";
+ 			}
+ 			if (why != NULL) {
+-				printf("ufs: darwin: no write will be asked for: %s\n", why);
++				printf("ufs: %s: no write will be asked for: %s\n", (const char *)ufs_page->part[i].name, why);
+ 				continue;
+ 			}
+ 			ufs_write_part = (int)i;
++			ufs_write_first = write_first;
+ 		}
+ 		if (ufs_write_part >= 0) {
+-			printf("ufs: /dev/rufs_darwin takes writes, whole blocks from %llu on (%llu MB of it); "
+-			    "everything else of the storage is read only\n", UFS_WRITE_FIRST,
+-			    (UFS_DARWIN_BLOCKS - UFS_WRITE_FIRST) * 4096 >> 20);
++			printf("ufs: /dev/rufs_%s takes writes, whole blocks from %llu on (%llu MB of it); "
++			    "everything else of the storage is read only\n", (const char *)ufs_page->part[ufs_write_part].name,
++			    ufs_write_first, (ufs_page->part[ufs_write_part].blocks - ufs_write_first) * 4096 >> 20);
+ 		} else {
+ 			printf("ufs: nothing takes writes: darwin is not among the partitions\n");
+ 		}
+diff --git a/userland/src/var_store.c b/userland/src/var_store.c
+--- a/userland/src/var_store.c
++++ b/userland/src/var_store.c
+@@ -49,9 +49,14 @@
+ #define BLOCK           4096
+ #define BUFFER          (4u << 20)              /* the loader's own buffer: one request a write */
+ #define STORE_AT        8589934592LL            /* darwin's block 2097152: past the cryptexes, with room to spare */
++/* lemonadep: no darwin; userdata from 20 GiB on (bsd/dev/redwood_ufs.c, UFS_USERDATA_WRITE_FIRST) */
++#define USERDATA_DEVICE   "/dev/rufs_userdata"
++#define USERDATA_STORE_AT 21474836480LL
++static const char *store_device = "/dev/rufs_darwin";
++static off_t store_at = STORE_AT;
+ #define SLOT_BYTES      0x80000000LL            /* 2 GiB a slot, two slots */
+ #define SLOTS           2
+-#define DEVICE          "/dev/rufs_darwin"
++#define DEVICE          store_device
+ #define ROOT            "/private/var"
+ #define MAX_PATH        1024
+ #define MAX_DEPTH       32
+@@ -150,6 +155,30 @@
+ 	return value;
+ }
+ 
++/* NAME=<decimal> among the kernel's arguments, 0 if it is not there */
++static long
++boot_arg_number(const char *name)
++{
++	static char args[1024];
++	size_t len = sizeof(args) - 1, n = strlen(name);
++
++	if (sysctlbyname("kern.bootargs", args, &len, NULL, 0) != 0) {
++		return 0;
++	}
++	args[len < sizeof(args) ? len : sizeof(args) - 1] = 0;
++	for (char *p = args; *p;) {
++		while (*p == ' ') {
++			p++;
++		}
++		if (strncmp(p, name, n) == 0 && p[n] == '=') {
++			return parse_number(p + n + 1);
++		}
++		while (*p && *p != ' ') {
++			p++;
++		}
++	}
++	return 0;
++}
+ 
+ static int
+ sysctl_int(const char *name, int *value)
+@@ -237,7 +266,7 @@
+ static off_t
+ slot_at(int slot)
+ {
+-	return STORE_AT + (off_t)slot * SLOT_BYTES;
++	return store_at + (off_t)slot * SLOT_BYTES;
+ }
+ 
+ static int
+@@ -1363,6 +1392,16 @@
+ 
+ 	(void)envp;
+ 	crc_init();
++	{
++		int probe = open(store_device, O_RDONLY, 0);    /* no darwin: the lemonadep store in userdata */
++
++		if (probe < 0) {
++			store_device = USERDATA_DEVICE;
++			store_at = USERDATA_STORE_AT;
++		} else {
++			close(probe);
++		}
++	}
+ 	if (strcmp(what, "stamp") == 0) {
+ 		return stamp(argc > 2 ? argv[2] : "/private/var/redwood-stamp") ? 0 : 1;
+ 	}
+@@ -1382,7 +1421,8 @@
+ 			printf("var_store: not asked to keep the data volume (var_store=1): nothing to watch\n");
+ 			return 0;
+ 		}
+-		return watch(argc > 2 ? (int)parse_number(argv[2]) : 0) ? 0 : 1;
++		/* var_store_every=SECS: the standalone boot has no orderly end, the phone is just switched off */
++		return watch(argc > 2 ? (int)parse_number(argv[2]) : (int)boot_arg_number("var_store_every")) ? 0 : 1;
+ 	}
+ 	fd = open(DEVICE, strcmp(what, "load") == 0 || strcmp(what, "show") == 0 ? O_RDONLY : O_RDWR, 0);
+ 	if (fd < 0) {

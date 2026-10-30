@@ -23,7 +23,7 @@ index a9e8549..3e084c0 100644
  USERLAND_VARS="GL=1 ADSP=1"     # extra variables for userland/build.sh: GL=1, Mesa for the Adreno 660 (gpu=1); ADSP=1, the audio DSP image in the small image (adsp=1)
  # The phone's own firmware, taken off it through the loader (never in the repository): docs/lemonadep.md.
 diff --git a/xnu/files/bsd/dev/redwood_input.c b/xnu/files/bsd/dev/redwood_input.c
-index 1aff3ac..7c3c87a 100644
+index 1aff3ac..fe9c802 100644
 --- a/xnu/files/bsd/dev/redwood_input.c
 +++ b/xnu/files/bsd/dev/redwood_input.c
 @@ -33,6 +33,10 @@ extern void loader_log_line(const char *line);
@@ -37,7 +37,23 @@ index 1aff3ac..7c3c87a 100644
  void
  redwood_tl(const char *format, ...)
  {
-@@ -214,6 +218,7 @@ redwood_input_init(void)
+@@ -70,6 +74,7 @@ static uint32_t touch_head, touch_tail;        /* read from head, add at tail */
+ #define EXIT_HOLD_MS    1500
+ 
+ extern void loader_return(void);
++extern void redwood_var_save_on_return(void);   /* bsd/dev/redwood_ufs.c: the data volume into the flash */
+ 
+ static thread_call_t exit_call;
+ static uint32_t fingers_down;           /* one bit for each finger a driver says is down */
+@@ -78,6 +83,7 @@ static void
+ exit_hold_elapsed(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
+ {
+ 	printf("\n--- %d fingers held on the screen for %d ms: back to the loader ---\n", EXIT_FINGERS, EXIT_HOLD_MS);
++	redwood_var_save_on_return();   /* var_store=1: the data volume kept (a standalone loader then powers off) */
+ 	redwood_adreno_stop();
+ 	loader_return();
+ }
+@@ -214,6 +220,7 @@ redwood_input_init(void)
  		printf("redwood-touch: cannot create the device\n");
  	}
  	exit_call = thread_call_allocate(exit_hold_elapsed, NULL);
@@ -45,7 +61,7 @@ index 1aff3ac..7c3c87a 100644
  	redwood_cpufreq_init();
  	redwood_virtio_input_init();
  	redwood_goodix_init();
-@@ -222,8 +227,10 @@ redwood_input_init(void)
+@@ -222,8 +229,10 @@ redwood_input_init(void)
  	redwood_battery_init();
  	redwood_ufs_init();
  	redwood_net_init();
@@ -57,7 +73,7 @@ index 1aff3ac..7c3c87a 100644
  	redwood_adsp_init();
  }
 diff --git a/xnu/files/osfmk/arm64/loader_return.c b/xnu/files/osfmk/arm64/loader_return.c
-index f95ebe6..e0cb199 100644
+index f95ebe6..d9b9567 100644
 --- a/xnu/files/osfmk/arm64/loader_return.c
 +++ b/xnu/files/osfmk/arm64/loader_return.c
 @@ -58,6 +58,7 @@ extern void redwood_torch_quiesce(void);
@@ -76,11 +92,286 @@ index f95ebe6..e0cb199 100644
  	redwood_ufs_quiesce();          /* this kernel's requests to the storage done, UEFI's list as it was, for the log */
  	redwood_adreno_quiesce();       /* the GPU block, if it was started, has tables in memory that is about to be reused */
  	redwood_dpu_restore();          /* (lemonadep) the panel shows the boot framebuffer again, the one the loader draws into */
+@@ -452,6 +454,48 @@ loader_return_timer(__unused thread_call_param_t p0, __unused thread_call_param_
+ 	loader_return_test((void *)(uintptr_t)(as_panic ? 2 : 1));
+ }
+ 
++/*
++ * iOS's own power off and restart (Settings, the power menu): no machine to halt here, so back to
++ * the loader, saying which in the log -- a standalone loader (payload item "diskrd") powers the
++ * phone off or starts it again by that line. A panic's restart is left to the panic path.
++ */
++extern int (*PE_halt_restart)(unsigned int type);
++extern void redwood_wifi_stop(void);
++extern void redwood_adsp_stop(void);
++extern void redwood_adreno_stop(void);
++
++static int
++loader_halt_restart(unsigned int type)
++{
++	const char *banner;
++
++	if (type == 0 /* kPEHaltCPU */) {
++		banner = "\n--- iOS asked to power off: back to the loader ---\n";
++	} else if (type == 1 /* kPERestartCPU */) {
++		banner = "\n--- iOS asked for a restart: back to the loader ---\n";
++	} else {
++		return 0;
++	}
++	for (const char *c = banner; *c; c++) {
++		loader_log_putc(*c);
++	}
++	redwood_adreno_stop();
++	redwood_wifi_stop();
++	redwood_adsp_stop();
++	loader_return();
++	return 0;
++}
++
++__startup_func
++static void
++loader_halt_restart_init(void)
++{
++	if (PE_halt_restart == NULL) {
++		PE_halt_restart = loader_halt_restart;
++	}
++}
++STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, loader_halt_restart_init);
++
+ __startup_func
+ static void
+ loader_return_timer_init(void)
 diff --git a/xnuloader/loader.c b/xnuloader/loader.c
-index 418ccc9..b44d024 100644
+index 418ccc9..d0e553a 100644
 --- a/xnuloader/loader.c
 +++ b/xnuloader/loader.c
-@@ -3864,6 +3864,21 @@ fb_command(char *cmd)
+@@ -687,6 +687,28 @@ static const struct platform *const platforms[] = {
+ 
+ /* ------------------------------------------------------------------------ */
+ 
++/* Is TEXT somewhere in the N bytes at LOG? */
++static int
++log_has(const char *log, uint64_t n, const char *text)
++{
++	uint64_t t = 0;
++
++	while (text[t] != 0) {
++		t++;
++	}
++	for (uint64_t i = 0; i + t <= n; i++) {
++		uint64_t k = 0;
++
++		while (k < t && log[i + k] == text[k]) {
++			k++;
++		}
++		if (k == t) {
++			return 1;
++		}
++	}
++	return 0;
++}
++
+ static void
+ reboot(void)
+ {
+@@ -1616,6 +1638,14 @@ ufs_survey(void)
+ #define BLOCK_DARWIN_LAST  30617594ULL
+ #define BLOCK_DARWIN_TYPE  { 0x7c3457ef, 0x0000, 0x11aa, { 0xaa, 0x11, 0x00, 0x30, 0x65, 0x43, 0xec, 0xac } }
+ #define BLOCK_DARWIN_UNIQ  { 0xfd6854ad, 0x24aa, 0x4fc3, { 0x94, 0xfe, 0x29, 0x01, 0x16, 0x85, 0x8d, 0x68 } }
++/*
++ * lemonadep has no darwin: its store is userdata of unit 0 (sda20) from 20 GiB on, past the ios-sweet
++ * root image (0..11.3 GB) and the standalone boot's system image (16 GiB + 2.4 GB, "diskrd").
++ */
++#define BLOCK_USERDATA_FIRST       2877512ULL
++#define BLOCK_USERDATA_LAST        29644794ULL
++#define BLOCK_USERDATA_WRITE_FIRST 5242880ULL          /* 20 GiB in blocks of 4096 */
++static uint64_t block_write_first = BLOCK_WRITE_FIRST;
+ 
+ /*
+  * The partitions first, then the logical units they are on (BLOCK_PART_UNIT, named unit0, unit1,
+@@ -1956,9 +1986,31 @@ static int
+ block_is_darwin(const efi_partition_info *info, const efi_block_io *bio, const struct loader_block_part *bp)
+ {
+ 	static const efi_guid type = BLOCK_DARWIN_TYPE, uniq = BLOCK_DARWIN_UNIQ;
+-	static const char name[] = "darwin";
++	static const char name[] = "darwin", userdata_store[] = "userdata";
+ 	const char *why = NULL;
+-
++	unsigned u;
++
++	for (u = 0; u < sizeof(userdata_store) && bp->name[u] == userdata_store[u]; u++) {
++	}
++	if (u == sizeof(userdata_store)) {
++		if (info->start_lba != BLOCK_USERDATA_FIRST || info->end_lba != BLOCK_USERDATA_LAST) {
++			why = "it does not begin and end where it did";
++		} else if (bp->unit != 0) {
++			why = "it is not on the first logical unit";
++		} else if (bp->block_size != 4096 || bp->blocks != BLOCK_USERDATA_LAST - BLOCK_USERDATA_FIRST + 1) {
++			why = "its blocks are not what they were";
++		} else if (bio->media->read_only) {
++			why = "UEFI gives it out read only";
++		}
++		if (why != NULL) {
++			print("ufs: userdata: no write will be served: %s\n", why);
++			return 0;
++		}
++		block_write_first = BLOCK_USERDATA_WRITE_FIRST;
++		print("ufs: userdata (LBA %d..%d of unit 0): its blocks from %d on may be written this run\n",
++		    info->start_lba, info->end_lba, block_write_first);
++		return 1;
++	}
+ 	for (unsigned i = 0; i < sizeof(name); i++) {
+ 		if (bp->name[i] != name[i]) {
+ 			return 0;               /* another partition: nothing to say about it */
+@@ -1983,6 +2035,7 @@ block_is_darwin(const efi_partition_info *info, const efi_block_io *bio, const s
+ 		print("ufs: darwin: no write will be served: %s\n", why);
+ 		return 0;
+ 	}
++	block_write_first = BLOCK_WRITE_FIRST;
+ 	print("ufs: darwin (LBA %d..%d of unit 0): its blocks from %d on may be written this run\n",
+ 	    info->start_lba, info->end_lba, BLOCK_WRITE_FIRST);
+ 	return 1;
+@@ -2107,7 +2160,7 @@ block_start(void)
+ 	block_writes = block_writes_refused = block_write_bytes = 0;
+ 	if (block_write_part >= 0) {
+ 		block_shared.write_part_plus_one = (uint32_t)block_write_part + 1;
+-		block_shared.write_first = BLOCK_WRITE_FIRST;
++		block_shared.write_first = block_write_first;
+ 	}
+ 	block_shared.magic = BLOCK_MAGIC;
+ 	block_shared.version = BLOCK_VERSION;
+@@ -2234,7 +2287,7 @@ block_poll(void)
+ 			s = 0x800000000000000FULL;      /* EFI_ACCESS_DENIED */
+ 			bytes = 0;
+ 		} else if (op == BLOCK_OP_WRITE) {
+-			if (block_write_part < 0 || part != (uint32_t)block_write_part || lba < BLOCK_WRITE_FIRST) {
++			if (block_write_part < 0 || part != (uint32_t)block_write_part || lba < block_write_first) {
+ 				/* not darwin, or not past what the build writes from the computer: never */
+ 				if (block_writes_refused++ < 8) {
+ 					print("ufs: a write of %d blocks from %d of %s: REFUSED\n", count, lba,
+@@ -2625,6 +2678,7 @@ struct payload_info {
+ 	uint64_t checkpoint;
+ 	uint64_t forced_base;
+ 	uint64_t resident_rd;           /* size of a root image the host put at the resident address */
++	const char *diskrd;             /* "NAME OFFSET": the resident root image is read from that partition */
+ 	int usb_mode;
+ };
+ 
+@@ -2676,6 +2730,8 @@ parse_payload(struct payload_info *pi, int verbose)
+ 			pi->resident_rd = parse_number(text, 16); /* e.g. loaded there by QEMU; see RESIDENT_RD_OFFSET */
+ 		} else if (str_eq(e->name, "checkpoint")) {
+ 			pi->checkpoint = parse_number(text, 10);  /* where the kernel should stop and come back */
++		} else if (str_eq(e->name, "diskrd")) {
++			pi->diskrd = text;                        /* standalone boot: see disk_ramdisk() */
+ 		} else if (str_eq(e->name, "usb")) {
+ 			pi->usb_mode = 1;                         /* stay in the loader and take commands over USB */
+ 		}
+@@ -2741,6 +2797,93 @@ static struct {
+ } SCREEN;
+ static uint64_t win_base, win_size; /* XNU's physical memory window, claimed once */
+ static uint64_t resident_rd_size;   /* root image kept at win_base + RESIDENT_RD_OFFSET, 0 if none */
++
++/*
++ * Standalone boot, no computer: payload item "diskrd" = "NAME OFFSET" (OFFSET in hex bytes). At
++ * OFFSET in GPT partition NAME a 4 KB header -- "XNURDISK", u64 size of the image -- and the image
++ * right after it, which is read to the resident address where "oem ramdisk" would have put it.
++ * Through a bounce buffer: whatever the UFS driver does about caches, the copy is the CPU's own.
++ */
++static int
++disk_ramdisk(const char *args)
++{
++	static const efi_guid part_guid = EFI_PARTITION_INFO_GUID;
++	static const efi_guid blk_guid = EFI_BLOCK_IO_GUID;
++	static const char magic[8] = { 'X', 'N', 'U', 'R', 'D', 'I', 'S', 'K' };
++	const uint64_t chunk = 16ull << 20;
++	efi_handle *handles;
++	uint64_t count, offset, size, bounce, bs, limit, t0 = READ_SYSREG(CNTPCT_EL0);
++	char name[36];
++	unsigned n;
++
++	for (n = 0; args[n] != 0 && args[n] != ' ' && n < sizeof(name) - 1; n++) {
++		name[n] = args[n];
++	}
++	name[n] = 0;
++	offset = args[n] == ' ' ? parse_number(args + n + 1, 16) : 0;
++	if (win_size <= RESIDENT_RD_OFFSET + RESIDENT_RD_RESERVE) {
++		print("diskrd: no memory window\n");
++		return 0;
++	}
++	limit = win_size - RESIDENT_RD_OFFSET - RESIDENT_RD_RESERVE;
++	if (EFI_ERROR(BS->locate_handle_buffer(ByProtocol, &part_guid, NULL, &count, &handles))) {
++		return 0;
++	}
++	for (uint64_t i = 0; i < count; i++) {
++		efi_partition_info *info;
++		efi_block_io *bio;
++		uint8_t *dest = (uint8_t *)(win_base + RESIDENT_RD_OFFSET);
++		unsigned k;
++
++		if (EFI_ERROR(BS->handle_protocol(handles[i], &part_guid, (void **)&info)) || info->type != 2) {
++			continue;
++		}
++		for (k = 0; name[k] != 0 && k < 35 && info->name[k] == (char16)name[k]; k++) {
++		}
++		if (name[k] != 0 || info->name[k] != 0 || EFI_ERROR(BS->handle_protocol(handles[i], &blk_guid, (void **)&bio))) {
++			continue;
++		}
++		bs = bio->media->block_size;
++		if (offset % bs != 0 || EFI_ERROR(BS->allocate_pages(AllocateAnyPages, EfiLoaderData, chunk >> 12, &bounce))) {
++			print("diskrd: %s: offset %x is not whole blocks of %x, or no buffer\n", name, offset, bs);
++			return 0;
++		}
++		uint8_t *b = (uint8_t *)(uintptr_t)bounce;
++		if (EFI_ERROR(bio->read_blocks(bio, bio->media->media_id, offset / bs, 4096, b))) {
++			print("diskrd: %s: header not read\n", name);
++			BS->free_pages(bounce, chunk >> 12);
++			return 0;
++		}
++		for (k = 0; k < 8 && b[k] == (uint8_t)magic[k]; k++) {
++		}
++		size = *(const uint64_t *)(b + 8);
++		if (k != 8 || size == 0 || size > limit ||
++		    offset + 4096 + size > (bio->media->last_block + 1) * bs) {
++			print("diskrd: %s at %x: no image (magic ok %d, size %x, room %x)\n", name, offset, (uint64_t)(k == 8), size, limit);
++			BS->free_pages(bounce, chunk >> 12);
++			return 0;
++		}
++		print("diskrd: %s at %x: %d MB to the resident area\n", name, offset, size >> 20);
++		for (uint64_t got = 0; got < size; got += chunk) {
++			uint64_t want = size - got > chunk ? chunk : size - got;
++			uint64_t whole = (want + bs - 1) / bs * bs;
++
++			if (EFI_ERROR(bio->read_blocks(bio, bio->media->media_id, (offset + 4096 + got) / bs, whole, b))) {
++				print("diskrd: read failed at %x\n", got);
++				BS->free_pages(bounce, chunk >> 12);
++				return 0;
++			}
++			memcpy(dest + got, b, (size_t)want);
++			wdt_pet();
++		}
++		BS->free_pages(bounce, chunk >> 12);
++		resident_rd_size = size;
++		print("diskrd: done in %d ms\n", (READ_SYSREG(CNTPCT_EL0) - t0) * 1000 / READ_SYSREG(CNTFRQ_EL0));
++		return 1;
++	}
++	print("diskrd: no partition %s\n", name);
++	return 0;
++}
+ static char last_result[64] = "idle";
+ 
+ static void
+@@ -2907,6 +3050,10 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
+ 		return 0;
+ 	}
+ 
++	if (pi.diskrd != NULL && resident_rd_size == 0 && !disk_ramdisk(pi.diskrd)) {
++		return 0;
++	}
++
+ 	uint64_t phys_base = win_base;
+ 	uint64_t slide = phys_base - KERNEL_VIRT_BASE; /* pa = va + slide */
+ 	uint64_t kern_lo = vm_lo + slide, kern_hi = (vm_hi + slide + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
+@@ -3864,6 +4011,21 @@ fb_command(char *cmd)
  			staged_data = (const char *)(uintptr_t)0xF3FE0000ULL;
  			staged_len = 5 * 0x2000;      /* 5 slots of 8 KB */
  			fb_reply("OKAY", "");
@@ -102,6 +393,25 @@ index 418ccc9..b44d024 100644
  		} else if (starts_with(cmd, "oem readpart ")) {
  			/* stage one GPT partition, read only; "fastboot get_staged FILE" fetches it */
  			fb_reply(read_partition(cmd + 13) ? "OKAY" : "FAIL", "");
+@@ -4107,6 +4269,18 @@ efi_main(efi_handle image, efi_system_table *st)
+ 	/* One-shot mode: run the kernel that came with the image, then reset. */
+ 	if (have_payload) {
+ 		run_kernel(0, 0);
++		/*
++		 * Standalone (diskrd): the phone's own power off -- iOS's, or five fingers held on the
++		 * screen -- switches it off; a restart, a panic, anything else starts iOS again.
++		 */
++		if (pi.diskrd != NULL && last_klog != NULL &&
++		    (log_has(last_klog, last_klog_len, "--- iOS asked to power off") ||
++		    log_has(last_klog, last_klog_len, "fingers held on the screen for"))) {
++			print("standalone: powering off\n");
++			hc_take_back("before the power off");
++			flush_log();
++			ST->rt->reset_system(2 /* EfiResetShutdown */, 0, 0, NULL);
++		}
+ 	}
+ 	reboot();
+ 	return 0;
 diff --git a/bsd/conf/files b/bsd/conf/files
 index 4427401..238b311 100644
 --- a/bsd/conf/files

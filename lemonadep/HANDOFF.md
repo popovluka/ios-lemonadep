@@ -1,4 +1,47 @@
-# lemonadep handoff (2026-10-29 ~23:30) — read first
+# lemonadep handoff (2026-10-30 ~15:40) — read first
+
+## MILESTONE: iOS BOOTS STANDALONE, NO COMPUTER (2026-10-30)
+
+Power the phone on and iOS 16.5 starts by itself: GPU, touch, battery, backlight, audio DSP, Wi-Fi
+(joins the network in `fw/network`, DHCP), and **/private/var kept between boots** (moved icon survived
+a power-off/power-on, confirmed by the user). Recipe: `hackios/build-standalone.sh`,
+`hackios/install-standalone.ps1`.
+
+How it works:
+- `boot_b` (the active slot) holds `lemonadep-standalone.img`: Mu-Silicium UEFI + xnuloader + kernel +
+  root.apfs + boot-args, as one "XNUP" payload without `usb` (one-shot mode, no USB, no timer).
+- The 2.4 GB `system.apfs` lives raw in **userdata at 16 GiB** (4 KB header "XNURDISK" + u64 size, then
+  the image). The loader's new payload item `diskrd` ("userdata 400000000") reads it through UEFI's
+  BlockIo into the resident ramdisk address -- where `oem ramdisk` puts it over USB. 2.4 GB in 2.3 s.
+- /private/var is still a RAM filesystem; furangelz's `var_store` packs it into a store and unpacks it at
+  boot. Their store is a partition `darwin` this phone does not have; now loader + kernel also accept
+  **userdata from 20 GiB on** (exact identity: unit 0, LBA 2877512..29644794, 4 KB blocks; writes below
+  block 5242880 refused by both). Boot-args `ufs=2 ufs_write=1 var_store=1 var_store_every=1800`.
+  Two 2 GiB slots at 20 and 22 GiB; a save is ~140 MB.
+- Saves: every 30 min, at iOS power off, and on the five-finger hold (1.5 s). Five fingers or iOS's
+  power off -> the loader powers the phone off (`EfiResetShutdown`); a restart, a panic or anything
+  else -> it starts iOS again. Holding the Power button alone does nothing yet (no var save; a long
+  hold is the PMIC's hard reset, which loses what changed since the last save).
+- Storage seen by iOS is NOT the 100 GB of userdata: system is a read-only RAM image and /var a RAM
+  filesystem (bounded by RAM), persisted as an archive. A real on-flash writable volume would need a
+  writing filesystem driver (the kernel's APFS reads only).
+
+userdata layout now: 0..11.3 GB ios-sweet root image (M2), 16 GiB system-rd.bin, 20..24 GiB var store.
+Undo / back to development: Power + Volume Down = fastboot as before; `fastboot boot` the USB image
+still works. `fastboot flash boot_b backup/partitions/boot_b.img` restores the old boot (SHA-256
+7E2DD0DD..., identical to what was on boot_b before the flash).
+
+Changes (patches in `hackios/patches/`): loader `diskrd`, standalone power-off (`log_has`), userdata
+store identity (kernel-0002); kernel `loader_halt_restart` (iOS power off/restart -> loader), var save on
+the five-finger exit (kernel-0002); redwood_ufs.c userdata identity + var_store device/offset and
+`var_store_every` (kernel-0004).
+
+Wi-Fi: unchanged since the next section (first association still needs the retry; Settings does not
+show the connection: wifid's apple80211 queries are refused). Searched for the first-association EAPOL
+loss online (ath11k list, WCN6855 fixes): no matching upstream report; the 7.0.14 driver already has
+the related upstream fixes (vdev-start rate reset, wcn6855 rx ops). Port-side suspects left: REO
+status ring handling with polled interrupts (`wifi_irq=0`) at the first peer's TID setup, and the slow
+first vdev start (100 ms vs 17 ms).
 
 ## MILESTONE: GPU-ACCELERATED iOS ON THE ONEPLUS 9 PRO (2026-10-29)
 
