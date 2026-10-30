@@ -72,6 +72,18 @@ CaptiveNetworkSupport.bundle logs nothing even with OSLOG=com.apple.configd) and
 taken; Safari's WebKit networking (pid com.apple.WebKit) does fetch data (1.6 MB from Akamai in one run).
 wifid's auto-join at boot (wifi_station=1) tries once before the radio is up and does not retry for
 minutes, so the profile keeps `wifi_join=1`.
+**Update (20:15): the network is NOT the problem.** Measured from the phone with net_test (root and as
+uid 501): DNS, TCP, HTTPS/TLS, reachability, large UDP both ways (1187-byte DNS answers in), and full
+HTTP/3 over QUIC (`net_test fetch3`, `assumesHTTP3Capable`: example.com, google.com 89 KB,
+cloudflare-quic.com 126 KB) all work. mDNSResponder's log (OSLOG=com.apple.mDNSResponder) shows Safari's
+WebKit.Networking resolving example.com (HTTPS RR alpn h3,h2) when a page is opened. But every Safari
+process then sits idle (ps: CPU time does not move), and libredwood-sb.dylib injected into MobileSafari
+(INJECT, applog=1 applog_name=MobileSafari, `rwtouch notify com.redwood.layers`) never answers: **Safari's
+main thread is blocked**. Not yet known on what. Ruled out: Fraudulent Website Warning (off: same), dmd
+(ALLOW=com.apple.dmd: Safari's policy request answered, same), captive control (Active=false ignored).
+Next: a stack of Safari's threads (kernel stackshot of one process, or the panic-path kcdata decoded and
+symbolicated against the dyld cache). Weather/Maps want locationd (DENY-listed in mkjobs.py), Music
+needs an account/storefront: probably separate causes, not the network.
 Dev-loop caveat: re-running without a power cycle can panic early ("element modified after free"): the
 chip, left running by `oem stop`, still DMAs. A rerun works; real boots are unaffected.
 Diagnostics: `net_test bigudp/bigtcp/dnstxt/quicvn` (userland/src/net_test.m, not in a patch yet),
