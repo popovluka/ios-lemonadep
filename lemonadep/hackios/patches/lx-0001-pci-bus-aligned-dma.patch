@@ -1,5 +1,16 @@
+diff --git a/wifi/lx/src/lx.h b/wifi/lx/src/lx.h
+index 3e3fb9e..13a53fc 100644
+--- a/wifi/lx/src/lx.h
++++ b/wifi/lx/src/lx.h
+@@ -16,5 +16,6 @@ void	lx_station_leave(void);		/* lx_80211.c: leave it, and the interface down */
+ int	lx_station_send(const unsigned char *frame, unsigned long length);	/* lx_80211.c: an Ethernet frame for the network */
+ int	lx_station_offer(void);	/* lx_80211.c: the station given to the kernel to ask (sys/redwood_sta.h); 0, or an errno */
+ void	lx_station_withdraw(void);	/* lx_80211.c: ... and taken back */
++void	lx_station_publish(void);	/* lx_80211.c: wifi_join's network shown to the kernel (iOS's Wi-Fi status) */
+ 
+ #endif
 diff --git a/wifi/lx/src/lx_80211.c b/wifi/lx/src/lx_80211.c
-index ea753f2..e0c3120 100644
+index ea753f2..deaec45 100644
 --- a/wifi/lx/src/lx_80211.c
 +++ b/wifi/lx/src/lx_80211.c
 @@ -1361,8 +1361,8 @@ protection(const struct lx_target *target, unsigned *group_cipher)
@@ -109,6 +120,30 @@ index ea753f2..e0c3120 100644
  		lx_os_sleep(&radio->handshake, 20 * 1000000ull);
  	}
  	lx_os_unlock();
+@@ -2089,6 +2120,23 @@ lx_station_offer(void)
+ 	return (0);
+ }
+ 
++/*
++ * wifi_join=1: the driver joined by itself, and nobody asked the kernel -- but wifid and Settings learn
++ * of the network only through the station (redwood_apple80211.c: SSID, CURRENT_NETWORK, STATE...). So
++ * the station is given to the kernel after the join as well, the network already joined in it.
++ */
++void
++lx_station_publish(void)
++{
++	struct lx_radio *radio = the_radio;
++
++	if (radio == NULL || !radio->registered) {
++		return;
++	}
++	memcpy(boundary.address, radio->wiphy->perm_addr, ETH_ALEN);
++	lx_os_station(&boundary);
++}
++
+ /* ... and no longer: returns when no call of the kernel's is under way. */
+ void
+ lx_station_withdraw(void)
 diff --git a/wifi/lx/src/lx_base.c b/wifi/lx/src/lx_base.c
 index df4daee..53014d7 100644
 --- a/wifi/lx/src/lx_base.c
@@ -153,7 +188,7 @@ index df4daee..53014d7 100644
  	bzero(pool.memory + at, size);
  	*dma_handle = pool.address + at;
 diff --git a/wifi/lx/src/lx_bus.c b/wifi/lx/src/lx_bus.c
-index 6943a33..214cf4b 100644
+index 6943a33..f02bf5c 100644
 --- a/wifi/lx/src/lx_bus.c
 +++ b/wifi/lx/src/lx_bus.c
 @@ -62,6 +62,11 @@ static struct {
@@ -350,7 +385,7 @@ index 6943a33..214cf4b 100644
  
  	driver = ab;
  	if (lx_os_option("wifi_station")) {
-@@ -819,7 +916,12 @@ lx_start(void)
+@@ -819,7 +916,13 @@ lx_start(void)
  			return (0);
  		}
  	} else if (lx_os_option("wifi_join")) {
@@ -361,6 +396,7 @@ index 6943a33..214cf4b 100644
 +			lx_pause_ms(1000);
 +		}
 +		if (ret == 0) {
++			lx_station_publish();		/* (so that iOS's Wi-Fi status sees the network) */
  			if (lx_os_option("wifi_hold")) {	/* (seconds to stay before returning: to see frames pass) */
  				lx_pause_ms(1000 * lx_os_option("wifi_hold"));
  				lx_station_say();

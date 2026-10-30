@@ -1,3 +1,39 @@
+diff --git a/xnu/files/bsd/dev/redwood_apple80211.c b/xnu/files/bsd/dev/redwood_apple80211.c
+index e2674ee..f37170c 100644
+--- a/xnu/files/bsd/dev/redwood_apple80211.c
++++ b/xnu/files/bsd/dev/redwood_apple80211.c
+@@ -294,7 +294,7 @@ get(struct apple80211req *request)
+ 	switch (request->req_type) {
+ 	case 43:
+ 	case 44: {                              /* the driver's and the hardware's name: the text alone, in 256 bytes */
+-		static const char name[256] = "redwood: ath11k for the WCN6750";
++		static const char name[256] = "redwood: ath11k (WCN6750, QCA6490)";
+ 
+ 		return give(request, name, sizeof(name));
+ 	}
+diff --git a/xnu/files/bsd/dev/redwood_sta.c b/xnu/files/bsd/dev/redwood_sta.c
+index f4e0490..630477e 100644
+--- a/xnu/files/bsd/dev/redwood_sta.c
++++ b/xnu/files/bsd/dev/redwood_sta.c
+@@ -197,6 +197,18 @@ redwood_sta_attach(const struct redwood_sta_ops *ops)
+ 	lck_mtx_unlock(&sta_lock);
+ 	thread_wakeup((event_t)&sta_ops);
+ 	redwood_apple80211_event(REDWOOD_STA_POWER, 1);
++	/* a station given over already joined (wifi_join=1): the link is up, and wifid is told so */
++	{
++		struct redwood_sta_state *state = kalloc_data(sizeof(*state), Z_WAITOK | Z_ZERO);
++
++		if (state != NULL) {
++			ops->state(state);
++			if (state->phase == REDWOOD_STA_JOINED) {
++				redwood_apple80211_event(REDWOOD_STA_LINK, 1);
++			}
++			kfree_data(state, sizeof(*state));
++		}
++	}
+ }
+ 
+ void
 diff --git a/xnu/files/bsd/dev/redwood_ufs.c b/xnu/files/bsd/dev/redwood_ufs.c
 index efa2fda..ac04012 100644
 --- a/xnu/files/bsd/dev/redwood_ufs.c

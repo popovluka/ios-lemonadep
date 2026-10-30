@@ -36,8 +36,15 @@ store identity (kernel-0002); kernel `loader_halt_restart` (iOS power off/restar
 the five-finger exit (kernel-0002); redwood_ufs.c userdata identity + var_store device/offset and
 `var_store_every` (kernel-0004).
 
-Wi-Fi: unchanged since the next section (first association still needs the retry; Settings does not
-show the connection: wifid's apple80211 queries are refused). Searched for the first-association EAPOL
+Wi-Fi status in iOS: FIXED (user saw the full-bars Wi-Fi icon). With `wifi_join=1` the driver joined
+by itself and never gave the station boundary (sys/redwood_sta.h) to the kernel, so redwood_apple80211.c
+answered SSID/BSSID/CURRENT_NETWORK/STATE with ENXIO (error 6). Now `lx_station_publish()` attaches it
+after the join (lx-0001), and `redwood_sta_attach()` posts LINK up when the station is already joined
+(kernel-0004). Still refused ("not built"): RATE, MCS, NOISE, PHY_MODE, POWERSAVE, COUNTRY_CODE, set 383.
+Known: dark mode did not survive a power-off once while a moved icon did -- untested whether cfprefsd
+had written it before the save.
+
+Wi-Fi first association still needs the retry. Searched for the first-association EAPOL
 loss online (ath11k list, WCN6855 fixes): no matching upstream report; the 7.0.14 driver already has
 the related upstream fixes (vdev-start rate reset, wcn6855 rx ops). Port-side suspects left: REO
 status ring handling with polled interrupts (`wifi_irq=0`) at the first peer's TID setup, and the slow
