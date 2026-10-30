@@ -1,6 +1,19 @@
+diff -ru a/ios165/select-system.py b/ios165/select-system.py
+--- a/ios165/select-system.py	2026-10-30 23:18:15.832028725 +0100
++++ b/ios165/select-system.py	2026-10-30 23:18:15.856032635 +0100
+@@ -194,7 +194,8 @@
+     if path.startswith(ALL_PICTURES) and path.lower().endswith('.png'):
+         return True
+     if path.startswith(('usr/libexec/', 'usr/sbin/')):
+-        return size <= BIG_PROGRAM
++        # (lemonadep: locationd as well, 31 MB: Wi-Fi positioning for Weather and Maps, with LOCATION_ON=1)
++        return size <= BIG_PROGRAM or path == 'usr/libexec/locationd'
+     if path.startswith(('Applications/', HEALTH)):
+         return not path.lower().endswith(SKIP_APP_EXT) and '.mlmodelc/' not in path
+     if path.startswith(FRAMEWORKS):
 diff -ru a/userland/build.sh b/userland/build.sh
---- a/userland/build.sh	2026-10-30 22:23:26.663712574 +0100
-+++ b/userland/build.sh	2026-10-30 22:23:26.663712574 +0100
+--- a/userland/build.sh	2026-10-30 23:18:15.832028725 +0100
++++ b/userland/build.sh	2026-10-30 23:18:15.832028725 +0100
 @@ -273,6 +273,9 @@
  		$DYN -framework CoreFoundation -framework CoreGraphics -framework ImageIO -o obj/snap_test src/snap_test.c
  		$DYN -framework CoreFoundation -framework CoreGraphics -framework CoreText -o obj/font_test src/font_test.c
@@ -19,7 +32,7 @@ diff -ru a/userland/build.sh b/userland/build.sh
  	[ -f obj/store_test ] && cp obj/store_test root/bin/
  	[ -f obj/battery_test ] && cp obj/battery_test root/bin/
  	[ -f obj/keychain_test ] && cp obj/keychain_test root/bin/
-@@ -528,6 +532,14 @@
+@@ -528,6 +532,23 @@
  			printf 'f\t600\t0\t0\t/private/var/root/.ssh/%s\t/var/root/.ssh/%s\n' $k $k >> root/etc/var.skel
  		done
  	fi
@@ -31,12 +44,21 @@ diff -ru a/userland/build.sh b/userland/build.sh
 +			root/var/preferences/SystemConfiguration/com.apple.captive.control.plist
 +		printf 'f\t644\t0\t0\t/private/var/preferences/SystemConfiguration/com.apple.captive.control.plist\t/var/preferences/SystemConfiguration/com.apple.captive.control.plist\n' >> root/etc/var.skel
 +	fi
++	# LOCATION_ON=1: Location Services on (locationd: "location disabled system-wide" otherwise, and Settings
++	# shows no switch for it on this phone). The preference locationd reads: LocationServicesEnabledIn8.0
++	# (iOS 16's locationd; the 7.0 key is the older name).
++	if [ -n "$LOCATION_ON" ]; then
++		mkdir -p root/var/mobile/Library/Preferences
++		python3 -c 'import plistlib, sys; plistlib.dump({"LocationServicesEnabledIn8.0": True, "LocationServicesEnabledIn7.0": True}, open(sys.argv[1], "wb"))' \
++			root/var/mobile/Library/Preferences/com.apple.locationd.plist
++		printf 'F\t600\t501\t501\t/private/var/mobile/Library/Preferences/com.apple.locationd.plist\t/var/mobile/Library/Preferences/com.apple.locationd.plist\n' >> root/etc/var.skel
++	fi
  	cp ${RC:-rc.launchd} root/etc/rc
  	cp ${RC_JOBS:-rc.jobs} root/etc/rc.jobs
  	# QUIET=1: launchd's own standard error goes nowhere (src/init.c). It says a few thousand
 diff -ru a/userland/mkjobs.py b/userland/mkjobs.py
---- a/userland/mkjobs.py	2026-10-30 22:23:26.663712574 +0100
-+++ b/userland/mkjobs.py	2026-10-30 22:23:26.663712574 +0100
+--- a/userland/mkjobs.py	2026-10-30 23:18:15.828028074 +0100
++++ b/userland/mkjobs.py	2026-10-30 23:18:15.828028074 +0100
 @@ -226,6 +226,8 @@
  
  # ALLOW="word ..." in the environment lets jobs through that DENY would stop: for trying one out
@@ -64,3 +86,68 @@ diff -ru a/userland/mkjobs.py b/userland/mkjobs.py
          with open(f'{dest}/{name}', 'wb') as f:
              plistlib.dump(job, f, fmt=plistlib.FMT_BINARY)
          count += 1
+diff -ru a/userland/src/init.c b/userland/src/init.c
+--- a/userland/src/init.c	2026-10-30 23:18:15.832028725 +0100
++++ b/userland/src/init.c	2026-10-30 23:18:15.832028725 +0100
+@@ -858,8 +858,9 @@
+ 			made++;
+ 		} else if (count == 3 && f[0][0] == 'l') {
+ 			symlink(f[1], f[2]);
+-		} else if (count == 6 && f[0][0] == 'f') {
+-			/* a file of ours to start with (build.sh: the var/ directory): mode, owner, group, path, source in the image */
++		} else if (count == 6 && (f[0][0] == 'f' || f[0][0] == 'F')) {
++			/* a file of ours to start with (build.sh: the var/ directory): mode, owner, group, path, source in the image
++			 * ('F': the same, and put back after the last boot's data volume is (forced_files())) */
+ 			if (!copy_file(in_image(f[5]), f[4], (int)parse_number(f[1], 8), (int)parse_number(f[2], 10),
+ 			    (int)parse_number(f[3], 10))) {
+ 				printf("  %s: %s\n", f[4], strerror(errno));
+@@ -966,6 +967,41 @@
+ }
+ 
+ /*
++ * The skeleton's 'F' files once more, after the store is back: settings the image means to hold
++ * whatever the last boot saved (lemonadep: Location Services on, see build.sh LOCATION_ON).
++ */
++static void
++forced_files(void)
++{
++	static char skeleton[16384];
++	int count = 0;
++
++	read_whole(in_image("/etc/var.skel"), skeleton, sizeof(skeleton));
++	for (char *line = skeleton; *line;) {
++		char *end = strchr(line, '\n'), *f[6];
++
++		if (end) {
++			*end = 0;
++		}
++		if (split_tabs(line, f, 6) == 6 && f[0][0] == 'F') {
++			if (copy_file(in_image(f[5]), f[4], (int)parse_number(f[1], 8), (int)parse_number(f[2], 10),
++			    (int)parse_number(f[3], 10))) {
++				count++;
++			} else {
++				printf("  %s: %s\n", f[4], strerror(errno));
++			}
++		}
++		if (!end) {
++			break;
++		}
++		line = end + 1;
++	}
++	if (count != 0) {
++		printf("  %d file(s) of the image put back over the data volume\n", count);
++	}
++}
++
++/*
+  * What the last boot left in /private/var, back out of the phone's flash (var_store=1): the
+  * memory filesystem is empty at every boot, so everything iOS writes -- the home screen's layout,
+  * the applications' own data, the snapshots and the baked wallpaper -- would otherwise be new
+@@ -1443,6 +1479,7 @@
+ 	show_system();
+ 	mount_writable();
+ 	restore_var();
++	forced_files();
+ 	test_files();
+ 	test_writable();
+ 	test_memory();

@@ -72,6 +72,22 @@ CaptiveNetworkSupport.bundle logs nothing even with OSLOG=com.apple.configd) and
 taken; Safari's WebKit networking (pid com.apple.WebKit) does fetch data (1.6 MB from Akamai in one run).
 wifid's auto-join at boot (wifi_station=1) tries once before the radio is up and does not retry for
 minutes, so the profile keeps `wifi_join=1`.
+**LOCATION (23:20): works over Wi-Fi positioning** (Weather showed "Novi Sad", apps get the permission prompt).
+locationd was missing twice over: select-system.py drops daemons >10 MB (now an exception for
+usr/libexec/locationd; on this machine it was added to ios165/rootfs + system.manifest by hand from the IPSW,
+`ipsw extract --files --pattern usr/libexec/locationd$`), and mkjobs.py DENY-lists it (lemonadep.conf now
+ALLOW=locationd). Location Services' master switch: `LocationServicesEnabledIn8.0` in
+/var/mobile/Library/Preferences/com.apple.locationd.plist (LOCATION_ON=1); var_store's restore replaced
+skeleton files, so init.c gained 'F' skeleton entries that are copied again after the restore
+(forced_files()). Settings shows no Location toggle (MobileGestalt says no GPS; not looked into).
+Still broken, with causes: Weather numbers -- every WeatherKit request is signed with FairPlay Mescal
+("AMSMescalFairPlay Init failed", "Error while creating local signature"); fairplayd exits at once on this
+port (furangelz's inject_fairplay.c: it never even asks IOKit), unsolved upstream. Maps tiles -- likely the
+same signing and/or VectorKit's Metal rendering (Metal for apps unfinished): not looked into.
+NOT INSTALLED STANDALONE YET: the system image with locationd (out/hackios/system-rd.bin, 2504359936 bytes)
+must be rewritten to userdata+16 GiB from TWRP (install-standalone.ps1 -SystemImage) and the new
+lemonadep-standalone.img flashed (-Boot). boot_b now holds the 21:00 image (Safari fix, no locationd).
+
 **SAFARI FIXED (21:00): pages and video load (user).** Root cause, found with a kernel stackshot of the
 hung processes (`stack_test -k NAME`, userland/src/stack_test.c: stack_snapshot_with_config as root, kcdata
 printed as hex; decoded with xnu's tools/lldbmacros/kcdata.py and symbolicated with `ipsw dyld a2s` against
