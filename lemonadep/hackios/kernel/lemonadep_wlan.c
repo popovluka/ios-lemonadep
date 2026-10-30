@@ -20,6 +20,9 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/errno.h>
+#include <sys/socket.h>
+#include <net/kpi_interface.h>
+#include <netinet/in.h>
 #include <kern/clock.h>
 #include <kern/sched_prim.h>
 #include <machine/machine_routines.h>
@@ -733,9 +736,17 @@ mh_events_poll(void)
 		uint64_t dev_rp = x->rp;
 		uint32_t dev_i = (uint32_t)((dev_rp - (mh_iova + er_off[r])) / 16);
 		int n = 0;
-		while (er_rp[r] != dev_i && dev_i < er_n[r] && n++ < 64) {
+		/*
+		 * By the elements themselves, not only the chip's read pointer: that one has lagged behind an
+		 * event already written, for as long as the chip had nothing else to say (a QMI reply, 10 s).
+		 * Every element is cleared once read, so a type that is not 0 is a new event.
+		 */
+		for (;;) {
 			mh_inval(er_off[r] + er_rp[r] * 16, 16);
 			struct mhi_el *e = (struct mhi_el *)(mh + er_off[r] + er_rp[r] * 16);
+			if (!((er_rp[r] != dev_i && dev_i < er_n[r]) || (e->d1 >> 16 & 0xff) != 0) || n++ >= 64) {
+				break;
+			}
 			uint32_t type = e->d1 >> 16 & 0xff, code = e->d0 >> 24;
 			mh_events++;
 			if (mh_events < 48 || type != 0x22) {
@@ -758,6 +769,10 @@ mh_events_poll(void)
 			if (type == 0x22 && e->d1 >> 24 == 20) {
 				mh_tx_done++;
 			}
+			e->ptr = 0;                     /* (uncached: see wlan_mhi_host()) */
+			e->d0 = 0;
+			e->d1 = 0;
+			__asm__ volatile ("dsb sy" ::: "memory");
 			er_rp[r] = (er_rp[r] + 1) % er_n[r];
 			/* hand the element back: wp follows our read pointer, one behind (mhi_recycle_ev_ring) */
 			uint64_t wp = mh_iova + er_off[r] + ((er_rp[r] + er_n[r] - 1) % er_n[r]) * 16;
@@ -1163,6 +1178,31 @@ wlan_driver(void)
 	printf("SWEET WLAN: driver: ath11k start returns %d; qrtr in %u, out %u (done %u), dropped %u, events %u\n", r, mh_rx,
 	    mh_tx_sent, mh_tx_done, wq_dropped, mh_events);
 	wlan_note(7, "ath11k %d rx %u tx %u", r, mh_rx, mh_tx_sent);
+	/* configd's DHCP on en0: the address it got, said once (up to 60 s) */
+	for (int s = 0; r == 0 && s < 60; s++) {
+		ifnet_t ifp = NULL;
+		ifaddr_t *list = NULL;
+		bool found = false;
+		if (ifnet_find_by_name("en0", &ifp) == 0 && ifnet_get_address_list_family(ifp, &list, AF_INET) == 0) {
+			for (int i = 0; list[i] != NULL && !found; i++) {
+				struct sockaddr_in sin;
+				if (ifaddr_address(list[i], (struct sockaddr *)&sin, sizeof(sin)) == 0) {
+					const uint8_t *a = (const uint8_t *)&sin.sin_addr;
+					printf("SWEET WLAN: en0 has IPv4 %u.%u.%u.%u after %d s\n", a[0], a[1], a[2], a[3], s);
+					wlan_note(6, "en0 %u.%u.%u.%u", a[0], a[1], a[2], a[3]);
+					found = true;
+				}
+			}
+			ifnet_free_address_list(list);
+		}
+		if (ifp != NULL) {
+			ifnet_release(ifp);
+		}
+		if (found) {
+			break;
+		}
+		IOSleep(1000);
+	}
 	uint32_t back = 0;
 	if (PE_parse_boot_argn("wlan_return", &back, sizeof(back)) && back) {
 		extern void loader_return(void);
@@ -1221,15 +1261,28 @@ wlan_mhi_host(const lemonadep_mhi_result *m, const void *fw, uint32_t fw_bytes)
 	vm_offset_t region = 0;
 	uint32_t v;
 
-	if (kmem_alloc(kernel_map, &region, MHI_CTRL_BYTES, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) !=
-	    KERN_SUCCESS) {
+	/*
+	 * In one physical piece, used through a second, uncached mapping (as lx_os_radio_memory() does):
+	 * event elements are cleared once read, and a cache line written back could undo what the chip
+	 * wrote into its neighbours meanwhile.
+	 */
+	if (kmem_alloc_contig(kernel_map, &region, MHI_CTRL_BYTES, 0, 0, 0, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
+	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
 		printf("SWEET WLAN: mhi host: no memory\n");
 		return;
 	}
-	mh = (uint8_t *)region;
 	mh_bhioff = m->bhioff;
 	mh_bhieoff = m->bhieoff;
-	if (wlan_dma_map(NULL, mh, MHI_CTRL_BYTES, &mh_iova)) {
+	if (wlan_dma_map(NULL, (void *)region, MHI_CTRL_BYTES, &mh_iova)) {
+		return;
+	}
+	for (vm_offset_t l = region; l < region + MHI_CTRL_BYTES; l += 64) {
+		__asm__ volatile ("dc civac, %0" : : "r" (l));
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+	mh = (uint8_t *)ml_io_map_unmappable(kvtophys(region), MHI_CTRL_BYTES, 0x6 /* VM_WIMG_WCOMB */);
+	if (mh == NULL) {
+		printf("SWEET WLAN: mhi host: no uncached mapping\n");
 		return;
 	}
 	/* channel contexts: 0/1 LOOPBACK, 20 IPCR out, 21 IPCR in (ath11k_mhi_channels_qca6390) */

@@ -83,8 +83,15 @@ QCA6490 (17cb:1103, SOC_HW_VERSION 0x400c0110 = major 1 -> amss.bin, as cnss2 pi
   radio registered (2.4 + 5 GHz, 2x2, HE), country US; a 35-channel passive scan heard 9 access points
   (-43 to -81 dBm). Boot-args: `sweetwlan=17 wlan_msi=1 wlan_ath=1 wifi_scan=1` (+ `wlan_return=1` to go
   back to the loader right after, so the driver's log is the tail of the loader log).
-- **Next:** join (`wifi_join=1` + `fw/network`: name line, passphrase line -- the user's to write), then
-  `wifi_station=1` for configd, then running it together with the GPU/touch boot-args.
+- **ON THE NETWORK (2026-10-30):** `wifi_join=1 wifi=1` joins the user's WPA2 network (`fw/network`,
+  WSL fkernel/fw-wlan only, gitignored), and configd's DHCP gives en0 **192.168.0.21** 5 s later. Needed:
+  TKIP as the *group* cipher in lx_80211 (WPA/WPA2-mixed access point; pairwise stays CCMP; Michael keys
+  swapped as wpa_supplicant does), and the MHI control region on an uncached mapping with event elements
+  read and cleared by content (the chip's ring read pointer lagged written events).
+- Open: the handshake's first message sometimes never arrives (2 of ~6 joins; access point deauth reason
+  15 after 6 s) -- lx_bus retries the join 3 times meanwhile; `wifi_station=1` waits for a request nobody
+  makes here; firmware does not answer mode-off at teardown; Wi-Fi not yet combined with GPU/touch args
+  (one of those drivers kills the loader's USB, which carries the live log).
 
 ### Android
 
