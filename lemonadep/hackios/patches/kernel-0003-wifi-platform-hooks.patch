@@ -1,0 +1,126 @@
+diff --git a/xnu/files/bsd/dev/redwood_wifi.c b/xnu/files/bsd/dev/redwood_wifi.c
+index c7751c1..f9ac0ec 100644
+--- a/xnu/files/bsd/dev/redwood_wifi.c
++++ b/xnu/files/bsd/dev/redwood_wifi.c
+@@ -342,6 +342,9 @@ static volatile bool whole_runs;        /* ... and the thread that does it is at
+  * A number given to the kernel when it was started; with wifi=1 the ones that stands for are as if
+  * given, unless given otherwise (wifi_irq=0: the rings looked at as before).
+  */
++/* Another phone's way to its radio (sys/redwood_qrtr.h): with one, nothing of this phone's is touched. */
++static const struct redwood_wifi_platform *platform;
++
+ uint32_t
+ redwood_wifi_option(const char *name)
+ {
+@@ -355,6 +358,9 @@ redwood_wifi_option(const char *name)
+ 	if (strcmp(name, "wifi_quiet") == 0) {
+ 		return quiet;
+ 	}
++	if (platform != NULL && platform->option != NULL && platform->option(name, &value)) {
++		return value;
++	}
+ 	if (PE_parse_boot_argn(name, &value, sizeof(value))) {
+ 		return value;
+ 	}
+@@ -2785,7 +2791,8 @@ qrtr_out_packet(uint32_t type, uint32_t from_port, uint32_t to_node, uint32_t to
+ 	packet->to_node = to_node;
+ 	packet->to_port = to_port;
+ 	memcpy(packet + 1, data, length);
+-	error = glink_send(packet, (uint32_t)sizeof(*packet) + padded);
++	error = platform != NULL ? platform->qrtr_send(packet, (uint32_t)sizeof(*packet) + padded) :
++	    glink_send(packet, (uint32_t)sizeof(*packet) + padded);
+ 	kfree_data(packet, sizeof(*packet) + padded);
+ 	qrtr_out += error == 0;
+ 	return error;
+@@ -3052,6 +3059,26 @@ qrtr_close(struct redwood_qrtr_port *port)
+ 
+ static const struct redwood_qrtr_ops qrtr_ops = { .open = qrtr_open, .send = qrtr_send, .lookup = qrtr_lookup, .close = qrtr_close };
+ 
++void
++redwood_wifi_platform_set(const struct redwood_wifi_platform *p)
++{
++	platform = p;
++	redwood_qmi_set_transport(p != NULL ? &qrtr_ops : NULL);
++}
++
++/* The platform's link: a datagram (or NULL: nothing, only a look at new lookups), from its one delivering thread. */
++void
++redwood_wifi_qrtr_deliver(const void *data, uint32_t length)
++{
++	link_thread_is = current_thread();
++	lck_mtx_lock(&qrtr_calling);
++	if (data != NULL) {
++		qrtr_input(data, length);
++	}
++	qrtr_fresh();
++	lck_mtx_unlock(&qrtr_calling);
++}
++
+ /* ---- the link's thread -------------------------------------------------------------------------------- */
+ 
+ static volatile bool link_wanted, link_runs;
+@@ -3917,6 +3944,9 @@ radio_map(uint64_t physical, uint64_t size, uint64_t attributes, unsigned long l
+ bool
+ redwood_wifi_radio_map(uint64_t physical, uint64_t size, unsigned long long *address)
+ {
++	if (platform != NULL) {
++		return platform->radio_map(physical, size, address);
++	}
+ 	return radio_map(physical, size, RADIO_PTE, address);
+ }
+ 
+@@ -3930,6 +3960,9 @@ redwood_wifi_radio_msi(unsigned long long *address, uint32_t *data, uint32_t *fi
+ {
+ 	static unsigned long long page;
+ 
++	if (platform != NULL) {
++		return false;
++	}
+ 	if (page == 0) {
+ 		tell("wifi: wifi_irq: THE RADIO'S SMMU CONTEXT GETS AN ENTRY for the GIC's register that raises an interrupt (%#llx), "
+ 		    "as a device's page\n", RADIO_MSI_REGISTER);
+@@ -3970,6 +4003,9 @@ radio_space_try(void)
+ bool
+ redwood_wifi_dsp_is_up(void)
+ {
++	if (platform != NULL) {
++		return platform->up();
++	}
+ 	printf("wifi: %u: the driver asks for the firmware's processor: it %s\n", step, dsp_started && glink.open ? "has been up "
+ 	    "since step 11, with the link of step 13" : "IS NOT UP");
+ 	return dsp_started && glink.open;
+@@ -3988,6 +4024,9 @@ redwood_wifi_driver_file(const char *name, uint64_t *size)
+ 	static const char *const files[][2] = { { "board.bin", "bd_m20gl.elf" }, { "regdb.bin", "regdb_xiaomi.bin" } };
+ 	const char *last = strrchr(name, '/');
+ 
++	if (platform != NULL) {
++		return platform->file(name, size);
++	}
+ 	last = last == NULL ? name : last + 1;
+ 	for (unsigned i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+ 		if (strcmp(last, files[i][0]) == 0) {
+diff --git a/xnu/files/bsd/sys/redwood_qrtr.h b/xnu/files/bsd/sys/redwood_qrtr.h
+index 0756558..8f56428 100644
+--- a/xnu/files/bsd/sys/redwood_qrtr.h
++++ b/xnu/files/bsd/sys/redwood_qrtr.h
+@@ -46,4 +46,20 @@ struct redwood_qrtr_ops {
+ /* The transport there is; NULL takes it away (handles made before keep the one they were made with). */
+ void redwood_qmi_set_transport(const struct redwood_qrtr_ops *ops);
+ 
++/*
++ * Another phone's radio under the same driver (lemonadep: a QCA6490 on PCIe, QRTR over MHI's IPCR
++ * channels): what bsd/dev/redwood_wifi.c asks the phone for, answered by that phone's code. Set,
++ * the QMI helpers have the router, and the driver (redwood_lx.c) its memory, files and options
++ * from here.
++ */
++struct redwood_wifi_platform {
++	bool (*radio_map)(uint64_t physical, uint64_t size, unsigned long long *address);
++	bool (*up)(void);                                       /* the firmware is running and the link is up */
++	int (*qrtr_send)(const void *packet, uint32_t length); /* one whole QRTR packet, header included */
++	const uint8_t *(*file)(const char *name, uint64_t *size);
++	bool (*option)(const char *name, uint32_t *value);      /* an option of its own, or false: the boot-args */
++};
++void redwood_wifi_platform_set(const struct redwood_wifi_platform *platform);
++void redwood_wifi_qrtr_deliver(const void *data, uint32_t length);
++
+ #endif /* _SYS_REDWOOD_QRTR_H_ */

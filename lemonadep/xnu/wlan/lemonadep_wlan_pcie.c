@@ -190,6 +190,9 @@ lemonadep_wlan_pcie_up(const lemonadep_wlan_io *io, lemonadep_wlan_result *r, le
 	if (!(r->bt_en & 1u)) {
 		io->delay_us(io->cookie, LEMONADEP_WLAN_BT_OFF_DELAY_US);
 	}
+	/* a chip left running by an earlier boot does not train again: power it off first (cnss_power_off) */
+	WTRY(gpio_out(io, LEMONADEP_WLAN_EN_GPIO, LEMONADEP_WLAN_EN_DRIVE_MA, TLMM_PULL_UP, 0));
+	io->delay_us(io->cookie, LEMONADEP_WLAN_BT_OFF_DELAY_US);
 	WTRY(gpio_out(io, LEMONADEP_WLAN_EN_GPIO, LEMONADEP_WLAN_EN_DRIVE_MA, TLMM_PULL_UP, 1));
 	io->delay_us(io->cookie, LEMONADEP_WLAN_EN_DELAY_US);
 

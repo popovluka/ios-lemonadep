@@ -58,13 +58,23 @@ QCA6490 (17cb:1103, SOC_HW_VERSION 0x400c0110 = major 1 -> amss.bin, as cnss2 pi
 - PCIe PARF BDF-to-SID table + **clear BDF_TO_SID_BYPASS (boot chain leaves 0x1)** -- without it every
   chip DMA went out as 0x1c00, faulted, XBL ramdump.
 - BHI: SUCCESS (`0x81c0ffee`), no SMMU fault, the chip reads our bytes (a bad ELF magic makes BHI fail).
-- **Blocker:** the boot ROM never leaves PBL. `TCSR_PBL_LOGGING` goes `0xef150600` (before) ->
-  `0xef0e0200` (after BHI); SBL log start 0. Same with: amss20.bin, a 0x31000-byte SBL, a fresh DMA
-  buffer, without ath11k's sw_reset, HPM rails, 30 s timeout. QFPROM pwr ctrl already 0x6a.
-  A Pixel 7a QCA6490 port (github derekross/omarchy-mobile#36) got 0xef0e0200 only from an image with
-  e_phnum = 0; their own stall is 0xef0a0002 and unsolved.
-- Not yet tried: PCIe MSI enabled with a real target (cnss2 enables MSI before MHI; PBL INTVEC 0),
-  the interconnect votes (pcie_to_memnoc / memnoc_to_ddr), Gen2/Gen3 link, ADSP power-collapse vote.
+- PBL stuck at `0xef0e0200` was fixed by **enabling MSI** (target 0x17a10040 mapped in our SMMU context,
+  data 800). Then our MHI host (contexts, rings, M0, BHIe of all of amss.bin) -> **EE 2, mission mode**.
+- IPCR channels 20/21 started on the command ring (CRDB 0x70); the firmware is QRTR node 7 and offers
+  WLFW (service 0x45) at port 1. `WLAN_EN` is now pulsed low first: a chip left running by the last
+  run did not train the link again.
+- **ath11k runs on it** (furangelz's LinuxKPI port, `tools/mk-ath11k.sh`, Linux 7.0.14): boot-arg
+  `wlan_ath=1` hands IPCR to `redwood_wifi.c`'s QRTR + QMI via `struct redwood_wifi_platform`
+  (`patches/kernel-0003`), and `lx_bus.c` gets a PCI mode (`wifi_pci`, BAR0 windowing; `patches/lx-0001`).
+  QMI: indication register, host cap, memory request (5 MB type 1 + 3.6 MB type 4), memory ready,
+  target cap: `chip_id 0 family 0xb board_id 0xff soc_id 0x400c0110`, fw `WLAN.HSP.1.1-01737`.
+- Fix that got past the memory step: **DMA memory must be size-aligned** (lx_base pool, now 64 MB,
+  16 MB-aligned IOVA). With 64-byte alignment the firmware went to RDDM 0.2 s after the response
+  (BHI errcode 0x73086).
+- The chip is the **WCN6851** of Dmitry Baryshkov's 2026-06 series "enable WiFi/BT on SM8350 HDK"
+  (ath11k hw1.1 = WCN6855 hw2.0 params, num_vdevs 3). We run it as `wifi_hw20=1`.
+- **Next:** board data. ath11k wants board-2.bin/board.bin; the phone has bdwlan* + regdb in the modem
+  partition (image/), not pulled yet (`tools/pull-wlan-fw.sh` from recovery).
 
 ### Android
 

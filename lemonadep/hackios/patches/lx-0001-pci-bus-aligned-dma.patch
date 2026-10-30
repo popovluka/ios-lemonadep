@@ -1,0 +1,178 @@
+diff --git a/wifi/lx/src/lx_base.c b/wifi/lx/src/lx_base.c
+index df4daee..53014d7 100644
+--- a/wifi/lx/src/lx_base.c
++++ b/wifi/lx/src/lx_base.c
+@@ -755,8 +755,8 @@ iounmap(void *address)
+  * or the other way round. The first part of it is handed out for good, a stretch at a time
+  * (rings); the rest is slots of one size, taken and given back (buffers).
+  */
+-#define POOL_SIZE	(44u << 20)
+-#define POOL_RINGS	(12u << 20)		/* (the data path's rings and link descriptors come to about 6 MB) */
++#define POOL_SIZE	(64u << 20)
++#define POOL_RINGS	(32u << 20)		/* (the data path's rings and link descriptors come to about 6 MB) */
+ #define POOL_SLOT	4096u
+ #define POOL_SLOTS	((POOL_SIZE - POOL_RINGS) / POOL_SLOT)
+ 
+@@ -796,15 +796,25 @@ linux_dma_alloc_coherent(struct device *dev, size_t size, dma_addr_t *dma_handle
+ {
+ 	uint32_t at;
+ 
++	uint32_t align = 64;
++
+ 	size = roundup2(size, 64);
++	/*
++	 * size-aligned, as Linux's IOMMU allocator gives it (iova: a power of two at least the size, up
++	 * to 4 MB here): the firmware of a PCIe chip maps what it is given (wifi_pci, 2026-10-30: a
++	 * WCN6851 crashed 0.2 s after it was handed 5 MB and 3.6 MB at 64-byte boundaries)
++	 */
++	while (align < size && align < (4u << 20)) {
++		align <<= 1;
++	}
+ 	lx_os_lock();
+-	at = pool.rings_used;
++	at = roundup2(pool.rings_used, align);
+ 	if (pool.memory == NULL || at + size > POOL_RINGS) {
+ 		lx_os_unlock();
+ 		printf("lx: no room for %zu more bytes of rings\n", size);
+ 		return (NULL);
+ 	}
+-	pool.rings_used += size;
++	pool.rings_used = at + size;
+ 	lx_os_unlock();
+ 	bzero(pool.memory + at, size);
+ 	*dma_handle = pool.address + at;
+diff --git a/wifi/lx/src/lx_bus.c b/wifi/lx/src/lx_bus.c
+index 6943a33..ac0e09c 100644
+--- a/wifi/lx/src/lx_bus.c
++++ b/wifi/lx/src/lx_bus.c
+@@ -62,6 +62,11 @@ static struct {
+ 	int ce_vector[CE_COUNT_MAX];		/* a copy engine's vector, -1: it has none (ce.c: CE_ATTR_DIS_INTR) */
+ 	int group_vector[ATH11K_EXT_IRQ_GRP_NUM_MAX];
+ 	unsigned long long late;		/* work the thread found that no interrupt had brought */
++
++	/* wifi_pci=1: a WCN6855-class chip (lemonadep's QCA6490) behind BAR0, one moving window (pci.c) */
++	bool pci;
++	u32 window_now;
++	volatile int window_held;
+ } bus;
+ 
+ /*
+@@ -179,9 +184,52 @@ window(struct ath11k_base *ab, u32 offset)
+  * before it first touches them; once it has stopped the bus, on its way to asking for the mode
+  * "off", nothing is let through any more.
+  */
++/*
++ * PCI (pci.c: ath11k_pci_window_read32() and _write32(), no static windows on this chip): below
++ * 512K straight through BAR0, above through the window register and the second 512K. The window
++ * and the access after it go together: one at a time.
++ */
++static void
++pci_hold(void)
++{
++	while (__atomic_test_and_set(&bus.window_held, __ATOMIC_ACQUIRE)) {
++		;
++	}
++}
++
++static void
++pci_let_go(void)
++{
++	__atomic_clear(&bus.window_held, __ATOMIC_RELEASE);
++}
++
++static u32
++pci_window(struct ath11k_base *ab, u32 offset)
++{
++	u32 w = FIELD_GET(ATH11K_PCI_WINDOW_VALUE_MASK, offset);
++
++	if (offset < ATH11K_PCI_WINDOW_START) {
++		return (offset);
++	}
++	if (w != bus.window_now) {
++		iowrite32(ATH11K_PCI_WINDOW_ENABLE_BIT | w, (u8 *)ab->mem + ATH11K_PCI_WINDOW_REG_ADDRESS);
++		(void)ioread32((u8 *)ab->mem + ATH11K_PCI_WINDOW_REG_ADDRESS);
++		bus.window_now = w;
++	}
++	return (ATH11K_PCI_WINDOW_START + (offset & ATH11K_PCI_WINDOW_RANGE_MASK));
++}
++
+ static bool
+ refused(struct ath11k_base *ab, u32 offset)
+ {
++	if (bus.pci) {
++		/* (behind PCIe every register answers while the link is up: only after the bus is stopped is nothing let through) */
++		if (bus.closed && bus.refused++ < 8) {
++			lx_tell("lx: the chip's %#x is reached for after the bus was stopped: NOT DONE\n", offset);
++		}
++		return (bus.closed);
++	}
++
+ 	bool known = offset < ATH11K_PCI_WINDOW_START || (offset ^ HAL_SEQ_WCSS_UMAC_OFFSET) < ATH11K_PCI_WINDOW_RANGE_MASK ||
+ 	    (offset ^ HAL_SEQ_WCSS_UMAC_CE0_SRC_REG(ab)) < ATH11K_PCI_WINDOW_RANGE_MASK;
+ 
+@@ -250,7 +298,11 @@ bus_read32(struct ath11k_base *ab, u32 offset)
+ 		return (0);
+ 	}
+ 	bus.reads++;
+-	if (bus.how >= 2 && ab->mem != NULL) {
++	if (bus.how >= 2 && ab->mem != NULL && bus.pci) {
++		pci_hold();
++		value = ioread32((u8 *)ab->mem + pci_window(ab, offset));
++		pci_let_go();
++	} else if (bus.how >= 2 && ab->mem != NULL) {
+ 		value = ioread32((u8 *)ab->mem + window(ab, offset));
+ 	}
+ 	if (bus.said < SAID_FIRST) {
+@@ -274,7 +326,12 @@ bus_write32(struct ath11k_base *ab, u32 offset, u32 value)
+ 		printf("lx: %s the chip's %#x (at +%#x of its block): %#x\n", bus.how >= 2 ? "about to write" : "NOT WRITTEN (wifi_lx=1):",
+ 		    offset, window(ab, offset), value);
+ 	}
+-	if (bus.how >= 2 && ab->mem != NULL) {
++	if (bus.how >= 2 && ab->mem != NULL && bus.pci) {
++		__asm __volatile("dsb sy");
++		pci_hold();
++		iowrite32(value, (u8 *)ab->mem + pci_window(ab, offset));
++		pci_let_go();
++	} else if (bus.how >= 2 && ab->mem != NULL) {
+ 		__asm __volatile("dsb sy");	/* (what was written to a ring is in memory before the radio is told of it) */
+ 		iowrite32(value, (u8 *)ab->mem + window(ab, offset));
+ 	}
+@@ -746,14 +803,25 @@ lx_start(void)
+ 	device.of_node = &node;
+ 	device.kobj.name = "wifi";
+ 
+-	/* ahb.c: ath11k_ahb_probe(), for this chip */
+-	ab = ath11k_core_alloc(&device, 0, ATH11K_BUS_AHB);
++	/* ahb.c: ath11k_ahb_probe(), for this chip; or pci.c's ath11k_pci_probe() for a WCN6855 (wifi_pci=1) */
++	bus.pci = lx_os_option("wifi_pci") != 0;
++	ab = ath11k_core_alloc(&device, 0, bus.pci ? ATH11K_BUS_PCI : ATH11K_BUS_AHB);
+ 	if (ab == NULL) {
+ 		return (ENOMEM);
+ 	}
+ 	ab->hif.ops = &bus_ops;
+ 	bus.irq = false;
+-	if (lx_os_option("wifi_irq")) {
++	if (bus.pci) {
++		/* BAR0 where the platform has it (wifi_pci_bar), 2 MB; the chip is up already (lx_os_rproc_boot()) */
++		ab->mem_len = 0x200000;
++		ab->mem = lx_os_map_registers(lx_os_option("wifi_pci_bar"), ab->mem_len);
++		bus.window_now = ~0u;
++		if (ab->mem == NULL) {
++			return (ENXIO);
++		}
++		lx_tell("lx: PCI: BAR0 at %#x (%u KB)\n", lx_os_option("wifi_pci_bar"), (unsigned)(ab->mem_len >> 10));
++	}
++	if (!bus.pci && lx_os_option("wifi_irq")) {
+ 		unsigned long long address;
+ 		unsigned data;
+ 
+@@ -771,7 +839,8 @@ lx_start(void)
+ 			lx_tell("lx: wifi_irq: the radio cannot be shown where to raise an interrupt: the rings are looked at, as before\n");
+ 		}
+ 	}
+-	ab->hw_rev = ATH11K_HW_WCN6750_HW10;
++	ab->hw_rev = bus.pci ? (lx_os_option("wifi_hw20") ? ATH11K_HW_WCN6855_HW20 : ATH11K_HW_WCN6855_HW21) :
++	    ATH11K_HW_WCN6750_HW10;
+ 	ab->fw_mode = ATH11K_FIRMWARE_MODE_NORMAL;
+ 	if ((ret = ath11k_core_pre_init(ab)) != 0 || (ret = ath11k_hal_srng_init(ab)) != 0 || (ret = ath11k_ce_alloc_pipes(ab)) != 0) {
+ 		lx_tell("lx: the driver does not get as far as its exchange with the firmware: %d\n", ret);

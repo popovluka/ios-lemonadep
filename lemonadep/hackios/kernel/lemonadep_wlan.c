@@ -19,6 +19,7 @@
  */
 #include <sys/param.h>
 #include <sys/systm.h>
+#include <sys/errno.h>
 #include <kern/clock.h>
 #include <kern/sched_prim.h>
 #include <machine/machine_routines.h>
@@ -159,7 +160,7 @@ wlan_trace(void *c, const char *what, uint32_t a, uint32_t b, uint32_t cc, unsig
 #define WSP_STREAM_MASK         0x0000u
 #define WSP_ADDRESSES           0xa0000000ull
 #define WSP_ADDRESSES_SIZE      0x10000000ull
-#define WSP_TABLES              48u             /* of 4K: root, level 2, and 2 MB of addresses each other */
+#define WSP_TABLES              80u             /* of 4K: root, level 2, and 2 MB of addresses each other */
 #define WSP_PTE                 (3ull | 1ull << 6 | 2ull << 8 | 1ull << 10 | 1ull << 11)
 #define WSP_PTE_ADDRESS         0x0000fffffffff000ull
 #define WSP_SCR0                0x000u
@@ -671,7 +672,9 @@ struct mhi_el { uint64_t ptr; uint32_t d0, d1; };
 #define MHI_NCH         128
 #define MHI_CTRL_BYTES  0x10000u
 enum { O_CHAN = 0, O_ER = 0x2000, O_CMD = 0x2100, O_ER0 = 0x2200, O_ER1 = 0x3000, O_CMDR = 0x4000,
-	O_CH0 = 0x4800, O_CH1 = 0x4a00, O_CH20 = 0x5000, O_CH21 = 0x5400, O_RXBUF = 0x8000 };
+	O_CH0 = 0x4800, O_CH1 = 0x4a00, O_CH20 = 0x5000, O_CH21 = 0x5400, O_TXBUF = 0x5800, O_RXBUF = 0x8000 };
+#define MH_RXBUFS       8               /* 4 KB each, element i of ch21 always uses buffer i % 8 */
+#define MH_RXLEN        0x1000u
 static const void *wlan_fw_full;
 static uint32_t wlan_fw_full_bytes;
 static uint8_t *mh;                     /* kernel view of the control region */
@@ -679,7 +682,12 @@ static uint64_t mh_iova;                /* the chip's */
 static uint32_t er_rp[2];               /* our read index into each event ring (elements) */
 static const uint32_t er_n[2] = { 32, 256 };
 static const uint32_t er_off[2] = { O_ER0, O_ER1 };
-static uint32_t mh_m0, mh_ee_ev, mh_events;
+static uint32_t mh_m0, mh_ee_ev, mh_events, mh_bhioff;
+static uint32_t mh_cc, mh_cc_code;      /* command completions, last code (1 = success) */
+static uint32_t mh_cmd_i, mh_ch20_i, mh_ch21_i, mh_rx, chdboff;
+static volatile uint32_t mh_tx_done;
+static bool wlan_ath;                   /* the driver (ath11k) has the link: packets in go to its QRTR */
+static void mh_rx_done(uint32_t elem, uint32_t len);
 
 static void
 mh_clean(uint32_t off, uint32_t len)
@@ -730,13 +738,25 @@ mh_events_poll(void)
 			struct mhi_el *e = (struct mhi_el *)(mh + er_off[r] + er_rp[r] * 16);
 			uint32_t type = e->d1 >> 16 & 0xff, code = e->d0 >> 24;
 			mh_events++;
-			printf("SWEET WLAN: mhi ev[%d][%u] type %#x code/state/ee %#x len %u ch %u ptr %#llx\n", r, er_rp[r],
-			    type, code, e->d0 & 0xffff, e->d1 >> 24, e->ptr);
+			if (mh_events < 48 || type != 0x22) {
+				printf("SWEET WLAN: mhi ev[%d][%u] type %#x code/state/ee %#x len %u ch %u ptr %#llx\n", r, er_rp[r],
+				    type, code, e->d0 & 0xffff, e->d1 >> 24, e->ptr);
+			}
 			if (type == 0x20 && code == 2) {
 				mh_m0 = 1;
 			}
 			if (type == 0x40) {
 				mh_ee_ev = code;
+			}
+			if (type == 0x21) {
+				mh_cc++;
+				mh_cc_code = code;
+			}
+			if (type == 0x22 && e->d1 >> 24 == 21) {
+				mh_rx_done((uint32_t)((e->ptr - (mh_iova + O_CH21)) / 16), e->d0 & 0xffff);
+			}
+			if (type == 0x22 && e->d1 >> 24 == 20) {
+				mh_tx_done++;
 			}
 			er_rp[r] = (er_rp[r] + 1) % er_n[r];
 			/* hand the element back: wp follows our read pointer, one behind (mhi_recycle_ev_ring) */
@@ -748,11 +768,370 @@ mh_events_poll(void)
 	}
 }
 
+/* One element on a transfer ring: written, context wp moved, doorbell (mhi_gen_tre, mhi_ring_chan_db). */
+static void
+mh_queue(uint32_t ch, uint32_t ring, uint32_t n, uint32_t *wi, uint64_t buf, uint32_t len)
+{
+	struct mhi_el *e = (struct mhi_el *)(mh + ring + *wi * 16);
+	struct mhi_ctx *x = (struct mhi_ctx *)(mh + O_CHAN + ch * sizeof(struct mhi_ctx));
+
+	e->ptr = buf;
+	e->d0 = len & 0xffff;
+	e->d1 = 2u << 16 | 1u << 9;             /* TRANSFER, IEOT */
+	*wi = (*wi + 1) % n;
+	mh_clean(ring, n * 16);
+	x->wp = mh_iova + ring + *wi * 16;
+	mh_clean(O_CHAN + ch * sizeof(struct mhi_ctx), sizeof(struct mhi_ctx));
+	mh_db(chdboff + 8 * ch, x->wp);
+}
+
+/*
+ * Packets in for the driver: copied out by the polling thread, handed to QRTR by another, since
+ * what QRTR calls may send, and a send can wait for the polling thread (a free buffer out).
+ */
+#define WQ_N    32
+struct wq_slot { uint32_t len; uint8_t data[MH_RXLEN]; };
+static struct wq_slot *wq;
+static volatile uint32_t wq_head, wq_tail, wq_dropped;
+static void
+wq_put(const void *data, uint32_t len)
+{
+	if (wq == NULL || wq_head - wq_tail >= WQ_N || len > MH_RXLEN) {
+		wq_dropped++;
+		return;
+	}
+	struct wq_slot *s = &wq[wq_head % WQ_N];
+	memcpy(s->data, data, len);
+	s->len = len;
+	__asm__ volatile ("dmb ish" ::: "memory");
+	wq_head++;
+}
+
+/* A packet on IPCR in (ch21): QRTR v1 header decoded, the start in hex, and the buffer queued again. */
+static void
+mh_rx_done(uint32_t elem, uint32_t len)
+{
+	uint32_t off = O_RXBUF + (elem % MH_RXBUFS) * MH_RXLEN;
+	mh_inval(off, MH_RXLEN);
+	const uint32_t *w = (const uint32_t *)(mh + off);
+	mh_rx++;
+	if (wlan_ath) {
+		wq_put(mh + off, len);
+		mh_queue(21, O_CH21, 64, &mh_ch21_i, mh_iova + off, MH_RXLEN);
+		return;
+	}
+	printf("SWEET WLAN: qrtr rx %u (elem %u, %u bytes): ver %u type %u src %u:%#x confirm %u size %u dst %#x:%#x\n", mh_rx,
+	    elem, len, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
+	for (uint32_t i = 8; i < len / 4 && i < 8 + 24; i += 8) {
+		printf("SWEET WLAN: qrtr rx   %08x %08x %08x %08x %08x %08x %08x %08x\n", w[i], w[i + 1], w[i + 2], w[i + 3],
+		    w[i + 4], w[i + 5], w[i + 6], w[i + 7]);
+	}
+	mh_queue(21, O_CH21, 64, &mh_ch21_i, mh_iova + off, MH_RXLEN);
+}
+
+/* START_CHAN on the command ring, waited for (mhi_update_channel_state). */
+static uint32_t
+mh_start_chan(uint32_t ch)
+{
+	struct mhi_el *e = (struct mhi_el *)(mh + O_CMDR + mh_cmd_i * 16);
+	struct mhi_ctx *x = (struct mhi_ctx *)(mh + O_CMD);
+	uint32_t before = mh_cc;
+
+	e->ptr = 0;
+	e->d0 = 0;
+	e->d1 = ch << 24 | 0x12u << 16;
+	mh_cmd_i = (mh_cmd_i + 1) % 128;
+	mh_clean(O_CMDR, 128 * 16);
+	x->wp = mh_iova + O_CMDR + mh_cmd_i * 16;
+	mh_clean(O_CMD, sizeof(struct mhi_ctx));
+	mh_db(0x70, x->wp);                     /* CRDB */
+	for (int i = 0; i < 3000 && mh_cc == before; i++) {
+		mh_events_poll();
+		delay(1000);
+	}
+	mh_inval(O_CHAN + ch * sizeof(struct mhi_ctx), sizeof(struct mhi_ctx));
+	uint32_t st = ((struct mhi_ctx *)(mh + O_CHAN + ch * sizeof(struct mhi_ctx)))->a & 0xff;
+	printf("SWEET WLAN: mhi: start ch%u: %s, code %u, chstate %u\n", ch, mh_cc != before ? "completed" : "NO completion",
+	    mh_cc_code, st);
+	return mh_cc != before && mh_cc_code == 1;
+}
+
+/* ---- the driver: furangelz's ath11k port (wifi/lx, bsd/dev/redwood_wifi.c) on this link ---------------- */
+
+#include <sys/redwood_qrtr.h>
+extern int redwood_lx_start(void);
+extern void IOSleep(unsigned int milliseconds);
+
+#define MH_TXBUFS       16
+#define MH_TXLEN        0x2400u         /* a QRTR packet: 32 bytes of header and up to 8 KB */
+static uint8_t *mh_tx;
+static uint64_t mh_tx_iova;
+static uint32_t mh_tx_sent, wlan_bar_pa;
+static volatile bool wlan_link_up;
+static LCK_GRP_DECLARE(wlan_lck_grp, "lemonadep-wlan");
+static LCK_MTX_DECLARE(wlan_tx_lock, &wlan_lck_grp);
+
+/* `size` bytes from `pa` on, one piece, behind the chip's next addresses (the driver's pool, 44 MB). */
+static bool
+wlan_radio_map(uint64_t pa, uint64_t size, unsigned long long *address)
+{
+	uint64_t at, *l2, *l3;
+	bool ok = true;
+
+	size = round_page(size);
+	lck_mtx_lock(&redwood_smmu_lock);
+	if (size >= (16ull << 20)) {
+		wsp.next = (wsp.next + (16ull << 20) - 1) & ~((16ull << 20) - 1);     /* a pool: 16 MB-aligned, so what is in it can be */
+	}
+	if (wsp.tables == 0 || wsp.next + size > WSP_ADDRESSES_SIZE) {
+		lck_mtx_unlock(&redwood_smmu_lock);
+		return false;
+	}
+	at = WSP_ADDRESSES + wsp.next;
+	for (uint64_t off = 0; off < size && ok; off += 4096u) {
+		uint64_t a = at + off;
+		l2 = wsp_next(&wsp_table(0)[a >> 30 & 0x1ffu]);
+		l3 = l2 ? wsp_next(&l2[a >> 21 & 0x1ffu]) : NULL;
+		ok = l3 != NULL;
+		if (ok) {
+			l3[a >> 12 & 0x1ffu] = ((pa + off) & WSP_PTE_ADDRESS) | WSP_PTE;
+		}
+	}
+	for (vm_offset_t line = wsp.tables; line < wsp.tables + 4096u * WSP_TABLES; line += 64) {
+		__asm__ volatile ("dc civac, %0" : : "r" (line));
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+	if (ok) {
+		wsp.next += size;
+		*address = at;
+		if (wsp.on) {
+			wsp_wr(wsp_cb() + WSP_CB_TLBIASID, wsp.context);
+			wsp_wr(wsp_cb() + WSP_CB_TLBSYNC, 1);
+		}
+	}
+	lck_mtx_unlock(&redwood_smmu_lock);
+	printf("SWEET WLAN: driver memory %llu KB at pa %#llx -> chip %#llx%s\n", size >> 10, pa, at, ok ? "" : " FAILED (tables)");
+	return ok;
+}
+
+static bool
+wlan_platform_up(void)
+{
+	return wlan_link_up;
+}
+
+/* One QRTR packet out on IPCR (ch20): a free buffer of 16, its element, the doorbell; not waited for. */
+static int
+wlan_qrtr_send(const void *packet, uint32_t length)
+{
+	int e = 0;
+
+	if (length > MH_TXLEN || !wlan_link_up) {
+		return length > MH_TXLEN ? EMSGSIZE : ENETDOWN;
+	}
+	lck_mtx_lock(&wlan_tx_lock);
+	for (int ms = 0; mh_tx_sent - mh_tx_done >= MH_TXBUFS && ms < 2000; ms++) {
+		IOSleep(1);
+	}
+	if (mh_tx_sent - mh_tx_done >= MH_TXBUFS) {
+		e = EAGAIN;
+	} else {
+		uint8_t *b = mh_tx + (mh_tx_sent % MH_TXBUFS) * MH_TXLEN;
+		memcpy(b, packet, length);
+		for (uintptr_t l = (uintptr_t)b & ~63ul; l < (uintptr_t)(b + length); l += 64) {
+			__asm__ volatile ("dc cvac, %0" : : "r" (l));
+		}
+		__asm__ volatile ("dsb sy" ::: "memory");
+		mh_queue(20, O_CH20, 64, &mh_ch20_i, mh_tx_iova + (mh_tx_sent % MH_TXBUFS) * MH_TXLEN, length);
+		mh_tx_sent++;
+	}
+	lck_mtx_unlock(&wlan_tx_lock);
+	return e;
+}
+
+/* The driver's files ("ath11k/WCN6855/hw2.1/board-2.bin"): by the last name, from the small image's fw/. */
+static const uint8_t *
+wlan_platform_file(const char *name, uint64_t *size)
+{
+	static const char *const files[][2] = { { "board.bin", "bdwlan.bin" }, { "regdb.bin", "regdb.bin" }, { "m3.bin", "m3.bin" } };
+	const char *last = strrchr(name, '/');
+	const uint8_t *data = NULL;
+
+	last = last == NULL ? name : last + 1;
+	for (unsigned i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+		if (strcmp(last, files[i][0]) == 0) {
+			data = redwood_image_file("fw", files[i][1], size, NULL);
+		}
+	}
+	printf("SWEET WLAN: driver asks for %s: %s\n", name, data ? "given" : "not there");
+	return data;
+}
+
+/* What the driver is to do here, unless a boot-arg says otherwise. */
+static bool
+wlan_platform_option(const char *name, uint32_t *value)
+{
+	static const struct {
+		const char *name;
+		uint32_t value;
+	} ours[] = { { "wifi_pci", 1 }, { "wifi_lx", 2 }, { "wifi_irq", 0 }, { "wifi_smmu", 2 } };
+	uint32_t given;
+
+	if (PE_parse_boot_argn(name, &given, sizeof(given))) {
+		return false;
+	}
+	if (strcmp(name, "wifi_pci_bar") == 0) {
+		*value = wlan_bar_pa;
+		return true;
+	}
+	for (unsigned i = 0; i < sizeof(ours) / sizeof(ours[0]); i++) {
+		if (strcmp(name, ours[i].name) == 0) {
+			*value = ours[i].value;
+			return true;
+		}
+	}
+	return false;
+}
+
+static const struct redwood_wifi_platform wlan_platform = {
+	.radio_map = wlan_radio_map, .up = wlan_platform_up, .qrtr_send = wlan_qrtr_send, .file = wlan_platform_file,
+	.option = wlan_platform_option,
+};
+
+static void
+wlan_poll_thread(void *arg, wait_result_t wr)
+{
+	(void)arg;
+	(void)wr;
+	uint32_t said = 0, st_was = 0;
+	for (unsigned n = 0;; n++) {
+		mh_events_poll();
+		if (n % 16 == 0) {
+			uint32_t fsr = wsp_rd(wsp_cb() + WSP_CB_FSR), st = chip_rd(0x48);
+			if ((fsr & WSP_FSR_ALL) && said < 4) {
+				said++;
+				printf("SWEET WLAN: SMMU FAULT: fsr %#x far %#llx fsynr0 %#x\n", fsr,
+				    (uint64_t)wsp_rd(wsp_cb() + WSP_CB_FAR) | (uint64_t)wsp_rd(wsp_cb() + WSP_CB_FAR + 4) << 32,
+				    wsp_rd(wsp_cb() + WSP_CB_FSYNR0));
+				wsp_wr(wsp_cb() + WSP_CB_FSR, fsr);
+			}
+			uint32_t sg = wsp_rd(WSP_SGFSR);
+			if (sg && said < 4) {
+				said++;
+				printf("SWEET WLAN: SMMU GLOBAL FAULT: sgfsr %#x sgfsynr1 %#x\n", sg, wsp_rd(WSP_SGFSYNR1));
+			}
+			if (st != st_was) {
+				printf("SWEET WLAN: mhi status %#x -> %#x (ee %u) bhi errcode %#x errdbg %#x %#x %#x\n", st_was, st,
+				    chip_rd(mh_bhioff + 0x28), chip_rd(mh_bhioff + 0x30), chip_rd(mh_bhioff + 0x34),
+				    chip_rd(mh_bhioff + 0x38), chip_rd(mh_bhioff + 0x3c));
+				st_was = st;
+			}
+		}
+		IOSleep(1);
+	}
+}
+
+static void
+wlan_deliver_thread(void *arg, wait_result_t wr)
+{
+	(void)arg;
+	(void)wr;
+	for (;;) {
+		while (wq_tail != wq_head) {
+			__asm__ volatile ("dmb ish" ::: "memory");
+			struct wq_slot *s = &wq[wq_tail % WQ_N];
+			redwood_wifi_qrtr_deliver(s->data, s->len);
+			wq_tail++;
+		}
+		redwood_wifi_qrtr_deliver(NULL, 0);
+		IOSleep(1);
+	}
+}
+
+/* IPCR is up: the driver gets it, with two threads of ours under it, and runs (wlan_ath=1). */
+static void
+wlan_driver(void)
+{
+	vm_offset_t tx = 0, q = 0;
+	thread_t t;
+
+	if (kmem_alloc(kernel_map, &tx, MH_TXBUFS * MH_TXLEN, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) !=
+	    KERN_SUCCESS || kmem_alloc(kernel_map, &q, round_page(WQ_N * sizeof(struct wq_slot)), KMA_KOBJECT | KMA_ZERO | KMA_DATA,
+	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+		printf("SWEET WLAN: driver: no memory\n");
+		return;
+	}
+	mh_tx = (uint8_t *)tx;
+	wq = (struct wq_slot *)q;
+	if (wlan_dma_map(NULL, mh_tx, MH_TXBUFS * MH_TXLEN, &mh_tx_iova)) {
+		return;
+	}
+	wlan_ath = true;
+	wlan_link_up = true;
+	redwood_wifi_platform_set(&wlan_platform);
+	if (kernel_thread_start(wlan_poll_thread, NULL, &t) != KERN_SUCCESS) {
+		return;
+	}
+	thread_deallocate(t);
+	if (kernel_thread_start(wlan_deliver_thread, NULL, &t) != KERN_SUCCESS) {
+		return;
+	}
+	thread_deallocate(t);
+	printf("SWEET WLAN: driver: ath11k starts (BAR0 %#x)\n", wlan_bar_pa);
+	int r = redwood_lx_start();
+	printf("SWEET WLAN: driver: ath11k start returns %d; qrtr in %u, out %u (done %u), dropped %u, events %u\n", r, mh_rx,
+	    mh_tx_sent, mh_tx_done, wq_dropped, mh_events);
+	wlan_note(7, "ath11k %d rx %u tx %u", r, mh_rx, mh_tx_sent);
+}
+
+/* IPCR up: both channels started, inbound buffers queued, listen; a QRTR HELLO if the chip says nothing. */
+static void
+wlan_ipcr(void)
+{
+	uint32_t ok20 = mh_start_chan(20), ok21 = mh_start_chan(21), ath = 0;
+	if (!ok20) {
+		mh_inval(O_CHAN + 20 * sizeof(struct mhi_ctx), sizeof(struct mhi_ctx));
+		ok20 = (((struct mhi_ctx *)(mh + O_CHAN + 20 * sizeof(struct mhi_ctx)))->a & 0xff) == 2;
+	}
+	if (ok20 && ok21 && PE_parse_boot_argn("wlan_ath", &ath, sizeof(ath)) && ath) {
+		for (uint32_t i = 0; i < MH_RXBUFS; i++) {
+			mh_queue(21, O_CH21, 64, &mh_ch21_i, mh_iova + O_RXBUF + i * MH_RXLEN, MH_RXLEN);
+		}
+		wlan_driver();
+		return;
+	}
+	if (!ok21) {
+		wlan_note(7, "ipcr start %u %u", ok20, ok21);
+		return;
+	}
+	for (uint32_t i = 0; i < MH_RXBUFS; i++) {
+		mh_queue(21, O_CH21, 64, &mh_ch21_i, mh_iova + O_RXBUF + i * MH_RXLEN, MH_RXLEN);
+	}
+	for (int ms = 0; ms < 2000 && !mh_rx; ms++) {
+		mh_events_poll();
+		delay(1000);
+	}
+	if (!mh_rx && ok20) {
+		uint32_t *h = (uint32_t *)(mh + O_TXBUF);
+		const uint32_t hello[13] = { 1, 2, 1, 0xfffffffe, 0, 20, 0xffffffff, 0xfffffffe, 2, 0, 0, 0, 0 };
+		memcpy(h, hello, sizeof(hello));
+		mh_clean(O_TXBUF, sizeof(hello));
+		mh_queue(20, O_CH20, 64, &mh_ch20_i, mh_iova + O_TXBUF, sizeof(hello));
+		printf("SWEET WLAN: qrtr: nothing heard in 2 s, HELLO sent\n");
+	}
+	for (int ms = 0; ms < 5000; ms++) {
+		mh_events_poll();
+		delay(1000);
+	}
+	printf("SWEET WLAN: ipcr: %u packets in, %u tx completions, %u events\n", mh_rx, mh_tx_done, mh_events);
+	wlan_note(7, "ipcr rx %u tx %u", mh_rx, mh_tx_done);
+}
+
 static void
 wlan_mhi_host(const lemonadep_mhi_result *m, const void *fw, uint32_t fw_bytes)
 {
 	vm_offset_t region = 0;
-	uint32_t chdboff, v;
+	uint32_t v;
 
 	if (kmem_alloc(kernel_map, &region, MHI_CTRL_BYTES, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) !=
 	    KERN_SUCCESS) {
@@ -760,6 +1139,7 @@ wlan_mhi_host(const lemonadep_mhi_result *m, const void *fw, uint32_t fw_bytes)
 		return;
 	}
 	mh = (uint8_t *)region;
+	mh_bhioff = m->bhioff;
 	if (wlan_dma_map(NULL, mh, MHI_CTRL_BYTES, &mh_iova)) {
 		return;
 	}
@@ -879,6 +1259,9 @@ wlan_mhi_host(const lemonadep_mhi_result *m, const void *fw, uint32_t fw_bytes)
 	printf("SWEET WLAN: mhi host: EE %u (event EE %u) after %u ms, status %#x, %u events -- %s\n", ee, mh_ee_ev, ms,
 	    chip_rd(0x48), mh_events, ee == 2 ? "MISSION MODE" : "no mission mode");
 	wlan_note(7, "bhie %#x EE %u ev %u %s", st, ee, mh_events, ee == 2 ? "AMSS" : "");
+	if (ee == 2) {
+		wlan_ipcr();
+	}
 }
 
 static uint32_t wlan_stage;
@@ -972,6 +1355,7 @@ wlan_stage2(void *arg, wait_result_t wr)
 	printf("SWEET WLAN: mhi status=%d phase=%d\n", ms, m.phase);
 	if (ms == LemonadepMhiOk && m.phase >= LemonadepMhiPhaseDone && wlan_fw_full && wlan_fw_full_bytes) {
 		wlan_bar = m.bar_pa - LEMONADEP_PCIE0_MEM_PA;
+		wlan_bar_pa = m.bar_pa;
 		wlan_window = ~0u;
 		wlan_mhi_host(&m, wlan_fw_full, wlan_fw_full_bytes);
 	}
