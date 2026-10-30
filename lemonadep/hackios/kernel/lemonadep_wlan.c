@@ -422,6 +422,81 @@ wlan_config_sid(void)
 	    wlan_sid_word, wlan_sid_rb);
 }
 
+/*
+ * The chip's MSI target (dt qcom,pcie0_msi@17a10040: the GIC's set-SPI register, SPIs 768..799, so
+ * vector v is interrupt 800 + v), behind an address of the chip's like furangelz's RADIO_MSI_REGISTER:
+ * one page, device memory, never executed. Returns the chip-side address of the register.
+ */
+#define WSP_PTE_DEVICE          (WSP_PTE | 2ull << 2 | 1ull << 53 | 1ull << 54)
+static uint64_t
+wsp_map_device(uint64_t pa)
+{
+	uint64_t at = WSP_ADDRESSES + wsp.next, *l2, *l3;
+
+	if (wsp.tables == 0 || wsp.next + 4096 > WSP_ADDRESSES_SIZE) {
+		return 0;
+	}
+	l2 = wsp_next(&wsp_table(0)[at >> 30 & 0x1ffu]);
+	l3 = l2 ? wsp_next(&l2[at >> 21 & 0x1ffu]) : NULL;
+	if (!l3) {
+		return 0;
+	}
+	l3[at >> 12 & 0x1ffu] = (pa & ~0xfffull) | WSP_PTE_DEVICE;
+	for (vm_offset_t line = wsp.tables; line < wsp.tables + 4096u * WSP_TABLES; line += 64) {
+		__asm__ volatile ("dc civac, %0" : : "r" (line));
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+	wsp.next += 4096;
+	if (wsp.on) {
+		wsp_wr(wsp_cb() + WSP_CB_TLBIASID, wsp.context);
+		wsp_wr(wsp_cb() + WSP_CB_TLBSYNC, 1);
+	}
+	return at + (pa & 0xfffu);
+}
+
+/* The chip's MSI capability, programmed as pci-msm/cnss2 leave it: one vector here. */
+static uint32_t msi_cap, msi_ctrl_now, msi_addr_lo, msi_data;
+static void
+wlan_enable_msi(void)
+{
+	uint32_t v, cap;
+
+	(void)wlan_read(NULL, WlanWinConf, 0x34, &v);
+	for (cap = v & 0xfcu; cap; cap = (v >> 8) & 0xfcu) {
+		(void)wlan_read(NULL, WlanWinConf, cap, &v);
+		if ((v & 0xffu) == 0x05u) {
+			break;
+		}
+	}
+	msi_cap = cap;
+	if (!cap) {
+		printf("SWEET WLAN: msi: no MSI capability\n");
+		return;
+	}
+	uint64_t addr = wsp_map_device(0x17a10040ull);
+	if (!addr) {
+		printf("SWEET WLAN: msi: could not map the target\n");
+		return;
+	}
+	bool is64 = (v >> 16) & 0x80u;
+	msi_addr_lo = (uint32_t)addr;
+	msi_data = 800;
+	(void)wlan_write(NULL, WlanWinConf, cap + 4, (uint32_t)addr);
+	if (is64) {
+		(void)wlan_write(NULL, WlanWinConf, cap + 8, (uint32_t)(addr >> 32));
+		(void)wlan_write(NULL, WlanWinConf, cap + 12, msi_data);
+	} else {
+		(void)wlan_write(NULL, WlanWinConf, cap + 8, msi_data);
+	}
+	/* control: enable, one message (MME 0) */
+	(void)wlan_read(NULL, WlanWinConf, cap, &v);
+	v = (v & ~(0x70u << 16)) | (1u << 16);
+	(void)wlan_write(NULL, WlanWinConf, cap, v);
+	(void)wlan_read(NULL, WlanWinConf, cap, &msi_ctrl_now);
+	printf("SWEET WLAN: msi: cap %#x ctrl %#x (64-bit %d), address %#llx (-> 0x17a10040), data %u\n", cap,
+	    msi_ctrl_now >> 16, is64, addr, msi_data);
+}
+
 /* io->dma_map: `bytes` at kernel address `data`, page by page, behind the chip's next addresses. */
 static int
 wlan_dma_map(void *c, const void *data, uint32_t bytes, uint64_t *dma)
@@ -468,6 +543,10 @@ wlan_dma_map(void *c, const void *data, uint32_t bytes, uint64_t *dma)
 	if ((!wsp.found && !wsp_find()) || (!wsp.on && !wsp_on())) {
 		e = 4;
 	} else {
+		uint32_t msi = 0;
+		if (PE_parse_boot_argn("wlan_msi", &msi, sizeof(msi)) && msi) {
+			wlan_enable_msi();
+		}
 		uint32_t nodb = 0;
 		if (PE_parse_boot_argn("wlan_nodb", &nodb, sizeof(nodb)) && nodb) {
 			printf("SWEET WLAN: wlan_nodb=1: everything but the BHI doorbell; stopping here\n");
