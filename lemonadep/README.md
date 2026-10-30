@@ -133,7 +133,7 @@ Look for `SWEET KEYS:`, `SWEET TOUCH:` and `SWEET GPU:` lines. After a test, hol
 
 ## Standalone HackiOS boot (no computer)
 
-Status (2026-10-30): power on -> iOS 16.5 with GPU, touch, battery, backlight, audio DSP and Wi-Fi;
+Status (2026-10-30): power on -> iOS 16.5 with GPU, touch, battery, backlight, audio DSP and Wi-Fi (Safari loads pages and video; join from Settings works);
 /private/var kept between boots. Not working yet: Bluetooth, cellular, camera, Wi-Fi status in
 Settings, Power-button power off (use five fingers held 1.5 s on the screen, or iOS's power off).
 iOS does not see the flash as its storage: system and /var run from RAM; /var is saved to userdata.

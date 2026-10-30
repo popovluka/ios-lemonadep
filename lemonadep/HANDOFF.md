@@ -72,6 +72,18 @@ CaptiveNetworkSupport.bundle logs nothing even with OSLOG=com.apple.configd) and
 taken; Safari's WebKit networking (pid com.apple.WebKit) does fetch data (1.6 MB from Akamai in one run).
 wifid's auto-join at boot (wifi_station=1) tries once before the radio is up and does not retry for
 minutes, so the profile keeps `wifi_join=1`.
+**SAFARI FIXED (21:00): pages and video load (user).** Root cause, found with a kernel stackshot of the
+hung processes (`stack_test -k NAME`, userland/src/stack_test.c: stack_snapshot_with_config as root, kcdata
+printed as hex; decoded with xnu's tools/lldbmacros/kcdata.py and symbolicated with `ipsw dyld a2s` against
+the cache WITH its .symbols file, extracted by `ipsw extract --dyld` into /root/dsc): Safari's main thread
+waits in `-[WBSHistoryItem lastVisit]` (dispatch_sync) <- `-[History _webView:didNavigateWithNavigationData:]`;
+the history queue waits for `WBSHistoryServiceStore loadWithCompletionHandler`; the com.apple.Safari.History
+service is stuck at start in `-[WBSCloudHistoryPushAgent init]` -> `-[APSConnection setDelegate:]` ->
+`xpc_connection_send_message_with_reply_sync` to **apsd, which never answers**. With apsd left out
+(`DENY_EXTRA=com.apple.apsd`, now in lemonadep.conf USERLAND_VARS; mkjobs.py option in
+patches/userland-0001) the lookup fails at once and Safari works. Still broken: Maps tiles, Weather data
+(both want locationd, DENY-listed; Weather also fairplayd). Music: not retested.
+
 **Update (20:15): the network is NOT the problem.** Measured from the phone with net_test (root and as
 uid 501): DNS, TCP, HTTPS/TLS, reachability, large UDP both ways (1187-byte DNS answers in), and full
 HTTP/3 over QUIC (`net_test fetch3`, `assumesHTTP3Capable`: example.com, google.com 89 KB,

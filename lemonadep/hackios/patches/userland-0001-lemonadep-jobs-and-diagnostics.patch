@@ -1,0 +1,66 @@
+diff -ru a/userland/build.sh b/userland/build.sh
+--- a/userland/build.sh	2026-10-30 22:23:26.663712574 +0100
++++ b/userland/build.sh	2026-10-30 22:23:26.663712574 +0100
+@@ -273,6 +273,9 @@
+ 		$DYN -framework CoreFoundation -framework CoreGraphics -framework ImageIO -o obj/snap_test src/snap_test.c
+ 		$DYN -framework CoreFoundation -framework CoreGraphics -framework CoreText -o obj/font_test src/font_test.c
+ 		$DYN -fobjc-arc -framework Foundation -framework SystemConfiguration -o obj/net_test src/net_test.m
++		# (where a hung program's threads are: task_for_pid, so with its entitlements if ldid is there: src/stack_test.c)
++		$DYN -o obj/stack_test src/stack_test.c && { ${LDID:-ldid} -Ssrc/stack_test.entitlements obj/stack_test 2>/dev/null ||
++			echo "build.sh: no ldid: stack_test is unsigned and will not get other programs' tasks"; }
+ 		# (the account database answers only a client with the entitlements its own daemons hold: src/store_test.m)
+ 		$DYN -fobjc-arc -framework Foundation -framework Accounts -o obj/store_test src/store_test.m &&
+ 			{ ${LDID:-ldid} -Ssrc/store_test.entitlements obj/store_test 2>/dev/null ||
+@@ -381,6 +384,7 @@
+ 	[ -f obj/font_test ] && cp obj/font_test root/bin/
+ 	[ -f obj/metal_test ] && cp obj/metal_test root/bin/
+ 	[ -f obj/net_test ] && cp obj/net_test root/bin/
++	[ -f obj/stack_test ] && cp obj/stack_test root/bin/
+ 	[ -f obj/store_test ] && cp obj/store_test root/bin/
+ 	[ -f obj/battery_test ] && cp obj/battery_test root/bin/
+ 	[ -f obj/keychain_test ] && cp obj/keychain_test root/bin/
+@@ -528,6 +532,14 @@
+ 			printf 'f\t600\t0\t0\t/private/var/root/.ssh/%s\t/var/root/.ssh/%s\n' $k $k >> root/etc/var.skel
+ 		done
+ 	fi
++	# CAPTIVE_OFF=1: iOS's captive-portal evaluation switched off (com.apple.captive.control, Active = false):
++	# on lemonadep it never leaves Stage "Evaluate" after a successful probe, and apps count Wi-Fi as offline
++	if [ -n "$CAPTIVE_OFF" ]; then
++		mkdir -p root/var/preferences/SystemConfiguration
++		python3 -c 'import plistlib, sys; plistlib.dump({"Active": False}, open(sys.argv[1], "wb"))' \
++			root/var/preferences/SystemConfiguration/com.apple.captive.control.plist
++		printf 'f\t644\t0\t0\t/private/var/preferences/SystemConfiguration/com.apple.captive.control.plist\t/var/preferences/SystemConfiguration/com.apple.captive.control.plist\n' >> root/etc/var.skel
++	fi
+ 	cp ${RC:-rc.launchd} root/etc/rc
+ 	cp ${RC_JOBS:-rc.jobs} root/etc/rc.jobs
+ 	# QUIET=1: launchd's own standard error goes nowhere (src/init.c). It says a few thousand
+diff -ru a/userland/mkjobs.py b/userland/mkjobs.py
+--- a/userland/mkjobs.py	2026-10-30 22:23:26.663712574 +0100
++++ b/userland/mkjobs.py	2026-10-30 22:23:26.663712574 +0100
+@@ -226,6 +226,8 @@
+ 
+ # ALLOW="word ..." in the environment lets jobs through that DENY would stop: for trying one out
+ DENY = tuple(word for word in DENY if word not in os.environ.get('ALLOW', '').split())
++# DENY_EXTRA="word ...": and these kept out as well (lemonadep: com.apple.apsd, whose clients hang on it)
++DENY = DENY + tuple(os.environ.get('DENY_EXTRA', '').split())
+ 
+ args = sys.argv[1:]
+ rest = '--rest' in args
+@@ -289,6 +291,8 @@
+     job.pop('_LimitLoadToDeviceTree', None)
+     if 'all' in oslog or label in oslog:
+         job.setdefault('EnvironmentVariables', {})['OS_ACTIVITY_DT_MODE'] = 'YES'
++        if 'debug' in oslog:              # OSLOG='... debug'
++            job['EnvironmentVariables']['OS_ACTIVITY_MODE'] = 'debug'     # info and debug messages too
+     with open(f'{dest}/{label}.plist', 'wb') as f:
+         plistlib.dump(job, f, fmt=plistlib.FMT_BINARY)
+     program = job.get('Program') or job['ProgramArguments'][0]
+@@ -329,6 +333,8 @@
+                 job.setdefault('EnvironmentVariables', {})[variable] = os.environ[variable]
+         if label in oslog:
+             job.setdefault('EnvironmentVariables', {})['OS_ACTIVITY_DT_MODE'] = 'YES'
++            if 'debug' in oslog:          # OSLOG='... debug': info and debug messages too
++                job['EnvironmentVariables']['OS_ACTIVITY_MODE'] = 'debug'
+         with open(f'{dest}/{name}', 'wb') as f:
+             plistlib.dump(job, f, fmt=plistlib.FMT_BINARY)
+         count += 1
