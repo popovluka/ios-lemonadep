@@ -28,6 +28,7 @@ FD_BASE=$FD_BASE FD_SIZE=$FD_SIZE PAYLOAD_BASE=$PAYLOAD_BASE UEFI_FD=$FD DTB=$DT
 	BOOT_HEADER_VERSION=3 BOOT_ARGS="$BOOT_ARGS" BOOTSHIM_DEFS=$BOOTSHIM_DEFS \
 	python3 mkxnuimg.py -p out/usb-payload.bin -o out/lemonadep-boot.img
 
+[ -n "$ARGS" ] && BOOTARGS=$ARGS     # ARGS="...": the whole list instead of the profile's
 for w in $DROP; do BOOTARGS=$(echo " $BOOTARGS " | sed "s/ $w / /g; s/^ //; s/ $//"); done   # DROP="adsp=1 ...": leave words out
 K=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837
 python3 xnuloader/mkpayload.py -o run-payload.bin kernel=$K ramdisk=userland/root.apfs \

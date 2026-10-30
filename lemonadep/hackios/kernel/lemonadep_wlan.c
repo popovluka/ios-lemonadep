@@ -50,6 +50,29 @@ extern lck_mtx_t redwood_smmu_lock;     /* redwood_wifi.c: one finder of free SM
 static vm_offset_t wlan_win[WlanWinCount];
 
 /*
+ * Every line also straight into the loader's log as it is said (loader_return.c): the loader keeps
+ * its first 256 KB and its last 1 MB, and the kernel's message buffer, appended at the end of a run,
+ * pushed these lines into the dropped middle (2026-10-30).
+ */
+extern void loader_log_putc(char c);
+static void wlan_printf(const char *fmt, ...) __printflike(1, 2);
+static void
+wlan_printf(const char *fmt, ...)
+{
+	char line[320];
+	va_list ap;
+
+	va_start(ap, fmt);
+	vsnprintf(line, sizeof(line), fmt, ap);
+	va_end(ap);
+	printf("%s", line);
+	for (const char *c = line; *c; c++) {
+		loader_log_putc(*c);
+	}
+}
+#define printf wlan_printf
+
+/*
  * HackiOS: the run's log does not come back over USB on this phone yet, so the results also go
  * into the notes drawn on the panel when the run ends (redwood_dpu.c, 8 lines of 44).
  */
@@ -217,6 +240,20 @@ wsp_find(void)
 	for (uint32_t n = 0; n < matches && WSP_SMR(n) < 0xc00u; n++) {
 		uint32_t smr = wsp_rd(WSP_SMR(n)), s2cr = wsp_rd(WSP_S2CR(n));
 
+		if (smr == (1u << 31 | WSP_STREAM)) {
+			/*
+			 * Exactly ours: left by an earlier run in this loader session (the SMMU is not reset
+			 * between runs). Taken over -- match register and context -- and programmed afresh.
+			 */
+			printf("SWEET WLAN: smmu match register %u is ours from an earlier run (s2cr %#x): reused\n", n, s2cr);
+			wsp.match = n;
+			wsp.context = s2cr & 0xffu;
+			wsp.old_smr = 0;
+			wsp.old_s2cr = 0;
+			wsp.old_sctlr = 0;
+			wsp.found = true;
+			return true;
+		}
 		if (smr >> 31) {
 			used[s2cr & 0xffu] = true;
 			if (((smr & 0x7fffu) & ~(smr >> 16 & 0x7fffu)) == (0x1c01u & ~(smr >> 16 & 0x7fffu))) {
@@ -463,6 +500,10 @@ chip_rd(uint32_t off)
 	if (w != wlan_window) {
 		(void)wlan_write(NULL, WlanWinMem, wlan_bar + 0x310cu, 0x40000000u | w);
 		(void)wlan_read(NULL, WlanWinMem, wlan_bar + 0x310cu, &v);
+		if (v != (0x40000000u | w)) {
+			printf("SWEET WLAN: window register 0x310c = %#x after writing %#x (offset %#x)\n", v,
+			    0x40000000u | w, off);
+		}
 		wlan_window = w;
 	}
 	(void)wlan_read(NULL, WlanWinMem, wlan_bar + 0x80000u + (off & 0x7ffffu), &v);
@@ -484,7 +525,7 @@ chip_wr(uint32_t off, uint32_t v)
  * the boot ROM took the SBL (BHI status success) and never left PBL (2026-10-30). fix_l1ss is
  * left out (the link is held to Gen1 and ASPM is not enabled here).
  */
-static uint32_t sw_ltssm, sw_hotrst, sw_cookie, sw_warm, sw_cause, sw_gr;
+static uint32_t sw_ltssm, sw_hotrst, sw_cookie, sw_warm, sw_cause, sw_gr, sw_qfprom, sw_qfprom_now;
 static void
 wlan_sw_reset(void)
 {
@@ -503,7 +544,10 @@ wlan_sw_reset(void)
 	sw_hotrst = chip_rd(0x1e402bcu);
 	delay(5000);
 	chip_wr(0x1e08228u, 0xffffffffu);                       /* ath11k_pci_clear_all_intrs */
-	chip_wr(0x1f8031cu, chip_rd(0x1f8031cu) & ~0x4u);       /* ath11k_pci_set_wlaon_pwr_ctrl: VDD4BLOW */
+	/* cnss_pci_set_wlaon_pwr_ctrl(set_vddd4blow false, set_shutdown false): VDD4BLOW_SW_EN and SHUTDOWN_EN off */
+	sw_qfprom = chip_rd(0x1f8031cu);
+	chip_wr(0x1f8031cu, sw_qfprom & ~0x5u);
+	sw_qfprom_now = chip_rd(0x1f8031cu);
 	/* ath11k_mhi_clear_vector */
 	chip_wr(0x360u, 0);
 	chip_wr(0x368u, 0);
@@ -527,8 +571,8 @@ wlan_sw_reset(void)
 	/* ath11k_mhi_set_mhictrl_reset */
 	(void)chip_rd(0x48u);
 	chip_wr(0x38u, 0x2u);
-	printf("SWEET WLAN: sw reset: ltssm %#x hot_rst %#x cookie %#x warm_entry %#x reset_cause %#x global_reset %#x\n",
-	    sw_ltssm, sw_hotrst, sw_cookie, sw_warm, sw_cause, sw_gr);
+	printf("SWEET WLAN: sw reset: ltssm %#x hot_rst %#x cookie %#x warm_entry %#x reset_cause %#x global_reset %#x "
+	    "qfprom_pwr_ctrl %#x -> %#x\n", sw_ltssm, sw_hotrst, sw_cookie, sw_warm, sw_cause, sw_gr, sw_qfprom, sw_qfprom_now);
 }
 
 static uint32_t wlan_stage;
@@ -554,6 +598,43 @@ wlan_stage2(void *arg, wait_result_t wr)
 		uint64_t size = 0;
 		p.fw_v1.data = redwood_image_file("fw", "amss.bin", &size, NULL);
 		p.fw_v1.bytes = p.fw_v1.data ? (uint32_t)size : 0;
+		/*
+		 * Like Linux (mhi_fw_load_bhi from a dma_alloc_coherent buffer): the SBL part copied into
+		 * page-aligned kernel memory of its own, not handed out where it lies in the ramdisk. The
+		 * boot ROM rejected what it read in place with 0xef0e0200 (2026-10-30), a code another
+		 * QCA6490 port got only from an image whose segment table was unusable.
+		 */
+		uint32_t fw20 = 0;
+		if (PE_parse_boot_argn("wlan_fw20", &fw20, sizeof(fw20)) && fw20) {
+			uint64_t s20 = 0;
+			const uint8_t *d20 = redwood_image_file("fw", "amss20.bin", &s20, NULL);
+			printf("SWEET WLAN: wlan_fw20=1: amss20.bin (%llu bytes) in place of amss.bin (test)\n", s20);
+			if (d20 && s20) {
+				p.fw_v1.data = d20;
+				p.fw_v1.bytes = (uint32_t)s20;
+			}
+		}
+		if (p.fw_v1.data && p.fw_v1.bytes) {
+			vm_offset_t copy = 0;
+			uint32_t n = p.fw_v1.bytes < 0x80000u ? p.fw_v1.bytes : 0x80000u, cut = 0;
+			if (PE_parse_boot_argn("wlan_sblsize", &cut, sizeof(cut)) && cut && cut < n) {
+				n = cut;        /* test: BHI given only this much of the image */
+			}
+			if (kmem_alloc(kernel_map, &copy, round_page(n), KMA_KOBJECT | KMA_ZERO | KMA_DATA,
+			    VM_KERN_MEMORY_IOKIT) == KERN_SUCCESS) {
+				memcpy((void *)copy, p.fw_v1.data, n);
+				uint32_t corrupt = 0;
+				if (PE_parse_boot_argn("wlan_corrupt", &corrupt, sizeof(corrupt)) && corrupt) {
+					((uint8_t *)copy)[0] = 0;       /* test: does the ROM see our bytes? (bad magic) */
+				}
+				const uint8_t *h = (const uint8_t *)copy;
+				printf("SWEET WLAN: sbl copy %u bytes at %#lx (pa %#llx): %02x%02x%02x%02x class %u phoff %#x phnum %u\n",
+				    n, copy, kvtophys(copy), h[0], h[1], h[2], h[3], h[4], *(const uint32_t *)(h + 0x1c),
+				    *(const uint16_t *)(h + 0x2c));
+				p.fw_v1.data = (const void *)copy;
+				p.fw_v1.bytes = n;
+			}
+		}
 		size = 0;
 		p.fw_v2.data = redwood_image_file("fw", "amss20.bin", &size, NULL);
 		p.fw_v2.bytes = p.fw_v2.data ? (uint32_t)size : 0;
@@ -572,6 +653,12 @@ wlan_stage2(void *arg, wait_result_t wr)
 			wlan_bar = m.bar_pa - LEMONADEP_PCIE0_MEM_PA;
 			wlan_sw_reset();
 		}
+	}
+	if (m.bar_pa) {
+		wlan_bar = m.bar_pa - LEMONADEP_PCIE0_MEM_PA;
+		wlan_window = ~0u;
+		printf("SWEET WLAN: before BHI: TCSR_PBL_LOGGING %#x BOOT_CFG %#x BOOTSTRAP %#x SRAM0 %#x SRAM9 %#x\n",
+		    chip_rd(0x01B000F8u), chip_rd(0x01E22B34u), chip_rd(0x01910008u), chip_rd(0x01403DA0u), chip_rd(0x01403DC4u));
 	}
 	ms = lemonadep_wlan_mhi_up(&io, &p, &m, mstop);
 	printf("SWEET WLAN: mhi status=%d phase=%d\n", ms, m.phase);
@@ -614,6 +701,24 @@ wlan_stage2(void *arg, wait_result_t wr)
 		    "ctrl %#x\n", v0, e0, s0, c0, v1, e1, s1, c1);
 		wlan_note(6, "e%u s%x c%x lt%x gr%x w%x", e0, s0, c0, sw_ltssm, sw_gr, sw_warm);
 		wlan_note(7, "wake v%x e%u s%x c%x f%x", v1, e1, s1, c1, wsp.on ? wsp_rd(wsp_cb() + WSP_CB_FSR) : 0);
+		/* cnss2 cnss_pci_dump_bl_sram_mem() for QCA6490 (LineageOS sm8350 kernel, reg.h) */
+		wlan_bar = bar;
+		wlan_window = ~0u;
+		uint32_t stage = chip_rd(0x01B000F8u), sbl_start = chip_rd(0x01E0E238u), sbl_size = chip_rd(0x01E0E23Cu);
+		uint32_t boot_cfg = chip_rd(0x01E22B34u), bootstrap = chip_rd(0x01910008u);
+		printf("SWEET WLAN: TCSR_PBL_LOGGING %#x SBL log start %#x size %#x PBL_WLAN_BOOT_CFG %#x PBL_BOOTSTRAP_STATUS %#x\n",
+		    stage, sbl_start, sbl_size, boot_cfg, bootstrap);
+		for (uint32_t i = 0; i < 40; i += 4) {
+			printf("SWEET WLAN: PBL SRAM[%#x] = %#x\n", 0x01403DA0u + i, chip_rd(0x01403DA0u + i));
+		}
+		if (sbl_start >= 0x01400000u && sbl_start + sbl_size <= 0x01800000u) {
+			for (uint32_t i = 0; i < sbl_size && i < 48; i += 4) {
+				printf("SWEET WLAN: SBL SRAM[%#x] = %#x\n", sbl_start + i, chip_rd(sbl_start + i));
+			}
+		}
+		printf("SWEET WLAN: sr_status %#x:%#x wcss_status %#x:%#x q6 cookie %#x warm entry %#x reset cause %#x\n",
+		    chip_rd(0x01E030C8u), chip_rd(0x01E030CCu), chip_rd(0x01E0313Cu), chip_rd(0x01E03140u),
+		    chip_rd(0x01f80500u), chip_rd(0x1f80504u), chip_rd(0x01f8060cu));
 	}
 	if (wsp.taken && m.phase <= LemonadepMhiPhaseBhi) {
 		wlan_note(6, "no doorbell; sid cfg %#x", wlan_sid_cfg);

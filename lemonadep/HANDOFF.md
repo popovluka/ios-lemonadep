@@ -45,6 +45,27 @@ Nothing was flashed for this. Everything runs from RAM; the phone goes back to f
    `05C6:900E` crash-dump mode. The image that had reached Silicium's screen earlier appended
    `Mu-Silicium/Resources/DTBs/lemonadep.dtb` (the OnePlus 9's). With that, the loader came up first time.
 
+### Wi-Fi under HackiOS (2026-10-30, night) -- where it stands
+
+Live logs work from Windows: `hackios/run-live.ps1` (C:\platform-tools fastboot 35; Touch Portal's 28.0.3 on
+PATH cannot). The loader answers USB during runs with `ARGS="cpus=8 bootcpu=7"` (+ cpufreq) -- one of
+touchscreen/gpu/backlight/battery/adsp kills its USB (not bisected yet). `-Resident` reuses the system image.
+
+QCA6490 (17cb:1103, SOC_HW_VERSION 0x400c0110 = major 1 -> amss.bin, as cnss2 picks), kernel
+`hackios/kernel/lemonadep_wlan.c`, `sweetwlan=17`:
+- rails (now HPM/PWM), PCIe0 link L0, BAR0, MHI regs: fine.
+- SMMU: stage-1 context 7 + our page tables, SMR must be exact `0x80001c01` (a mask is refused).
+- PCIe PARF BDF-to-SID table + **clear BDF_TO_SID_BYPASS (boot chain leaves 0x1)** -- without it every
+  chip DMA went out as 0x1c00, faulted, XBL ramdump.
+- BHI: SUCCESS (`0x81c0ffee`), no SMMU fault, the chip reads our bytes (a bad ELF magic makes BHI fail).
+- **Blocker:** the boot ROM never leaves PBL. `TCSR_PBL_LOGGING` goes `0xef150600` (before) ->
+  `0xef0e0200` (after BHI); SBL log start 0. Same with: amss20.bin, a 0x31000-byte SBL, a fresh DMA
+  buffer, without ath11k's sw_reset, HPM rails, 30 s timeout. QFPROM pwr ctrl already 0x6a.
+  A Pixel 7a QCA6490 port (github derekross/omarchy-mobile#36) got 0xef0e0200 only from an image with
+  e_phnum = 0; their own stall is 0xef0a0002 and unsolved.
+- Not yet tried: PCIe MSI enabled with a real target (cnss2 enables MSI before MHI; PBL INTVEC 0),
+  the interconnect votes (pcie_to_memnoc / memnoc_to_ddr), Gen2/Gen3 link, ADSP power-collapse vote.
+
 ### Android
 
 Android no longer boots (it goes to its recovery). That is the M2 step from 2026-10-15: userdata holds

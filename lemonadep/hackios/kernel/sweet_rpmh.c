@@ -223,7 +223,9 @@ rh_free(unsigned t)
 	/* Idle alone is insufficient: a sleep/wake payload can be armed and idle. */
 	return rh_read(rh_tcs, b + RH_STATUS) != 0 &&
 	    rh_read(rh_tcs, b + RH_STATUS) != 0xffffffffu &&
-	    rh_read(rh_tcs, b + RH_CONTROL) == 0 &&
+	    /* 0, or AMC_EN alone: a finished active-mode request leaves it set (rpmh-rsc.c takes
+	     * any idle slot it does not own; seen 0x10000 in TCS1 under UEFI, 2026-10-30) */
+	    (rh_read(rh_tcs, b + RH_CONTROL) & ~RH_AMC_EN) == 0 &&
 	    rh_read(rh_tcs, b + RH_ENABLE) == 0 &&
 	    rh_read(rh_tcs, b + RH_WAIT) == 0 &&
 	    !(rh_read(rh_tcs, RH_IRQ_STATUS) & (1u << t));
@@ -370,12 +372,14 @@ static const struct {
 	{"ldoc3", 2950, 3400, true},
 	{"ldob5", 880, 880, true},
 	{"ldob6", 1200, 1200, true},
-	{"smpb10", 1800, 1800, false},
-	{"ldoe7", 2800, 2800, false},
-	{"smpe2", 950, 952, false},
-	{"smpb11", 950, 952, false},
-	{"smpc1", 1880, 2000, false},
-	{"smpb12", 1350, 1350, false},
+	/* Wi-Fi rails: mode 7 (SMPS PWM / LDO HPM): with no mode vote the chip's boot ROM
+	 * never handed over to its SBL (2026-10-30) */
+	{"smpb10", 1800, 1800, true},
+	{"ldoe7", 2800, 2800, true},
+	{"smpe2", 950, 952, true},
+	{"smpb11", 950, 952, true},
+	{"smpc1", 1880, 2000, true},
+	{"smpb12", 1350, 1350, true},
 };
 
 int

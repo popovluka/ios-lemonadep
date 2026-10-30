@@ -128,7 +128,7 @@ main(void)
 	const unsigned want_mv[8] = {1800, 2800, 950, 950, 1880, 1350, 880, 1200};
 	CHECK(nvotes == 8);
 	for (unsigned i = 0; i < 8 && i < nvotes; ++i) {
-		CHECK(!strcmp(votes[i], want[i]) && vote_mv[i] == want_mv[i] && vote_hpm[i] == (i >= 6));
+		CHECK(!strcmp(votes[i], want[i]) && vote_mv[i] == want_mv[i] && vote_hpm[i] == 1);
 	}
 	/* WLAN_EN: gpio function, 16 mA, pull-up, output enabled + high, eGPIO claimed */
 	uint32_t en = *reg(WlanWinTlmm, TLMM_CFG(LEMONADEP_WLAN_EN_GPIO));

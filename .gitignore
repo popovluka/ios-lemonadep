@@ -18,3 +18,4 @@ logs/
 # QCA6490 firmware pulled from this phone's modem partition (proprietary; re-pull with
 # lemonadep/tools/pull-wlan-fw.sh from your own device)
 lemonadep/fw-wlan/
+lemonadep/fw-vendor/

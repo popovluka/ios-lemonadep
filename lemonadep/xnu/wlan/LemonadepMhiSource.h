@@ -75,7 +75,7 @@
 /* cnss2/pci.c: QCA6490 DMA mask is 36 bits. */
 #define LEMONADEP_MHI_DMA_LIMIT  (1ull << 36)
 /* LIVE cnss node mhi,timeout = <10000> ms (polled here, 1 ms apart). */
-#define LEMONADEP_MHI_TIMEOUT_MS 10000u
+#define LEMONADEP_MHI_TIMEOUT_MS 30000u   /* cnss2: mhi,timeout 10 s, times 3 (perf) or 6 for power-up */
 
 /* ---- apps SMMU (LIVE apps-smmu@15000000, qcom,skip-init: the bootloader's
  * stream mapping is kept). PCIe0's endpoint (RID 0x100) is stream 0x1c01

@@ -178,7 +178,7 @@ lemonadep_wlan_pcie_up(const lemonadep_wlan_io *io, lemonadep_wlan_result *r, le
 	/* cnss2: rails in cnss_vreg_list order. */
 	WPHASE(LemonadepWlanPhaseNone, LemonadepWlanPhaseRails);
 	for (unsigned i = 0; i < sizeof(LemonadepWlanRails) / sizeof(LemonadepWlanRails[0]); ++i) {
-		if (io->rpmh_vote(io->cookie, LemonadepWlanRails[i].res, LemonadepWlanRails[i].mv, 0)) {
+		if (io->rpmh_vote(io->cookie, LemonadepWlanRails[i].res, LemonadepWlanRails[i].mv, 1)) {
 			r->failed_what = LemonadepWlanRails[i].what;
 			return LemonadepWlanRailFailed;
 		}
