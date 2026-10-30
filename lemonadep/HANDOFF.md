@@ -26,6 +26,13 @@ found is in [HANDOFF-log.md](HANDOFF-log.md); this page is the state and the rec
 | First Wi-Fi association after radio start | lost EAPOL; worked around with a retry (root cause open) |
 | End-of-run panic on the way back to the loader | "Console I/O from interrupt-disabled context" in dev runs only |
 
+Research 2026-10-31 (before spending device time): **sound** -- postmarketOS lists audio playback, mic and
+headset as *broken* on lemonadep even under Linux (wiki.postmarketos.org, OnePlus 9 & 9 Pro page), so there is
+no known-good speaker path to port. **Metal for apps** (likely behind Maps tiles) -- the working prior art is
+UniXNU's NativeMetal (Metal -> metal2vulkan -> Mesa Turnip, as superboyyy/hakios-arm64e-dada uses on the
+Adreno 830); furangelz's own AIR->Adreno route is in progress (userland docs/air.md). Both are GPU-stack
+projects, coordinate with the GPU collaborator rather than start one here.
+
 ## The fixes that matter (and where)
 
 - **Safari froze after every page**: its History service hangs at start in `[APSConnection setDelegate:]`, a
