@@ -14,30 +14,85 @@ index a9e8549..5deb503 100644
  # display test: -DFB_TEST_BASE=0xE4D00000 -DFB_TEST_STRIDE=4320 makes the boot shim paint a red band
  # into ABL's framebuffer before anything else runs (see FbBandDxe in the UEFI port)
 diff --git a/xnu/files/bsd/dev/redwood_input.c b/xnu/files/bsd/dev/redwood_input.c
-index 1aff3ac..0decb3e 100644
+index 1aff3ac..29faf17 100644
 --- a/xnu/files/bsd/dev/redwood_input.c
 +++ b/xnu/files/bsd/dev/redwood_input.c
-@@ -33,6 +33,8 @@ extern void loader_log_line(const char *line);
+@@ -33,6 +33,9 @@ extern void loader_log_line(const char *line);
   */
  void redwood_tl(const char *format, ...) __printflike(1, 2);
  
 +extern void lemonadep_wlan_init(void);
++extern void lemonadep_logkeep_init(void);
 +
  void
  redwood_tl(const char *format, ...)
  {
-@@ -225,5 +227,6 @@ redwood_input_init(void)
+@@ -214,6 +217,7 @@ redwood_input_init(void)
+ 		printf("redwood-touch: cannot create the device\n");
+ 	}
+ 	exit_call = thread_call_allocate(exit_hold_elapsed, NULL);
++	lemonadep_logkeep_init();       /* first: logkeep=1, the log of a run kept in RAM, the run ends in fastboot */
+ 	redwood_cpufreq_init();
+ 	redwood_virtio_input_init();
+ 	redwood_goodix_init();
+@@ -225,5 +229,6 @@ redwood_input_init(void)
  	redwood_adreno_init();
  	redwood_dpu_init();
  	redwood_wifi_init();
 +	lemonadep_wlan_init();         /* QCA6490 on PCIe0 (sweetwlan=N), from ios-sweet */
  	redwood_adsp_init();
  }
+diff --git a/xnu/files/osfmk/arm64/loader_return.c b/xnu/files/osfmk/arm64/loader_return.c
+index f95ebe6..e0cb199 100644
+--- a/xnu/files/osfmk/arm64/loader_return.c
++++ b/xnu/files/osfmk/arm64/loader_return.c
+@@ -58,6 +58,7 @@ extern void redwood_torch_quiesce(void);
+ extern void redwood_camera_quiesce(void);
+ extern void redwood_mic_quiesce(void);
+ extern void redwood_ufs_quiesce(void);
++extern void lemonadep_logkeep_return(void);     /* bsd/dev/lemonadep_logkeep.c */
+ extern void redwood_var_save_on_return(void);   /* bsd/dev/redwood_ufs.c: the data volume into the flash */
+ void loader_checkpoint(uint64_t n);
+ 
+@@ -370,6 +371,7 @@ loader_return(void)
+ 	 */
+ 	psci_smp_stop_others();
+ #endif
++	lemonadep_logkeep_return();     /* logkeep=1: the last copy of the log, then a reset into fastboot (does not return) */
+ 	redwood_ufs_quiesce();          /* this kernel's requests to the storage done, UEFI's list as it was, for the log */
+ 	redwood_adreno_quiesce();       /* the GPU block, if it was started, has tables in memory that is about to be reused */
+ 	redwood_dpu_restore();          /* (lemonadep) the panel shows the boot framebuffer again, the one the loader draws into */
+diff --git a/xnuloader/loader.c b/xnuloader/loader.c
+index 418ccc9..b44d024 100644
+--- a/xnuloader/loader.c
++++ b/xnuloader/loader.c
+@@ -3864,6 +3864,21 @@ fb_command(char *cmd)
+ 			staged_data = (const char *)(uintptr_t)0xF3FE0000ULL;
+ 			staged_len = 5 * 0x2000;      /* 5 slots of 8 KB */
+ 			fb_reply("OKAY", "");
++		} else if (starts_with(cmd, "oem logkeep")) {
++			/*
++			 * (lemonadep, from ios-sweet) the log a kernel with logkeep=1 left in RAM before it reset the
++			 * phone into fastboot: magic "LKEP", length, text, at the start of the payload region's last
++			 * 2 MB (below the display snapshots). RAM survives the warm reset; this boot's UEFI and
++			 * loader do not touch it before this command is given.
++			 */
++			const volatile uint32_t *k = (const volatile uint32_t *)(uintptr_t)0xF3E00000ULL;
++			if (k[0] == 0x50454b4cu && k[1] > 0 && k[1] <= 0x1e0000u - 16u) {
++				staged_data = (const char *)(uintptr_t)(0xF3E00000ULL + 16);
++				staged_len = k[1];
++				fb_reply("OKAY", "");
++			} else {
++				fb_reply("FAIL", "no kept log");
++			}
+ 		} else if (starts_with(cmd, "oem readpart ")) {
+ 			/* stage one GPT partition, read only; "fastboot get_staged FILE" fetches it */
+ 			fb_reply(read_partition(cmd + 13) ? "OKAY" : "FAIL", "");
 diff --git a/bsd/conf/files b/bsd/conf/files
-index 4427401..60434e3 100644
+index 4427401..238b311 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -109,6 +109,42 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
+@@ -109,6 +109,44 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
  
  bsd/dev/monotonic.c optional monotonic
@@ -67,6 +122,8 @@ index 4427401..60434e3 100644
 +bsd/dev/redwood_wifi.c		standard
 +bsd/dev/lemonadep_wlan.c		standard
 +bsd/dev/sweet_rpmh.c		standard
++bsd/dev/lemonadep_reboot.c		standard
++bsd/dev/lemonadep_logkeep.c		standard
 +bsd/dev/redwood_adsp.c		standard
 +bsd/dev/redwood_image.c		standard
 +bsd/dev/redwood_virtio_blk.c	standard
@@ -80,7 +137,7 @@ index 4427401..60434e3 100644
  bsd/dev/dev_perfmon.c optional config_perfmon
  
  bsd/libkern/crc32.c			standard
-@@ -155,6 +191,14 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
+@@ -155,6 +193,14 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
  bsd/miscfs/mockfs/mockfs_fsnode.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vfsops.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vnops.c	optional mockfs
@@ -95,7 +152,7 @@ index 4427401..60434e3 100644
  
  bsd/miscfs/routefs/routefs_ops.c	optional routefs
  
-@@ -361,6 +405,7 @@ bsd/security/audit/audit_syscalls.c		standard
+@@ -361,6 +407,7 @@ bsd/security/audit/audit_syscalls.c		standard
  bsd/security/audit/audit_worker.c		optional config_audit
  
  bsd/pthread/pthread_shims.c		standard
@@ -103,7 +160,7 @@ index 4427401..60434e3 100644
  bsd/pthread/pthread_priority.c		standard
  bsd/pthread/pthread_workqueue.c		standard
  
-@@ -383,6 +428,7 @@ bsd/kern/kern_debug.c			standard
+@@ -383,6 +430,7 @@ bsd/kern/kern_debug.c			standard
  bsd/kern/kern_symfile.c			standard
  bsd/kern/kern_descrip.c			standard
  bsd/kern/kern_guarded.c			standard

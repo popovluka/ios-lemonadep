@@ -132,8 +132,8 @@ wlan_trace(void *c, const char *what, uint32_t a, uint32_t b, uint32_t cc, unsig
  * the chip's first DMA. Stream 0x1c00 mask 1 covers 0x1c01 (dt iommu-map: RID 0x100 -> 0x1c01).
  * Addresses for the chip from 0xa0000000 (dt qcom,iommu-dma-addr-pool), handed out upwards.
  */
-#define WSP_STREAM              0x1c00u
-#define WSP_STREAM_MASK         0x0001u
+#define WSP_STREAM              0x1c01u     /* exact: this hypervisor refuses a masked SMR (0x1c00 mask 1 read back 0, 2026-10-30); 0x1c01 mask 0 stuck on 10-24 */
+#define WSP_STREAM_MASK         0x0000u
 #define WSP_ADDRESSES           0xa0000000ull
 #define WSP_ADDRESSES_SIZE      0x10000000ull
 #define WSP_TABLES              48u             /* of 4K: root, level 2, and 2 MB of addresses each other */
@@ -174,6 +174,8 @@ static struct {
 	vm_offset_t tables;
 	uint32_t table_count;
 	uint64_t next;
+	uint32_t rb_smr, rb_s2cr, rb_cbar, rb_sctlr, rb_t0, rb_t1;     /* read back after wsp_on()'s writes */
+	bool taken;
 } wsp;
 
 static uint32_t
@@ -286,7 +288,7 @@ wsp_on(void)
 	uint32_t sees = 1u << 31 | WSP_STREAM_MASK << 16 | WSP_STREAM, cb = wsp_cb();
 	uint64_t root = kvtophys(wsp.tables) | (uint64_t)wsp.context << 48;
 
-	wlan_checkpoint(NULL, "apps SMMU: our context + page tables for stream 0x1c00/1");
+	wlan_checkpoint(NULL, "apps SMMU: our context + page tables for stream 0x1c01");
 	wsp_wr(cb + WSP_CB_SCTLR, 0);
 	wsp_wr(wsp.page + WSP_CBA2R(wsp.context), 1u);
 	wsp_wr(wsp.page + WSP_CBAR(wsp.context), WSP_CBAR_STAGE_1);
@@ -316,13 +318,71 @@ wsp_on(void)
 	uint32_t cbar = wsp_rd(wsp.page + WSP_CBAR(wsp.context)), sctlr = wsp_rd(cb + WSP_CB_SCTLR);
 	uint32_t t0 = wsp_rd(cb + WSP_CB_TTBR0), t1 = wsp_rd(cb + WSP_CB_TTBR0 + 4);
 	printf("SWEET WLAN: smmu wrote: smr %#x s2cr %#x cbar %#x sctlr %#x ttbr0 %#x:%08x\n", smr, s2cr, cbar, sctlr, t1, t0);
+	wsp.rb_smr = smr;
+	wsp.rb_s2cr = s2cr;
+	wsp.rb_cbar = cbar;
+	wsp.rb_sctlr = sctlr;
+	wsp.rb_t0 = t0;
+	wsp.rb_t1 = t1;
 	if (smr != sees || (s2cr & 0x300ffu) != wsp.context || (cbar & 0x30000u) != (WSP_CBAR_STAGE_1 & 0x30000u) ||
 	    !(sctlr & 1u) || t0 != (uint32_t)root || t1 != (uint32_t)(root >> 32)) {
 		printf("SWEET WLAN: SMMU DID NOT TAKE IT: stream 0x1c01 is not through context %u\n", wsp.context);
 		return false;
 	}
+	wsp.taken = true;
 	wsp_faults("on");
 	return true;
+}
+
+/*
+ * Which stream id the PCIe controller puts on the chip's requests: pcie-qcom.c
+ * qcom_pcie_config_sid_1_9_0() (SM8250/SM8350 controllers), from the dt's iommu-map
+ * <0x0 &apps_smmu 0x1c00 1>, <0x100 &apps_smmu 0x1c01 1>: a table in PARF at 0x2000, 256 words
+ * indexed by crc8 (poly 0x07, msb first, init 0) of the BDF big-endian; a word is BDF [31:16],
+ * SID offset from 0x1c00 [15:8], next index [7:0]. Nobody fills it before us under UEFI, and an
+ * empty table leaves the chip's reads on 0x1c00, which matches nothing (unmatched streams fault
+ * here): the SoC died at the chip's first read on 10-24 and on 10-30 with two different SMMU setups.
+ */
+#define WLAN_PARF_BDF_TO_SID    0x2000u
+static uint8_t
+wlan_crc8(const uint8_t *data, unsigned n)
+{
+	uint8_t crc = 0;
+	while (n--) {
+		crc ^= *data++;
+		for (int b = 0; b < 8; b++) {
+			crc = (uint8_t)(crc & 0x80 ? (crc << 1) ^ 0x07 : crc << 1);
+		}
+	}
+	return crc;
+}
+static uint32_t wlan_sid_word, wlan_sid_rb, wlan_sid_cfg, wlan_sid_cfg_now;
+#define WLAN_PARF_BDF_TO_SID_CFG 0x2c00u       /* pcie-qcom.c: bit 0 = BDF_TO_SID_BYPASS */
+static uint8_t wlan_sid_hash;
+static void
+wlan_config_sid(void)
+{
+	const uint16_t bdf = 0x0100;            /* bus 1, device 0, function 0: the QCA6490 */
+	const uint8_t be[2] = { (uint8_t)(bdf >> 8), (uint8_t)bdf };
+
+	(void)wlan_read(NULL, WlanWinParf, WLAN_PARF_BDF_TO_SID_CFG, &wlan_sid_cfg);
+	for (uint32_t i = 0; i < 256; i++) {
+		(void)wlan_write(NULL, WlanWinParf, WLAN_PARF_BDF_TO_SID + 4 * i, 0);
+	}
+	/* entry for BDF 0 (-> 0x1c00, offset 0) is all zero: nothing to write; one entry, no chain */
+	wlan_sid_hash = wlan_crc8(be, 2);
+	wlan_sid_word = (uint32_t)bdf << 16 | (0x1c01u - 0x1c00u) << 8;
+	(void)wlan_write(NULL, WlanWinParf, WLAN_PARF_BDF_TO_SID + 4u * wlan_sid_hash, wlan_sid_word);
+	(void)wlan_read(NULL, WlanWinParf, WLAN_PARF_BDF_TO_SID + 4u * wlan_sid_hash, &wlan_sid_rb);
+	/*
+	 * And use it: the boot chain leaves BDF_TO_SID_BYPASS set (read 0x1 on 2026-10-30), with which
+	 * the table is ignored and every request carries the base stream 0x1c00 -- which matches
+	 * nothing, faults, and took the SoC down at the chip's first read.
+	 */
+	(void)wlan_write(NULL, WlanWinParf, WLAN_PARF_BDF_TO_SID_CFG, wlan_sid_cfg & ~1u);
+	(void)wlan_read(NULL, WlanWinParf, WLAN_PARF_BDF_TO_SID_CFG, &wlan_sid_cfg_now);
+	printf("SWEET WLAN: pcie bdf-to-sid: [%u] = %#x (read %#x): BDF 01:00.0 -> stream 0x1c01\n", wlan_sid_hash,
+	    wlan_sid_word, wlan_sid_rb);
 }
 
 /* io->dma_map: `bytes` at kernel address `data`, page by page, behind the chip's next addresses. */
@@ -334,6 +394,7 @@ wlan_dma_map(void *c, const void *data, uint32_t bytes, uint64_t *dma)
 	uint64_t size = round_page((vm_offset_t)data + bytes) - va, at;
 	int e = 0;
 
+	wlan_config_sid();
 	lck_mtx_lock(&redwood_smmu_lock);
 	if (wsp.tables == 0) {
 		if (kmem_alloc(kernel_map, &wsp.tables, round_page(4096u * WSP_TABLES), KMA_KOBJECT | KMA_ZERO | KMA_DATA,
@@ -369,6 +430,12 @@ wlan_dma_map(void *c, const void *data, uint32_t bytes, uint64_t *dma)
 	printf("SWEET WLAN: dma map %u bytes at pa %#llx.. -> chip %#llx\n", bytes, kvtophys((vm_offset_t)data), *dma);
 	if ((!wsp.found && !wsp_find()) || (!wsp.on && !wsp_on())) {
 		e = 4;
+	} else {
+		uint32_t nodb = 0;
+		if (PE_parse_boot_argn("wlan_nodb", &nodb, sizeof(nodb)) && nodb) {
+			printf("SWEET WLAN: wlan_nodb=1: everything but the BHI doorbell; stopping here\n");
+			e = 9;                  /* the MHI stage stops before any chip DMA (status 15) */
+		}
 	}
 out:
 	lck_mtx_unlock(&redwood_smmu_lock);
@@ -376,6 +443,92 @@ out:
 		printf("SWEET WLAN: dma map failed (%d)\n", e);
 	}
 	return e;
+}
+
+/*
+ * The chip's own registers the way ath11k reaches them (pcic.c): below 0x80000 straight through
+ * BAR0, above through the window register (0x310c: enable | offset[24:19]) and BAR0 + 0x80000.
+ */
+static uint32_t wlan_bar;               /* BAR0's offset in WlanWinMem */
+static uint32_t wlan_window = ~0u;
+static uint32_t
+chip_rd(uint32_t off)
+{
+	uint32_t v = 0;
+	if (off < 0x80000u) {
+		(void)wlan_read(NULL, WlanWinMem, wlan_bar + off, &v);
+		return v;
+	}
+	uint32_t w = off >> 19 & 0x3fu;
+	if (w != wlan_window) {
+		(void)wlan_write(NULL, WlanWinMem, wlan_bar + 0x310cu, 0x40000000u | w);
+		(void)wlan_read(NULL, WlanWinMem, wlan_bar + 0x310cu, &v);
+		wlan_window = w;
+	}
+	(void)wlan_read(NULL, WlanWinMem, wlan_bar + 0x80000u + (off & 0x7ffffu), &v);
+	return v;
+}
+static void
+chip_wr(uint32_t off, uint32_t v)
+{
+	if (off < 0x80000u) {
+		(void)wlan_write(NULL, WlanWinMem, wlan_bar + off, v);
+		return;
+	}
+	(void)chip_rd(off);                     /* selects the window */
+	(void)wlan_write(NULL, WlanWinMem, wlan_bar + 0x80000u + (off & 0x7ffffu), v);
+}
+
+/*
+ * ath11k_pci_sw_reset(ab, power_on = true) (pci.c, Linux 6.6), before the first BHI: without it
+ * the boot ROM took the SBL (BHI status success) and never left PBL (2026-10-30). fix_l1ss is
+ * left out (the link is held to Gen1 and ASPM is not enabled here).
+ */
+static uint32_t sw_ltssm, sw_hotrst, sw_cookie, sw_warm, sw_cause, sw_gr;
+static void
+wlan_sw_reset(void)
+{
+	delay(100000);
+	/* ath11k_pci_enable_ltssm */
+	uint32_t v = chip_rd(0x1e081b0u);                       /* PCIE_PCIE_PARF_LTSSM */
+	for (int i = 0; v != 0x111u && i < 5; i++) {
+		if (v == 0xffffffffu) {
+			delay(5000);
+		}
+		chip_wr(0x1e081b0u, 0x111u);
+		v = chip_rd(0x1e081b0u);
+	}
+	sw_ltssm = v;
+	chip_wr(0x1e402bcu, chip_rd(0x1e402bcu) | 0x10u);       /* GCC_GCC_PCIE_HOT_RST */
+	sw_hotrst = chip_rd(0x1e402bcu);
+	delay(5000);
+	chip_wr(0x1e08228u, 0xffffffffu);                       /* ath11k_pci_clear_all_intrs */
+	chip_wr(0x1f8031cu, chip_rd(0x1f8031cu) & ~0x4u);       /* ath11k_pci_set_wlaon_pwr_ctrl: VDD4BLOW */
+	/* ath11k_mhi_clear_vector */
+	chip_wr(0x360u, 0);
+	chip_wr(0x368u, 0);
+	chip_wr(0x394u, 0);
+	chip_wr(0x39cu, 0);
+	/* ath11k_pci_clear_dbg_registers */
+	sw_cookie = chip_rd(0x1f80500u);                        /* PCIE_Q6_COOKIE_ADDR */
+	delay(10000);
+	chip_wr(0x1f80504u, 0);                                 /* WLAON_WARM_SW_ENTRY: no warm path, no dead loop */
+	delay(10000);
+	sw_warm = chip_rd(0x1f80504u);
+	sw_cause = chip_rd(0x1f8060cu);                         /* WLAON_SOC_RESET_CAUSE_REG, clears on read */
+	/* ath11k_pci_soc_global_reset */
+	v = chip_rd(0x3008u);
+	chip_wr(0x3008u, v | 1u);
+	delay(10000);
+	chip_wr(0x3008u, v & ~1u);
+	delay(10000);
+	sw_gr = chip_rd(0x3008u);
+	wlan_window = ~0u;                                      /* (the reset may have cleared it) */
+	/* ath11k_mhi_set_mhictrl_reset */
+	(void)chip_rd(0x48u);
+	chip_wr(0x38u, 0x2u);
+	printf("SWEET WLAN: sw reset: ltssm %#x hot_rst %#x cookie %#x warm_entry %#x reset_cause %#x global_reset %#x\n",
+	    sw_ltssm, sw_hotrst, sw_cookie, sw_warm, sw_cause, sw_gr);
 }
 
 static uint32_t wlan_stage;
@@ -410,16 +563,61 @@ wlan_stage2(void *arg, wait_result_t wr)
 	const lemonadep_mhi_phase mstop =
 	    stage < LemonadepMhiPhaseDone ? (lemonadep_mhi_phase)stage : LemonadepMhiPhaseNone;
 	lemonadep_mhi_result m;
-	lemonadep_mhi_status ms = lemonadep_wlan_mhi_up(&io, &p, &m, mstop);
+	lemonadep_mhi_status ms;
+	uint32_t noreset = 0;
+	(void)PE_parse_boot_argn("wlan_noreset", &noreset, sizeof(noreset));
+	if (!noreset && (mstop == LemonadepMhiPhaseNone || mstop > LemonadepMhiPhaseRegs)) {
+		ms = lemonadep_wlan_mhi_up(&io, &p, &m, LemonadepMhiPhaseRegs);
+		if (ms == LemonadepMhiOk && m.bar_pa) {
+			wlan_bar = m.bar_pa - LEMONADEP_PCIE0_MEM_PA;
+			wlan_sw_reset();
+		}
+	}
+	ms = lemonadep_wlan_mhi_up(&io, &p, &m, mstop);
 	printf("SWEET WLAN: mhi status=%d phase=%d\n", ms, m.phase);
 	wlan_note(3, "mhi st=%d ph=%d bar %#x", ms, m.phase, m.bar_pa);
 	wlan_note(4, "socver %#x ee %u bhi %#x", m.soc_hw_version, m.ee, m.bhi_status0);
 	wlan_note(5, "smmu scr0 %#x id0 %#x", m.scr0, m.id0);
 	wlan_note(6, "smr[%d] %#x s2cr %#x", m.smr_index, m.smr, m.s2cr);
 	if (m.phase >= LemonadepMhiPhaseBhi) {
-		wlan_note(5, "smmu m%u cb%u %s dma %#llx", wsp.match, wsp.context, wsp.on ? "on" : "off", m.fw_dma);
-		wlan_note(6, "bhi %#x %ums err %#x", m.bhi_status, m.bhi_ms, m.bhi_errcode);
-		wlan_note(7, "ready st %#x ee %u %ums", m.ready_status, m.ready_ee, m.ready_ms);
+		wlan_note(5, "m%u cb%u %s sid[%u] %#x cfg %#x>%#x", wsp.match, wsp.context, wsp.taken ? "OK" : "NO",
+		    wlan_sid_hash, wlan_sid_rb, wlan_sid_cfg, wlan_sid_cfg_now);
+		if (wsp.taken && m.phase > LemonadepMhiPhaseBhi) {
+			wlan_note(6, "bhi %#x %ums err %#x", m.bhi_status, m.bhi_ms, m.bhi_errcode);
+			wlan_note(7, "ready st %#x ee %u %ums", m.ready_status, m.ready_ee, m.ready_ms);
+		} else if (wsp.taken) {
+		} else {
+			wlan_note(6, "cbar %#x sctlr %#x", wsp.rb_cbar, wsp.rb_sctlr);
+			wlan_note(7, "ttbr0 %#x:%08x want %#llx", wsp.rb_t1, wsp.rb_t0, kvtophys(wsp.tables) |
+			    (uint64_t)wsp.context << 48);
+		}
+	}
+	if (ms == LemonadepMhiReadyTimeout && m.bar_pa) {
+		/*
+		 * After a good BHI the chip never said READY. Is the SBL running with the chip asleep
+		 * (registers read as 0 until woken: ath11k pci.c ath11k_pci_force_wake(), PCIE_SOC_WAKE at
+		 * BAR0 + 0x3004 = 1), or did the boot ROM never leave? Read, wake, read again.
+		 */
+		const uint32_t bar = m.bar_pa - LEMONADEP_PCIE0_MEM_PA, bhi = bar + m.bhioff;
+		uint32_t v0, e0, s0, c0, v1, e1, s1, c1;
+		(void)wlan_read(NULL, WlanWinMem, bar + MHI_VER, &v0);
+		(void)wlan_read(NULL, WlanWinMem, bhi + BHI_EXECENV, &e0);
+		(void)wlan_read(NULL, WlanWinMem, bar + MHI_STATUS, &s0);
+		(void)wlan_read(NULL, WlanWinMem, bar + MHI_CTRL, &c0);
+		(void)wlan_write(NULL, WlanWinMem, bar + 0x3004u, 1);
+		delay(50000);
+		(void)wlan_read(NULL, WlanWinMem, bar + MHI_VER, &v1);
+		(void)wlan_read(NULL, WlanWinMem, bhi + BHI_EXECENV, &e1);
+		(void)wlan_read(NULL, WlanWinMem, bar + MHI_STATUS, &s1);
+		(void)wlan_read(NULL, WlanWinMem, bar + MHI_CTRL, &c1);
+		printf("SWEET WLAN: after ready timeout: ver %#x ee %u status %#x ctrl %#x; woken: ver %#x ee %u status %#x "
+		    "ctrl %#x\n", v0, e0, s0, c0, v1, e1, s1, c1);
+		wlan_note(6, "e%u s%x c%x lt%x gr%x w%x", e0, s0, c0, sw_ltssm, sw_gr, sw_warm);
+		wlan_note(7, "wake v%x e%u s%x c%x f%x", v1, e1, s1, c1, wsp.on ? wsp_rd(wsp_cb() + WSP_CB_FSR) : 0);
+	}
+	if (wsp.taken && m.phase <= LemonadepMhiPhaseBhi) {
+		wlan_note(6, "no doorbell; sid cfg %#x", wlan_sid_cfg);
+		wlan_note(7, "smmu fsr %#x sgfsr %#x", wsp_rd(wsp_cb() + WSP_CB_FSR), wsp_rd(WSP_SGFSR));
 	}
 	wsp_faults("after");
 	printf("SWEET WLAN: bar0 pa=%#x size=%#x rc_cmd=%#x ep_cmd=%#x\n", m.bar_pa, m.bar_size, m.rc_cmd, m.ep_cmd);

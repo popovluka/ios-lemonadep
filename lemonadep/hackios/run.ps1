@@ -4,7 +4,10 @@ param([string]$Dir = "$PSScriptRoot\..\out\hackios")
 # a current fastboot: Touch Portal's 28.0.3 comes first on PATH here and loses the loader once a run starts
 $env:PATH = "C:\platform-tools;$env:PATH"
 
-fastboot boot "$Dir\lemonadep-boot.img"
+# already in the loader (left there by run-auto.ps1): no UEFI boot needed
+if (-not ((cmd /c "fastboot getvar product 2>&1") -match 'product: xnuloader')) {
+    fastboot boot "$Dir\lemonadep-boot.img"
+}
 # the XNU loader enumerates as fastboot with serial XNULOADER, product xnuloader, ~10 s later
 $t = 0
 while ($t -lt 60) {
