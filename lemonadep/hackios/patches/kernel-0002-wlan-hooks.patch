@@ -145,10 +145,35 @@ index f95ebe6..d9b9567 100644
  static void
  loader_return_timer_init(void)
 diff --git a/xnuloader/loader.c b/xnuloader/loader.c
-index 418ccc9..d0e553a 100644
+index 418ccc9..e573853 100644
 --- a/xnuloader/loader.c
 +++ b/xnuloader/loader.c
-@@ -687,6 +687,28 @@ static const struct platform *const platforms[] = {
+@@ -571,6 +571,13 @@ dt_prop_padded(struct dt_writer *w, const char *name, const char *value, uint32_
+  * what the framebuffer is: sRGB.
+  */
+ static int gamut_p3;    /* boot-arg gamut=p3 (a test): the iPhone's own "P3" left in place */
++/*
++ * Boot-arg artsub=N: "artwork-device-subtype" N instead of the iPhone X's (MobileGestalt's
++ * ArtworkDeviceSubType, which the Dynamic Island tweaks change: 2796 is the iPhone 14 Pro Max's; with
++ * fbwidth=1290 fbheight=2796 the screen is that phone's too). 0: the iPhone's own.
++ */
++static uint32_t art_subtype;
++static uint32_t home_button_type = 2;
+ 
+ static void
+ dt_identity(struct dt_writer *w, const struct identity_prop *props, uint32_t count, const unsigned char *data)
+@@ -580,6 +587,10 @@ dt_identity(struct dt_writer *w, const struct identity_prop *props, uint32_t cou
+ 			dt_prop(w, props[i].name, "sRGB", 5);
+ 			continue;
+ 		}
++		if (str_eq(props[i].name, "artwork-device-subtype") && art_subtype != 0 && props[i].length == 4) {
++			dt_prop(w, props[i].name, &art_subtype, 4);
++			continue;
++		}
+ 		dt_prop(w, props[i].name, data + props[i].offset, props[i].length);
+ 	}
+ }
+@@ -687,6 +698,28 @@ static const struct platform *const platforms[] = {
  
  /* ------------------------------------------------------------------------ */
  
@@ -177,7 +202,7 @@ index 418ccc9..d0e553a 100644
  static void
  reboot(void)
  {
-@@ -1616,6 +1638,14 @@ ufs_survey(void)
+@@ -1616,6 +1649,14 @@ ufs_survey(void)
  #define BLOCK_DARWIN_LAST  30617594ULL
  #define BLOCK_DARWIN_TYPE  { 0x7c3457ef, 0x0000, 0x11aa, { 0xaa, 0x11, 0x00, 0x30, 0x65, 0x43, 0xec, 0xac } }
  #define BLOCK_DARWIN_UNIQ  { 0xfd6854ad, 0x24aa, 0x4fc3, { 0x94, 0xfe, 0x29, 0x01, 0x16, 0x85, 0x8d, 0x68 } }
@@ -192,7 +217,7 @@ index 418ccc9..d0e553a 100644
  
  /*
   * The partitions first, then the logical units they are on (BLOCK_PART_UNIT, named unit0, unit1,
-@@ -1956,9 +1986,31 @@ static int
+@@ -1956,9 +1997,31 @@ static int
  block_is_darwin(const efi_partition_info *info, const efi_block_io *bio, const struct loader_block_part *bp)
  {
  	static const efi_guid type = BLOCK_DARWIN_TYPE, uniq = BLOCK_DARWIN_UNIQ;
@@ -226,7 +251,7 @@ index 418ccc9..d0e553a 100644
  	for (unsigned i = 0; i < sizeof(name); i++) {
  		if (bp->name[i] != name[i]) {
  			return 0;               /* another partition: nothing to say about it */
-@@ -1983,6 +2035,7 @@ block_is_darwin(const efi_partition_info *info, const efi_block_io *bio, const s
+@@ -1983,6 +2046,7 @@ block_is_darwin(const efi_partition_info *info, const efi_block_io *bio, const s
  		print("ufs: darwin: no write will be served: %s\n", why);
  		return 0;
  	}
@@ -234,7 +259,7 @@ index 418ccc9..d0e553a 100644
  	print("ufs: darwin (LBA %d..%d of unit 0): its blocks from %d on may be written this run\n",
  	    info->start_lba, info->end_lba, BLOCK_WRITE_FIRST);
  	return 1;
-@@ -2107,7 +2160,7 @@ block_start(void)
+@@ -2107,7 +2171,7 @@ block_start(void)
  	block_writes = block_writes_refused = block_write_bytes = 0;
  	if (block_write_part >= 0) {
  		block_shared.write_part_plus_one = (uint32_t)block_write_part + 1;
@@ -243,7 +268,7 @@ index 418ccc9..d0e553a 100644
  	}
  	block_shared.magic = BLOCK_MAGIC;
  	block_shared.version = BLOCK_VERSION;
-@@ -2234,7 +2287,7 @@ block_poll(void)
+@@ -2234,7 +2298,7 @@ block_poll(void)
  			s = 0x800000000000000FULL;      /* EFI_ACCESS_DENIED */
  			bytes = 0;
  		} else if (op == BLOCK_OP_WRITE) {
@@ -252,7 +277,7 @@ index 418ccc9..d0e553a 100644
  				/* not darwin, or not past what the build writes from the computer: never */
  				if (block_writes_refused++ < 8) {
  					print("ufs: a write of %d blocks from %d of %s: REFUSED\n", count, lba,
-@@ -2625,6 +2678,7 @@ struct payload_info {
+@@ -2625,6 +2689,7 @@ struct payload_info {
  	uint64_t checkpoint;
  	uint64_t forced_base;
  	uint64_t resident_rd;           /* size of a root image the host put at the resident address */
@@ -260,7 +285,7 @@ index 418ccc9..d0e553a 100644
  	int usb_mode;
  };
  
-@@ -2676,6 +2730,8 @@ parse_payload(struct payload_info *pi, int verbose)
+@@ -2676,6 +2741,8 @@ parse_payload(struct payload_info *pi, int verbose)
  			pi->resident_rd = parse_number(text, 16); /* e.g. loaded there by QEMU; see RESIDENT_RD_OFFSET */
  		} else if (str_eq(e->name, "checkpoint")) {
  			pi->checkpoint = parse_number(text, 10);  /* where the kernel should stop and come back */
@@ -269,7 +294,7 @@ index 418ccc9..d0e553a 100644
  		} else if (str_eq(e->name, "usb")) {
  			pi->usb_mode = 1;                         /* stay in the loader and take commands over USB */
  		}
-@@ -2741,6 +2797,93 @@ static struct {
+@@ -2741,6 +2808,93 @@ static struct {
  } SCREEN;
  static uint64_t win_base, win_size; /* XNU's physical memory window, claimed once */
  static uint64_t resident_rd_size;   /* root image kept at win_base + RESIDENT_RD_OFFSET, 0 if none */
@@ -363,7 +388,7 @@ index 418ccc9..d0e553a 100644
  static char last_result[64] = "idle";
  
  static void
-@@ -2907,6 +3050,10 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
+@@ -2907,6 +3061,10 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
  		return 0;
  	}
  
@@ -374,7 +399,42 @@ index 418ccc9..d0e553a 100644
  	uint64_t phys_base = win_base;
  	uint64_t slide = phys_base - KERNEL_VIRT_BASE; /* pa = va + slide */
  	uint64_t kern_lo = vm_lo + slide, kern_hi = (vm_hi + slide + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
-@@ -3864,6 +4011,21 @@ fb_command(char *cmd)
+@@ -2980,11 +3138,19 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
+ 	int camera_requested = 0;
+ 	/* (the loader stays for run after run: what the last run's arguments said must not hold for this one) */
+ 	gamut_p3 = 0;
++	art_subtype = 0;
++	home_button_type = 2;
+ 	/* a run that does not ask for writes does not get them, whatever an earlier run of this
+ 	 * loader asked for (the loader stays resident across runs) */
+ 	block_write_requested = 0;
+ 	block_write_part = -1;
+ 	for (const char *c = pi.cmdline; *c; c++) {
++		if (starts_with(c, "homebtn=") && (c == pi.cmdline || c[-1] == ' ')) {
++			home_button_type = (uint32_t)parse_number(c + 8, 10);
++		}
++		if (starts_with(c, "artsub=") && (c == pi.cmdline || c[-1] == ' ')) {
++			art_subtype = (uint32_t)parse_number(c + 7, 10);
++		}
+ 		if (starts_with(c, "bootcpu=") && (c == pi.cmdline || c[-1] == ' ') && c[8] >= '0' && c[8] <= '7') {
+ 			kernel_mpidr = (uint64_t)(c[8] - '0') << PLAT->core_shift;
+ 		}
+@@ -3268,6 +3434,14 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
+ 	/* the product: screen class, artwork scale, name ... as on the real phone */
+ 	dt_begin(&w, "product");
+ 	dt_identity(&w, identity_product, sizeof(identity_product) / sizeof(identity_product[0]), identity_product_data);
++	/*
++	 * With another artwork subtype (artsub=, the Dynamic Island) MobileGestalt no longer knows from it that
++	 * there is no home button, and asks this property, which the iPhone X's tree has not got: 2, gestures
++	 * and a home indicator (homebtn=N to try another value).
++	 */
++	if (art_subtype != 0) {
++		dt_prop_u32(&w, "home-button-type", home_button_type);
++	}
+ 	/*
+ 	 * and its haptics: "closed-loop" (MobileGestalt's DeviceSupportsClosedLoopHaptics) makes iOS play
+ 	 * its vibrations and feedbacks as waveforms on the "Actuator" audio device (the audio plug-in
+@@ -3864,6 +4038,21 @@ fb_command(char *cmd)
  			staged_data = (const char *)(uintptr_t)0xF3FE0000ULL;
  			staged_len = 5 * 0x2000;      /* 5 slots of 8 KB */
  			fb_reply("OKAY", "");
@@ -396,7 +456,7 @@ index 418ccc9..d0e553a 100644
  		} else if (starts_with(cmd, "oem readpart ")) {
  			/* stage one GPT partition, read only; "fastboot get_staged FILE" fetches it */
  			fb_reply(read_partition(cmd + 13) ? "OKAY" : "FAIL", "");
-@@ -4107,6 +4269,18 @@ efi_main(efi_handle image, efi_system_table *st)
+@@ -4107,6 +4296,18 @@ efi_main(efi_handle image, efi_system_table *st)
  	/* One-shot mode: run the kernel that came with the image, then reset. */
  	if (have_payload) {
  		run_kernel(0, 0);
