@@ -14,6 +14,7 @@ found is in [HANDOFF-log.md](HANDOFF-log.md); this page is the state and the rec
 | Wi-Fi (QCA6490 / ath11k over PCIe) | joins `fw-wlan/network` at boot; configd's own Wi-Fi service and DHCP; status bar/Settings show it; join from Settings works |
 | Safari (pages, video) | needs apsd left out (see below) |
 | Location (Wi-Fi positioning) | locationd added + Location Services forced on |
+| Bigger-phone layout (414x896 pt) | boot-args `fbwidth=1242 fbheight=2688` (iPhone XS Max size at 3x; MiniIOMobileFramebuffer scales to the 1080x2412 panel). User: "looks better". Old 375x812 image kept as out/hackios/lemonadep-standalone-375pt.img |
 
 | Not working | Cause (as far as known) |
 |---|---|

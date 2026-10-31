@@ -27,6 +27,7 @@ OnePlus 9 Pro (`lemonadep`, Qualcomm SM8350 / Snapdragon 888) port in two genera
 | Wi-Fi | QCA6490 with Linux's ath11k over PCIe; join at boot or from Settings, status bar, DHCP by iOS itself |
 | Safari | pages and video |
 | Location | Wi-Fi positioning (Weather knows where you are) |
+| Big-phone layout | iOS lays out for an iPhone XS Max screen (414 x 896 points), scaled to the panel |
 | Your data | `/private/var` saved to flash and restored at boot (icons, settings, dark mode survive) |
 
 | Not working yet | Why (as far as known) |

@@ -1,5 +1,5 @@
 diff --git a/common/devices/lemonadep.conf b/common/devices/lemonadep.conf
-index a9e8549..cd827ba 100644
+index a9e8549..0edd905 100644
 --- a/common/devices/lemonadep.conf
 +++ b/common/devices/lemonadep.conf
 @@ -8,8 +8,8 @@ SOC="Qualcomm Snapdragon 888 (SM8350)"
@@ -18,7 +18,7 @@ index a9e8549..cd827ba 100644
  # enable pins (bsd/dev/redwood_synaptics.c). Since then: gpu=1 (Adreno 660), battery=1 (BQ28Z610 gauge),
  # backlight=1 (DCS brightness), adsp=1 (the audio DSP, which charges); docs/lemonadep.md. No Wi-Fi or sound yet.
 -BOOTARGS="cpus=8 bootcpu=7 cpufreq=1 buttons=1 touchscreen=1 touch_power=1 gpu=1 battery=1 backlight=1 adsp=1"  # gpu=1: needs fw-gpu/ (from vendor_a); battery=1: the BQ28Z610 gauge; backlight=1: brightness by DCS 0x51; adsp=1: the audio DSP, which charges (needs fw-audio/ from modem_a)
-+BOOTARGS="cpus=8 bootcpu=7 cpufreq=1 buttons=1 touchscreen=1 touch_power=1 gpu=1 battery=1 backlight=1 adsp=1 sweetwlan=17 wlan_msi=1 wlan_ath=1 wifi_join=1 wifi=1"  # Wi-Fi: QCA6490 + ath11k, joins fw/network (lemonadep_wlan.c); gpu=1: needs fw-gpu/ (from vendor_a); battery=1: the BQ28Z610 gauge; backlight=1: brightness by DCS 0x51; adsp=1: the audio DSP, which charges (needs fw-audio/ from modem_a)
++BOOTARGS="cpus=8 bootcpu=7 cpufreq=1 buttons=1 touchscreen=1 touch_power=1 gpu=1 battery=1 backlight=1 adsp=1 sweetwlan=17 wlan_msi=1 wlan_ath=1 wifi_join=1 wifi=1 fbwidth=1242 fbheight=2688"  # Wi-Fi: QCA6490 + ath11k, joins fw/network (lemonadep_wlan.c); gpu=1: needs fw-gpu/ (from vendor_a); battery=1: the BQ28Z610 gauge; backlight=1: brightness by DCS 0x51; adsp=1: the audio DSP, which charges (needs fw-audio/ from modem_a)
  DEFAULT_SECS=900
 -USERLAND_VARS="GL=1 ADSP=1"     # extra variables for userland/build.sh: GL=1, Mesa for the Adreno 660 (gpu=1); ADSP=1, the audio DSP image in the small image (adsp=1)
 +USERLAND_VARS="GL=1 ADSP=1 DENY_EXTRA=com.apple.apsd ALLOW=locationd LOCATION_ON=1"     # extra variables for userland/build.sh: GL=1, Mesa for the Adreno 660 (gpu=1); ADSP=1, the audio DSP image in the small image (adsp=1); DENY_EXTRA=com.apple.apsd: without it Safari's History service hangs in [APSConnection setDelegate:] and Safari freezes after every page
