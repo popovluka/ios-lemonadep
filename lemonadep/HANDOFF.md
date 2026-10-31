@@ -15,6 +15,7 @@ found is in [HANDOFF-log.md](HANDOFF-log.md); this page is the state and the rec
 | Safari (pages, video) | needs apsd left out (see below) |
 | Location (Wi-Fi positioning) | locationd added + Location Services forced on |
 | Bigger-phone layout (414x896 pt) | boot-args `fbwidth=1242 fbheight=2688` (iPhone XS Max size at 3x; MiniIOMobileFramebuffer scales to the 1080x2412 panel). User: "looks better". Old 375x812 image kept as out/hackios/lemonadep-standalone-375pt.img |
+| Dynamic Island: NOT working | `fbwidth=1290 fbheight=2796` (14 Pro Max size, 430x932 pt) moves the status bar into the island layout, but no pill and no Live Activities (timer) appear: the island needs more than the screen size (likely MobileGestalt's ArtworkDeviceSubType 2796 / island capability, plus SystemAperture rendering). Image kept as lemonadep-standalone-430pt.img |
 
 | Not working | Cause (as far as known) |
 |---|---|
